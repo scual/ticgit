@@ -6,6 +6,7 @@
 use std::cmp::Ordering;
 
 use crate::ticket::{Ticket, TicketState, TicketStatus};
+use uuid::Uuid;
 
 /// All knobs `ti list` understands. Build one by parsing CLI flags and
 /// pass it through [`apply`].
@@ -20,6 +21,7 @@ pub struct Filter {
     pub only_tagged: bool,
     pub search: Option<SearchFilter>,
     pub order: Option<SortOrder>,
+    pub depends: Option<Uuid>,
     /// When true, exclude tickets that have a parent (i.e. sub-issues).
     pub hide_subissues: bool,
 }
@@ -185,6 +187,11 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
             }
             if let Some(search) = &filter.search {
                 if !search.matches(t) {
+                    return false;
+                }
+            }
+            if let Some(ticket_id) = filter.depends {
+                if !t.depends_on.contains(&ticket_id) {
                     return false;
                 }
             }
@@ -528,6 +535,37 @@ mod tests {
         let out = apply(input, &f);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, "tagged");
+    }
+
+    #[test]
+    fn filter_by_dependency() {
+        let dependency_id = Uuid::new_v4();
+        let mut dependent = t(
+            "dependent",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        dependent.depends_on.insert(dependency_id);
+        let unrelated = t(
+            "unrelated",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        );
+        let f = Filter {
+            depends: Some(dependency_id),
+            ..Default::default()
+        };
+
+        let out = apply(vec![dependent, unrelated], &f);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "dependent");
     }
 
     #[test]

@@ -116,6 +116,9 @@ pub fn describe_view(v: &SavedView) -> String {
     if let Some(o) = &v.order {
         parts.push(format!("--order {o}"));
     }
+    if let Some(d) = &v.depends {
+        parts.push(format!("--depends {d}"));
+    }
     if v.subissues {
         parts.push("--subissues".to_string());
     }

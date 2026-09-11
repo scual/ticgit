@@ -1,10 +1,9 @@
-use anyhow::Result;
-use clap::Parser;
-use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketLifecycle, TicketStatus};
-
 use crate::commands::{open_store, SessionGitDir};
 use crate::render;
 use crate::session_state::{SavedView, State};
+use anyhow::Result;
+use clap::Parser;
+use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketLifecycle, TicketStatus};
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -55,6 +54,10 @@ pub struct Args {
     #[arg(long = "subissues")]
     pub subissues: bool,
 
+    /// Show tickets that depend on this ticket.
+    #[arg(long = "depends")]
+    pub depends: Option<String>,
+
     /// Maximum number of tickets to show. Defaults to available terminal rows.
     #[arg(short = 'n', long = "limit", default_value_t = 0)]
     pub limit: usize,
@@ -83,6 +86,7 @@ impl Default for Args {
             search: None,
             order: None,
             subissues: false,
+            depends: None,
             limit: 0,
             json: false,
             markdown: false,
@@ -115,6 +119,7 @@ pub fn run(args: Args) -> Result<()> {
             search: saved.search.clone(),
             order: saved.order.clone(),
             subissues: saved.subissues,
+            depends: saved.depends.clone(),
             limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
@@ -151,6 +156,11 @@ pub fn run(args: Args) -> Result<()> {
         "any" | "either" => false,
         other => anyhow::bail!("unknown tag mode `{other}` (expected `all` or `any`)"),
     };
+    let depends = args
+        .depends
+        .as_deref()
+        .map(|reference| store.resolve_id(reference))
+        .transpose()?;
 
     let filter = Filter {
         status,
@@ -162,6 +172,7 @@ pub fn run(args: Args) -> Result<()> {
         only_tagged: args.only_tagged,
         search,
         order,
+        depends,
         hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
@@ -193,6 +204,7 @@ pub fn run(args: Args) -> Result<()> {
             only_tagged: args.only_tagged,
             search: args.search.clone(),
             order: args.order.clone(),
+            depends: args.depends.clone(),
             all: args.all,
             subissues: args.subissues,
             limit: args.limit,
