@@ -13,7 +13,7 @@ Also ships with `ti tui` for a cool TUI version.
 
 <img width="2590" height="1730" alt="CleanShot 2026-05-13 at 09 45 43@2x" src="https://github.com/user-attachments/assets/391b0f79-c487-4146-b7b8-a39fad2cde93" />
 
-Everything has `--json` output for scripting and `--markdown` output for agentic use. You can also train your agent to use it by asking it to run `ti agent`. 
+Everything has `--json` output for scripting and `--markdown` output for agentic use. You can also train your agent to use it by asking it to run `ti agent`.
 
 You can also do specs and writeups and lots of fun stuff.
 
@@ -261,3 +261,9 @@ cargo publish -p ticgit
 
 The CLI crate depends on `ticgit-lib` by both local `path` and published
 `version`, so publish `ticgit-lib` first.
+
+To install locally, after build, from project folder:
+
+```sh
+cargo install --path crates/ticgit --force --locked
+```
