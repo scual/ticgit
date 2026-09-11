@@ -119,6 +119,9 @@ pub fn describe_view(v: &SavedView) -> String {
     if let Some(d) = &v.depends {
         parts.push(format!("--depends {d}"));
     }
+    if let Some(d) = &v.blocked_by {
+        parts.push(format!("--blocked-by {d}"));
+    }
     if v.subissues {
         parts.push("--subissues".to_string());
     }

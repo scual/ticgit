@@ -69,6 +69,8 @@ pub struct SavedView {
     pub order: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depends: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub all: bool,
     #[serde(default, skip_serializing_if = "is_false")]

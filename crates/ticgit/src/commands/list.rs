@@ -58,6 +58,10 @@ pub struct Args {
     #[arg(long = "depends")]
     pub depends: Option<String>,
 
+    /// Show tickets that this ticket depends on.
+    #[arg(long = "blocked-by")]
+    pub blocked_by: Option<String>,
+
     /// Maximum number of tickets to show. Defaults to available terminal rows.
     #[arg(short = 'n', long = "limit", default_value_t = 0)]
     pub limit: usize,
@@ -87,6 +91,7 @@ impl Default for Args {
             order: None,
             subissues: false,
             depends: None,
+            blocked_by: None,
             limit: 0,
             json: false,
             markdown: false,
@@ -120,6 +125,7 @@ pub fn run(args: Args) -> Result<()> {
             order: saved.order.clone(),
             subissues: saved.subissues,
             depends: saved.depends.clone(),
+            blocked_by: saved.blocked_by.clone(),
             limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
@@ -161,6 +167,11 @@ pub fn run(args: Args) -> Result<()> {
         .as_deref()
         .map(|reference| store.resolve_id(reference))
         .transpose()?;
+    let blocked_by = args
+        .blocked_by
+        .as_deref()
+        .map(|reference| store.resolve_id(reference))
+        .transpose()?;
 
     let filter = Filter {
         status,
@@ -173,6 +184,7 @@ pub fn run(args: Args) -> Result<()> {
         search,
         order,
         depends,
+        blocked_by,
         hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
@@ -205,6 +217,7 @@ pub fn run(args: Args) -> Result<()> {
             search: args.search.clone(),
             order: args.order.clone(),
             depends: args.depends.clone(),
+            blocked_by: args.blocked_by.clone(),
             all: args.all,
             subissues: args.subissues,
             limit: args.limit,

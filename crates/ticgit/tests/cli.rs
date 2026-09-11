@@ -1320,6 +1320,32 @@ fn list_depends_filters_dependent_tickets() {
 }
 
 #[test]
+fn list_blocked_by_filters_blocked_tickets() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    let unrelated = create_ticket(&repo, "unrelated");
+
+    repo.ti()
+        .args(["blocked-by", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--blocked-by", &dependent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], blocker);
+    assert_ne!(tickets[0]["id"], unrelated);
+}
+
+#[test]
 fn writeup_workflow_creates_versions_links_and_promotes() {
     let repo = TestRepo::new();
     let output = repo

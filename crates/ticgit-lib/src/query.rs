@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use crate::ticket::{Ticket, TicketState, TicketStatus};
+use crate::ticket::{self, Ticket, TicketState, TicketStatus};
 use uuid::Uuid;
 
 /// All knobs `ti list` understands. Build one by parsing CLI flags and
@@ -22,6 +22,7 @@ pub struct Filter {
     pub search: Option<SearchFilter>,
     pub order: Option<SortOrder>,
     pub depends: Option<Uuid>,
+    pub blocked_by: Option<Uuid>,
     /// When true, exclude tickets that have a parent (i.e. sub-issues).
     pub hide_subissues: bool,
 }
@@ -192,6 +193,11 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
             }
             if let Some(ticket_id) = filter.depends {
                 if !t.depends_on.contains(&ticket_id) {
+                    return false;
+                }
+            }
+            if let Some(ticket_id) = filter.blocked_by {
+                if !t.blocks.contains(&ticket_id) {
                     return false;
                 }
             }
@@ -566,6 +572,37 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, "dependent");
+    }
+
+    #[test]
+    fn filter_by_blocked_by() {
+        let blocked_by_id = Uuid::new_v4();
+        let mut blocked = t(
+            "blocked",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        blocked.blocks.insert(blocked_by_id);
+        let unrelated = t(
+            "unrelated",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        );
+        let f = Filter {
+            blocked_by: Some(blocked_by_id),
+            ..Default::default()
+        };
+
+        let out = apply(vec![blocked, unrelated], &f);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "blocked");
     }
 
     #[test]
