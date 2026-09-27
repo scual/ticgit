@@ -55,12 +55,12 @@ pub struct Args {
     pub subissues: bool,
 
     /// Show tickets that depend on this ticket.
-    #[arg(long = "depends")]
-    pub depends: Option<String>,
+    #[arg(long = "depends-on")]
+    pub depends_on: Option<String>,
 
-    /// Show tickets that this ticket depends on.
-    #[arg(long = "blocked-by")]
-    pub blocked_by: Option<String>,
+    /// Show tickets that block this ticket.
+    #[arg(long = "blocks")]
+    pub blocks: Option<String>,
 
     /// Maximum number of tickets to show. Defaults to available terminal rows.
     #[arg(short = 'n', long = "limit", default_value_t = 0)]
@@ -90,8 +90,8 @@ impl Default for Args {
             search: None,
             order: None,
             subissues: false,
-            depends: None,
-            blocked_by: None,
+            depends_on: None,
+            blocks: None,
             limit: 0,
             json: false,
             markdown: false,
@@ -124,8 +124,8 @@ pub fn run(args: Args) -> Result<()> {
             search: saved.search.clone(),
             order: saved.order.clone(),
             subissues: saved.subissues,
-            depends: saved.depends.clone(),
-            blocked_by: saved.blocked_by.clone(),
+            depends_on: saved.depends_on.clone(),
+            blocks: saved.blocks.clone(),
             limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
@@ -162,13 +162,13 @@ pub fn run(args: Args) -> Result<()> {
         "any" | "either" => false,
         other => anyhow::bail!("unknown tag mode `{other}` (expected `all` or `any`)"),
     };
-    let depends = args
-        .depends
+    let depends_on = args
+        .depends_on
         .as_deref()
         .map(|reference| store.resolve_id(reference))
         .transpose()?;
-    let blocked_by = args
-        .blocked_by
+    let blocks = args
+        .blocks
         .as_deref()
         .map(|reference| store.resolve_id(reference))
         .transpose()?;
@@ -183,8 +183,8 @@ pub fn run(args: Args) -> Result<()> {
         only_tagged: args.only_tagged,
         search,
         order,
-        depends,
-        blocked_by,
+        depends_on,
+        blocks,
         hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
@@ -216,8 +216,8 @@ pub fn run(args: Args) -> Result<()> {
             only_tagged: args.only_tagged,
             search: args.search.clone(),
             order: args.order.clone(),
-            depends: args.depends.clone(),
-            blocked_by: args.blocked_by.clone(),
+            depends_on: depends_on.map(|id| id.to_string()),
+            blocks: blocks.map(|id| id.to_string()),
             all: args.all,
             subissues: args.subissues,
             limit: args.limit,

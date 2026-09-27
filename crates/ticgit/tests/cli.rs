@@ -1294,7 +1294,7 @@ fn list_filters_and_saved_views_work() {
 }
 
 #[test]
-fn list_depends_filters_dependent_tickets() {
+fn list_depends_on_filters_dependent_tickets() {
     let repo = TestRepo::new();
     let blocker = create_ticket(&repo, "blocker");
     let dependent = create_ticket(&repo, "dependent");
@@ -1307,7 +1307,7 @@ fn list_depends_filters_dependent_tickets() {
 
     let output = repo
         .ti()
-        .args(["list", "--all", "--depends", &blocker, "--json"])
+        .args(["list", "--all", "--depends-on", &blocker, "--json"])
         .assert()
         .success()
         .get_output()
@@ -1320,20 +1320,20 @@ fn list_depends_filters_dependent_tickets() {
 }
 
 #[test]
-fn list_blocked_by_filters_blocked_tickets() {
+fn list_blocks_filters_blocker_tickets() {
     let repo = TestRepo::new();
     let blocker = create_ticket(&repo, "blocker");
     let dependent = create_ticket(&repo, "dependent");
     let unrelated = create_ticket(&repo, "unrelated");
 
     repo.ti()
-        .args(["blocked-by", "--ticket", &dependent, &blocker])
+        .args(["depends", "--ticket", &dependent, &blocker])
         .assert()
         .success();
 
     let output = repo
         .ti()
-        .args(["list", "--all", "--blocked-by", &dependent, "--json"])
+        .args(["list", "--all", "--blocks", &dependent, "--json"])
         .assert()
         .success()
         .get_output()
@@ -1343,6 +1343,224 @@ fn list_blocked_by_filters_blocked_tickets() {
     assert_eq!(tickets.len(), 1);
     assert_eq!(tickets[0]["id"], blocker);
     assert_ne!(tickets[0]["id"], unrelated);
+}
+
+#[test]
+fn list_relationship_filters_return_nothing_for_reversed_direction() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--depends-on", &dependent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert!(tickets.is_empty());
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--blocks", &blocker, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert!(tickets.is_empty());
+}
+
+#[test]
+fn list_depends_on_includes_subissue_dependent_without_subissues_flag() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let blocker = create_ticket(&repo, "blocker");
+    let sub_dependent = repo
+        .ti()
+        .args([
+            "new",
+            "--title",
+            "sub dependent",
+            "--subissue",
+            &parent,
+            "--id-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sub_dependent = String::from_utf8(sub_dependent).unwrap().trim().to_string();
+
+    repo.ti()
+        .args(["depends", "--ticket", &sub_dependent, &blocker])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--depends-on", &blocker, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], sub_dependent);
+}
+
+#[test]
+fn list_blocks_includes_subissue_blocker_without_subissues_flag() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let dependent = create_ticket(&repo, "dependent");
+    let sub_blocker = repo
+        .ti()
+        .args([
+            "new",
+            "--title",
+            "sub blocker",
+            "--subissue",
+            &parent,
+            "--id-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sub_blocker = String::from_utf8(sub_blocker).unwrap().trim().to_string();
+
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &sub_blocker])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--blocks", &dependent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], sub_blocker);
+}
+
+#[test]
+fn list_blocks_hides_closed_blocker_by_default_and_shows_with_all() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    repo.ti().args(["close", &blocker]).assert().success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--blocks", &dependent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 0);
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--blocks", &dependent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], blocker);
+}
+
+#[test]
+fn list_rejects_old_dependency_flag_names() {
+    let repo = TestRepo::new();
+    let ticket = create_ticket(&repo, "ticket");
+
+    repo.ti()
+        .args(["list", "--depends", &ticket])
+        .assert()
+        .failure();
+
+    repo.ti()
+        .args(["list", "--blocked-by", &ticket])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn list_blocks_rejects_unknown_ticket_reference() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["list", "--blocks", "ffffffff-ffff-ffff-ffff-ffffffffffff"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn list_blocks_view_save_and_replay_pins_full_id() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    let prefix = &dependent[..8];
+
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["list", "--all", "--blocks", prefix])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["views", "save", "blockers"])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["views"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("--blocks {dependent}")));
+
+    let output = repo
+        .ti()
+        .args(["list", "blockers", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], blocker);
 }
 
 #[test]

@@ -5326,8 +5326,8 @@ impl App {
             } else {
                 self.current_order_choice().spec().to_string()
             }),
-            depends: None,
-            blocked_by: None,
+            depends_on: None,
+            blocks: None,
             all: self.base_status.is_none() && self.base_state.is_none(),
             subissues: !self.hide_subissues,
             limit: 0,

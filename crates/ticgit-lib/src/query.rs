@@ -21,9 +21,11 @@ pub struct Filter {
     pub only_tagged: bool,
     pub search: Option<SearchFilter>,
     pub order: Option<SortOrder>,
-    pub depends: Option<Uuid>,
-    pub blocked_by: Option<Uuid>,
+    pub depends_on: Option<Uuid>,
+    pub blocks: Option<Uuid>,
     /// When true, exclude tickets that have a parent (i.e. sub-issues).
+    /// Bypassed whenever `depends_on` or `blocks` is set, so a relationship
+    /// filter never silently hides a sub-issue blocker or dependent.
     pub hide_subissues: bool,
 }
 
@@ -191,17 +193,18 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
                     return false;
                 }
             }
-            if let Some(ticket_id) = filter.depends {
+            if let Some(ticket_id) = filter.depends_on {
                 if !t.depends_on.contains(&ticket_id) {
                     return false;
                 }
             }
-            if let Some(ticket_id) = filter.blocked_by {
+            if let Some(ticket_id) = filter.blocks {
                 if !t.blocks.contains(&ticket_id) {
                     return false;
                 }
             }
-            if filter.hide_subissues && t.parent.is_some() {
+            let relationship_filter_active = filter.depends_on.is_some() || filter.blocks.is_some();
+            if filter.hide_subissues && !relationship_filter_active && t.parent.is_some() {
                 return false;
             }
             true
@@ -564,7 +567,7 @@ mod tests {
             2,
         );
         let f = Filter {
-            depends: Some(dependency_id),
+            depends_on: Some(dependency_id),
             ..Default::default()
         };
 
@@ -575,17 +578,17 @@ mod tests {
     }
 
     #[test]
-    fn filter_by_blocked_by() {
-        let blocked_by_id = Uuid::new_v4();
-        let mut blocked = t(
-            "blocked",
+    fn filter_by_blocks() {
+        let dependent_id = Uuid::new_v4();
+        let mut blocker = t(
+            "blocker",
             TicketStatus::Open,
             TicketState::New,
             None,
             None,
             1,
         );
-        blocked.blocks.insert(blocked_by_id);
+        blocker.blocks.insert(dependent_id);
         let unrelated = t(
             "unrelated",
             TicketStatus::Open,
@@ -595,14 +598,61 @@ mod tests {
             2,
         );
         let f = Filter {
-            blocked_by: Some(blocked_by_id),
+            blocks: Some(dependent_id),
             ..Default::default()
         };
 
-        let out = apply(vec![blocked, unrelated], &f);
+        let out = apply(vec![blocker, unrelated], &f);
 
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].title, "blocked");
+        assert_eq!(out[0].title, "blocker");
+    }
+
+    #[test]
+    fn relationship_filters_bypass_hide_subissues() {
+        let dependency_id = Uuid::new_v4();
+        let mut sub_dependent = t(
+            "sub-dependent",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        sub_dependent.parent = Some(Uuid::new_v4());
+        sub_dependent.depends_on.insert(dependency_id);
+
+        let out = apply(
+            vec![sub_dependent],
+            &Filter {
+                depends_on: Some(dependency_id),
+                hide_subissues: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+
+        let dependent_id = Uuid::new_v4();
+        let mut sub_blocker = t(
+            "sub-blocker",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        sub_blocker.parent = Some(Uuid::new_v4());
+        sub_blocker.blocks.insert(dependent_id);
+
+        let out = apply(
+            vec![sub_blocker],
+            &Filter {
+                blocks: Some(dependent_id),
+                hide_subissues: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
