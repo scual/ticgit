@@ -43,11 +43,21 @@ pub fn run(args: Args) -> Result<()> {
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
     } else if args.markdown {
-        println!("{}", render::ticket_markdown(&ticket));
+        let all = store.list().unwrap_or_default();
+        let rels = render::build_rel_lookup(&all);
+        println!(
+            "{}",
+            render::ticket_markdown_with_rels(&ticket, Some(&rels))
+        );
     } else {
         let users = store.list_users().unwrap_or_default();
         let nicks = render::build_nick_map(&users);
-        print!("{}", render::ticket_detail(&ticket, Some(&nicks)));
+        let all = store.list().unwrap_or_default();
+        let rels = render::build_rel_lookup(&all);
+        print!(
+            "{}",
+            render::ticket_detail(&ticket, Some(&nicks), Some(&rels))
+        );
     }
     Ok(())
 }
@@ -121,8 +131,16 @@ Available filters:
   .status
   .state
   .assigned
+  .closed_by
+  .priority
   .points
   .milestone
+  .code
+  .spec
+  .parent
+  .children
+  .depends_on
+  .blocks
   .tags
   .meta
   .comments

@@ -2040,3 +2040,38 @@ fn close_succeeds_after_subissue_resolved() {
     repo.ti().args(["close", &child]).assert().success();
     repo.ti().args(["close", &parent]).assert().success();
 }
+
+#[test]
+fn show_resolves_relationships_to_title_and_status() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent feature");
+    let child = create_subissue(&repo, &parent, "child task");
+    let blocker = create_ticket(&repo, "the blocker");
+    repo.ti()
+        .args(["depends", "--ticket", &parent, &blocker])
+        .assert()
+        .success();
+
+    // Parent shows its child and dependency with title + status, not bare hex.
+    repo.ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("child task").and(predicate::str::contains("[open]")))
+        .stdout(predicate::str::contains("the blocker"));
+
+    // Markdown output carries the same relationships (was previously omitted).
+    repo.ti()
+        .args(["show", &parent, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("- Children:").and(predicate::str::contains("child task")))
+        .stdout(predicate::str::contains("- Depends on:"));
+
+    // The child points back at its parent by title.
+    repo.ti()
+        .args(["show", &child])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parent").and(predicate::str::contains("parent feature")));
+}

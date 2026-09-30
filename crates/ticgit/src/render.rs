@@ -8,11 +8,60 @@ use ticgit_lib::TicketStatus;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use uuid::Uuid;
 
 use crate::timefmt::relative_time;
 
 /// Mapping of email → nick for display purposes.
 pub type NickMap = HashMap<String, String>;
+
+/// A short summary of a ticket, used to resolve relationship ids (parent,
+/// children, depends_on, blocks) into something readable in `ti show`.
+pub struct RelSummary {
+    pub title: String,
+    pub status: String,
+}
+
+/// Lookup from ticket id to its [`RelSummary`], built from the full ticket list.
+pub type RelLookup = HashMap<Uuid, RelSummary>;
+
+/// Build a [`RelLookup`] from every ticket so relationship ids can be rendered
+/// with their title and status instead of a bare hex prefix.
+pub fn build_rel_lookup(tickets: &[Ticket]) -> RelLookup {
+    tickets
+        .iter()
+        .map(|t| {
+            (
+                t.id,
+                RelSummary {
+                    title: t.title.clone(),
+                    status: t.status.as_str().to_string(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn short_hex(id: &Uuid) -> String {
+    id.to_string().chars().take(6).collect()
+}
+
+/// Format related ticket ids as a comma-separated list. With a lookup each
+/// entry becomes `shortid "title" [status]`; without one, just `shortid`.
+fn format_related<'a>(
+    ids: impl Iterator<Item = &'a Uuid>,
+    rels: Option<&RelLookup>,
+) -> String {
+    ids.map(|id| {
+        let short = short_hex(id);
+        match rels.and_then(|r| r.get(id)) {
+            Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
+            None => short,
+        }
+    })
+    .collect::<Vec<_>>()
+    .join(", ")
+}
 
 /// Build a NickMap from the user list returned by `TicketStore::list_users`.
 pub fn build_nick_map(users: &BTreeMap<String, BTreeSet<String>>) -> NickMap {
@@ -424,7 +473,7 @@ impl TableLayout {
 }
 
 /// Render a single ticket and its comments, resolving emails to nicks.
-pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>) -> String {
+pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>, rels: Option<&RelLookup>) -> String {
     let mut out = String::new();
     let title_bar = "-".repeat(t.title.chars().count().max(20));
     out.push_str(&ansi(ANSI_DIM, &title_bar));
@@ -467,41 +516,20 @@ pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>) -> String {
         out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
     }
     if let Some(parent_id) = &t.parent {
-        let short: String = parent_id.to_string().chars().take(6).collect();
-        out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &short)));
+        let value = format_related(std::iter::once(parent_id), rels);
+        out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &value)));
     }
     if !t.children.is_empty() {
-        let child_ids: Vec<String> = t
-            .children
-            .iter()
-            .map(|c| c.to_string().chars().take(6).collect())
-            .collect();
-        out.push_str(&detail_field(
-            "Children",
-            &ansi(ANSI_CYAN, &child_ids.join(", ")),
-        ));
+        let value = format_related(t.children.iter(), rels);
+        out.push_str(&detail_field("Children", &ansi(ANSI_CYAN, &value)));
     }
     if !t.depends_on.is_empty() {
-        let dep_ids: Vec<String> = t
-            .depends_on
-            .iter()
-            .map(|d| d.to_string().chars().take(6).collect())
-            .collect();
-        out.push_str(&detail_field(
-            "Depends",
-            &ansi(ANSI_CYAN, &dep_ids.join(", ")),
-        ));
+        let value = format_related(t.depends_on.iter(), rels);
+        out.push_str(&detail_field("Depends", &ansi(ANSI_CYAN, &value)));
     }
     if !t.blocks.is_empty() {
-        let block_ids: Vec<String> = t
-            .blocks
-            .iter()
-            .map(|b| b.to_string().chars().take(6).collect())
-            .collect();
-        out.push_str(&detail_field(
-            "Blocks",
-            &ansi(ANSI_CYAN, &block_ids.join(", ")),
-        ));
+        let value = format_related(t.blocks.iter(), rels);
+        out.push_str(&detail_field("Blocks", &ansi(ANSI_CYAN, &value)));
     }
     if let Some(spec) = &t.spec {
         let first_line = spec.lines().next().unwrap_or("");
@@ -620,11 +648,17 @@ const IMPORT_MARKDOWN_TEMPLATE: &str = r#"# GitHub Issue Import
 
 /// Render a single ticket as Markdown for agents and documents.
 pub fn ticket_markdown(t: &Ticket) -> String {
+    ticket_markdown_with_rels(t, None)
+}
+
+/// Like [`ticket_markdown`], but resolves relationship ids to title + status
+/// when a [`RelLookup`] is supplied (used by `ti show --markdown`).
+pub fn ticket_markdown_with_rels(t: &Ticket, rels: Option<&RelLookup>) -> String {
     render_template(
         TICKET_MARKDOWN_TEMPLATE,
         &[
             ("title", markdown_inline(&flatten(&t.title))),
-            ("details", ticket_details_markdown(t)),
+            ("details", ticket_details_markdown(t, rels)),
             ("description", markdown_body(t.description.as_deref())),
             ("metadata", metadata_markdown(t)),
             ("comments", comments_markdown(t)),
@@ -682,7 +716,7 @@ fn render_template(template: &str, values: &[(&str, String)]) -> String {
     out
 }
 
-fn ticket_details_markdown(t: &Ticket) -> String {
+fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
     let mut out = String::new();
     writeln!(out, "- Id: {}", code_span(&t.id.to_string())).unwrap();
     writeln!(out, "- Short id: {}", code_span(&t.short_id())).unwrap();
@@ -732,6 +766,22 @@ fn ticket_details_markdown(t: &Ticket) -> String {
     )
     .unwrap();
     writeln!(out, "- Code: {}", optional_inline(t.code.as_deref())).unwrap();
+    if let Some(parent_id) = &t.parent {
+        let value = format_related(std::iter::once(parent_id), rels);
+        writeln!(out, "- Parent: {}", markdown_inline(&value)).unwrap();
+    }
+    if !t.children.is_empty() {
+        let value = format_related(t.children.iter(), rels);
+        writeln!(out, "- Children: {}", markdown_inline(&value)).unwrap();
+    }
+    if !t.depends_on.is_empty() {
+        let value = format_related(t.depends_on.iter(), rels);
+        writeln!(out, "- Depends on: {}", markdown_inline(&value)).unwrap();
+    }
+    if !t.blocks.is_empty() {
+        let value = format_related(t.blocks.iter(), rels);
+        writeln!(out, "- Blocks: {}", markdown_inline(&value)).unwrap();
+    }
     writeln!(out, "- Tags: {}", tags_inline(t)).unwrap();
     out.trim_end().to_string()
 }
@@ -835,7 +885,7 @@ fn ticket_detail_section_markdown(t: &Ticket) -> String {
 {comments}",
         &[
             ("title", markdown_inline(&flatten(&t.title))),
-            ("details", ticket_details_markdown(t)),
+            ("details", ticket_details_markdown(t, None)),
             ("description", markdown_body(t.description.as_deref())),
             ("metadata", metadata_markdown(t)),
             ("comments", comments_markdown(t)),
