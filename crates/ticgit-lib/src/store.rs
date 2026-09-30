@@ -906,6 +906,12 @@ impl TicketStore {
         Ok(())
     }
 
+    // The writeup<->ticket link is stored once, on the writeup
+    // (`writeups:<id>:tickets`). A ticket-side `tickets:<id>:writeups` reverse
+    // index used to be written here too, but nothing ever read it back into the
+    // `Ticket` model, so it was only dead writes and a dangling-ref liability
+    // (deletes never cleaned it). If a reverse lookup is needed, derive it from
+    // the writeups or re-add it with full read/serialize/cleanup plumbing.
     pub fn link_writeup_ticket(&self, writeup_id: &Uuid, ticket_id: &Uuid) -> Result<()> {
         self.load_writeup(writeup_id)?;
         self.load(ticket_id)?;
@@ -913,10 +919,6 @@ impl TicketStore {
         p.set_add(
             &keys::writeup_field(writeup_id, "tickets"),
             &ticket_id.to_string(),
-        )?;
-        p.set_add(
-            &keys::ticket_field(ticket_id, "writeups"),
-            &writeup_id.to_string(),
         )?;
         Ok(())
     }
@@ -928,10 +930,6 @@ impl TicketStore {
         p.set_remove(
             &keys::writeup_field(writeup_id, "tickets"),
             &ticket_id.to_string(),
-        )?;
-        p.set_remove(
-            &keys::ticket_field(ticket_id, "writeups"),
-            &writeup_id.to_string(),
         )?;
         Ok(())
     }
@@ -1890,6 +1888,12 @@ mod tests {
             .unwrap()
             .tickets
             .contains(&ticket.id));
+        // The link is stored only on the writeup; no ticket-side reverse index.
+        assert!(store
+            .project_handle()
+            .get_value(&keys::ticket_field(&ticket.id, "writeups"))
+            .unwrap()
+            .is_none());
         store
             .unlink_writeup_ticket(&writeup.id, &ticket.id)
             .unwrap();
