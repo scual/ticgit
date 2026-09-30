@@ -139,10 +139,14 @@ Closed tickets use `resolved`, `wontfix`, `duplicate`, or `invalid`.
 New tickets start as `open:new`; `ti state closed` defaults to
 `closed:resolved`.
 
-Closing a ticket is rejected while it still has an open sub-issue, so a
-"done" parent never hides unfinished work. A sub-issue counts as handled once
-it reaches any closed state (`resolved`, `wontfix`, `duplicate`, or `invalid`).
-Pass `--force` to `ti close` or `ti state` to override the check:
+Closing a ticket is rejected while it still has an open sub-issue or an
+unresolved dependency (an open ticket in its `depends_on`), so a "done" ticket
+never hides unfinished work. Closing a ticket that only *blocks* others is
+allowed — that is the normal "finished the blocker" case. A sub-issue or
+dependency counts as handled once it reaches any closed state (`resolved`,
+`wontfix`, `duplicate`, or `invalid`). For the same reason, you cannot add a
+sub-issue to an already-closed ticket without reopening it first. Pass `--force`
+to `ti close` or `ti state` to override the close check:
 
 ```sh
 ti close <id> --force

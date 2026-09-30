@@ -2075,3 +2075,40 @@ fn show_resolves_relationships_to_title_and_status() {
         .success()
         .stdout(predicate::str::contains("Parent").and(predicate::str::contains("parent feature")));
 }
+
+#[test]
+fn close_rejected_with_open_dependency_then_force_succeeds() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "the blocker");
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    // Closing the dependent is rejected while the blocker is open.
+    repo.ti()
+        .args(["close", &dependent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unresolved dependenc"))
+        .stderr(predicate::str::contains("--force"));
+
+    // Closing the blocker itself is allowed (the normal case).
+    repo.ti().args(["close", &blocker]).assert().success();
+    // Now the dependent closes cleanly.
+    repo.ti().args(["close", &dependent]).assert().success();
+}
+
+#[test]
+fn new_subissue_under_closed_parent_is_rejected() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    repo.ti().args(["close", &parent]).assert().success();
+
+    repo.ti()
+        .args(["new", "--title", "late child", "--subissue", &parent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("closed ticket"));
+}
