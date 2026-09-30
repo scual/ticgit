@@ -35,6 +35,10 @@ pub struct Args {
     #[arg(short = 'p', long = "subissue")]
     pub subissue: Option<String>,
 
+    /// Add a dependency on this ticket (id or prefix): the new ticket depends on it.
+    #[arg(long = "depends-on")]
+    pub depends_on: Option<String>,
+
     /// Initial comment body. Use `--comment-edit` to compose in `$EDITOR`.
     #[arg(long = "comment")]
     pub comment: Option<String>,
@@ -82,6 +86,8 @@ pub fn run(args: Args) -> Result<()> {
     let tags = parse_tags(args.tags.as_deref());
 
     let parent = args.subissue.map(|p| store.resolve_id(&p)).transpose()?;
+    // Resolve up front so a bad reference fails before the ticket is created.
+    let dependency = args.depends_on.map(|d| store.resolve_id(&d)).transpose()?;
 
     let opts = NewTicketOpts {
         comment,
@@ -98,6 +104,10 @@ pub fn run(args: Args) -> Result<()> {
     }
     if let Some(priority) = args.priority {
         store.set_priority(&ticket.id, Some(priority))?;
+        needs_reload = true;
+    }
+    if let Some(dep_id) = dependency {
+        store.add_dependency(&ticket.id, &dep_id)?;
         needs_reload = true;
     }
     if needs_reload {

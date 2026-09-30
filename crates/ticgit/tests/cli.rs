@@ -2157,6 +2157,65 @@ fn close_rejected_with_open_dependency_then_force_succeeds() {
 }
 
 #[test]
+fn new_with_depends_on_creates_dependency() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "the blocker");
+
+    let output = repo
+        .ti()
+        .args([
+            "new",
+            "--title",
+            "dependent",
+            "--depends-on",
+            &blocker,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let deps = json["depends_on"].as_array().unwrap();
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0], blocker);
+
+    // Reverse side is set: the blocker now blocks the new ticket.
+    let new_id = json["id"].as_str().unwrap();
+    let output = repo
+        .ti()
+        .args(["show", &blocker, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocker_json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(blocker_json["blocks"].as_array().unwrap()[0], new_id);
+}
+
+#[test]
+fn new_with_bad_depends_on_fails_before_creating() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["new", "--title", "x", "--depends-on", "nonexistent"])
+        .assert()
+        .failure();
+    // Nothing was created.
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert!(tickets.is_empty());
+}
+
+#[test]
 fn new_subissue_under_closed_parent_is_rejected() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
