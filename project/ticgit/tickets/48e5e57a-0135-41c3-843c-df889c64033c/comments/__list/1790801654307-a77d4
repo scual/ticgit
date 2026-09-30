@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"sync/push tests only assert the command runs and prints a URL; nothing verifies ticket content actually transfers between repos. pull.rs (15KB) is otherwise untested."}

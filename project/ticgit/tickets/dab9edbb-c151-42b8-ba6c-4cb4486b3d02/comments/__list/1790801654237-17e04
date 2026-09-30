@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"next.rs candidate ranking (score + Reverse sort, dependency filtering) is untested; regressions in the picker would go unnoticed."}

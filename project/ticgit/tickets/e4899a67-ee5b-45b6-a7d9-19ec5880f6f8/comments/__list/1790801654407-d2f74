@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"store.rs writes a per-ticket writeups set but build_ticket has no match arm to read it back - dead data or an unfinished feature. Decide: deserialize + add to schema, or stop writing it."}

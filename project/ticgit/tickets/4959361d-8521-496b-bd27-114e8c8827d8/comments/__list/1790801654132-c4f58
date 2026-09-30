@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"depends/subissue --json emit only the modified ticket, so an agent can't see what the dependency/parent resolved to without a second call. Plain-text output already prints the counterpart title."}

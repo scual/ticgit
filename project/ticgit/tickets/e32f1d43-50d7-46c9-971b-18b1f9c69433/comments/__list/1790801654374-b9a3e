@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"The ticgit-lib/src/lib.rs namespace comment omits spec, code, closed-by, priority, parent, children, depends_on, blocks, users, and the writeups back-link. Treat the JSON schema as source of truth and regenerate the doc."}

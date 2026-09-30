@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"list_users/get_user/add_user_email/remove_user_email/resolve_user (nick->email + unknown-nick error) have no unit or CLI coverage; also unblocks assign-by-nick confidence."}

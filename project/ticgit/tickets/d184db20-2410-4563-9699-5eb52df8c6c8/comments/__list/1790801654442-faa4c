@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"The depends-on/blocks filters exist but there is no way to list a parent's sub-issues except ti show. Mirror the existing relationship filters in query.rs."}

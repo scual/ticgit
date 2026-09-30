@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"ti new has --subissue but no --depends-on, so creating a dependency always needs a second ti depends call."}
