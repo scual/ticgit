@@ -2157,6 +2157,34 @@ fn close_rejected_with_open_dependency_then_force_succeeds() {
 }
 
 #[test]
+fn list_parent_shows_only_direct_children() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent feature");
+    let child_a = create_subissue(&repo, &parent, "child a");
+    let child_b = create_subissue(&repo, &parent, "child b");
+    create_ticket(&repo, "unrelated");
+
+    let output = repo
+        .ti()
+        .args(["list", "--parent", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    // Exactly the two children, surfaced despite sub-issues being hidden by default.
+    let ids: BTreeSet<String> = tickets
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&child_a));
+    assert!(ids.contains(&child_b));
+    assert!(!ids.contains(&parent));
+}
+
+#[test]
 fn new_with_depends_on_creates_dependency() {
     let repo = TestRepo::new();
     let blocker = create_ticket(&repo, "the blocker");

@@ -23,9 +23,12 @@ pub struct Filter {
     pub order: Option<SortOrder>,
     pub depends_on: Option<Uuid>,
     pub blocks: Option<Uuid>,
+    /// Restrict to the direct sub-issues (children) of this ticket.
+    pub parent: Option<Uuid>,
     /// When true, exclude tickets that have a parent (i.e. sub-issues).
-    /// Bypassed whenever `depends_on` or `blocks` is set, so a relationship
-    /// filter never silently hides a sub-issue blocker or dependent.
+    /// Bypassed whenever `depends_on`, `blocks`, or `parent` is set, so a
+    /// relationship filter never silently hides a sub-issue blocker,
+    /// dependent, or child.
     pub hide_subissues: bool,
 }
 
@@ -203,7 +206,13 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
                     return false;
                 }
             }
-            let relationship_filter_active = filter.depends_on.is_some() || filter.blocks.is_some();
+            if let Some(ticket_id) = filter.parent {
+                if t.parent != Some(ticket_id) {
+                    return false;
+                }
+            }
+            let relationship_filter_active =
+                filter.depends_on.is_some() || filter.blocks.is_some() || filter.parent.is_some();
             if filter.hide_subissues && !relationship_filter_active && t.parent.is_some() {
                 return false;
             }
@@ -606,6 +615,25 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, "blocker");
+    }
+
+    #[test]
+    fn filter_by_parent_surfaces_children_despite_hide_subissues() {
+        let parent_id = Uuid::new_v4();
+        let mut child = t("child", TicketStatus::Open, TicketState::New, None, None, 1);
+        child.parent = Some(parent_id);
+        let unrelated = t("unrelated", TicketStatus::Open, TicketState::New, None, None, 2);
+        // hide_subissues is on by default; a --parent match must still show.
+        let f = Filter {
+            parent: Some(parent_id),
+            hide_subissues: true,
+            ..Default::default()
+        };
+
+        let out = apply(vec![child, unrelated], &f);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "child");
     }
 
     #[test]
