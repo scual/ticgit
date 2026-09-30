@@ -2,16 +2,30 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ticgit.dev/schema/v1.json",
   "title": "TicGit machine output schema v1",
-  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects.",
+  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches.",
   "oneOf": [
     {
       "$ref": "#/$defs/ticket"
     },
     {
       "$ref": "#/$defs/ticketList"
+    },
+    {
+      "$ref": "#/$defs/nextNull"
     }
   ],
   "$defs": {
+    "nextNull": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["next"],
+      "properties": {
+        "next": {
+          "type": "null",
+          "description": "Emitted by `ti next --json` when no workable ticket matches."
+        }
+      }
+    },
     "ticketList": {
       "type": "array",
       "items": {
