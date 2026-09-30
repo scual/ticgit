@@ -504,6 +504,19 @@ impl TicketStore {
             p.remove(&keys::ticket_field(child_id, "parent"))?;
         }
 
+        // Dependencies are denormalized on both sides, so clean up the reverse
+        // references too, or other tickets keep dangling depends_on/blocks UUIDs
+        // that never resolve (e.g. silently un-workable in `ti next`).
+        for dep_id in &ticket.depends_on {
+            p.set_remove(&keys::ticket_field(dep_id, "blocks"), &id.to_string())?;
+        }
+        for blocked_id in &ticket.blocks {
+            p.set_remove(
+                &keys::ticket_field(blocked_id, "depends_on"),
+                &id.to_string(),
+            )?;
+        }
+
         for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(id)))? {
             p.remove(&key)?;
         }
@@ -1926,5 +1939,59 @@ mod tests {
         assert!(store.load(&parent.id).is_err());
         let child = store.load(&child.id).unwrap();
         assert_eq!(child.parent, None);
+    }
+
+    #[test]
+    fn delete_ticket_removes_dangling_dependency_references() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+        let c = store.create("c", NewTicketOpts::default()).unwrap();
+
+        // a depends on b; c depends on a. Deleting a must clean both sides.
+        store.add_dependency(&a.id, &b.id).unwrap();
+        store.add_dependency(&c.id, &a.id).unwrap();
+
+        store.delete_ticket(&a.id).unwrap();
+
+        // b no longer lists a in `blocks`.
+        assert!(!store.load(&b.id).unwrap().blocks.contains(&a.id));
+        // c no longer lists a in `depends_on`.
+        assert!(!store.load(&c.id).unwrap().depends_on.contains(&a.id));
+    }
+
+    #[test]
+    fn add_dependency_rejects_self_dependency() {
+        let (store, _td) = test_store();
+        let t = store.create("t", NewTicketOpts::default()).unwrap();
+        assert!(store.add_dependency(&t.id, &t.id).is_err());
+    }
+
+    #[test]
+    fn add_dependency_rejects_cycle() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+        let c = store.create("c", NewTicketOpts::default()).unwrap();
+
+        // a -> b -> c; closing the loop c -> a must be rejected.
+        store.add_dependency(&a.id, &b.id).unwrap();
+        store.add_dependency(&b.id, &c.id).unwrap();
+        assert!(store.add_dependency(&c.id, &a.id).is_err());
+    }
+
+    #[test]
+    fn remove_dependency_clears_both_sides() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+
+        store.add_dependency(&a.id, &b.id).unwrap();
+        assert!(store.load(&a.id).unwrap().depends_on.contains(&b.id));
+        assert!(store.load(&b.id).unwrap().blocks.contains(&a.id));
+
+        store.remove_dependency(&a.id, &b.id).unwrap();
+        assert!(store.load(&a.id).unwrap().depends_on.is_empty());
+        assert!(store.load(&b.id).unwrap().blocks.is_empty());
     }
 }

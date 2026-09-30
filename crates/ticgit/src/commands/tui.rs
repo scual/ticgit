@@ -14288,12 +14288,12 @@ mod tests {
     fn issue_focus_color_cycles_through_terminal_palette() {
         let palette = [
             (IssueFocusColor::Yellow, Color::Yellow),
-            (IssueFocusColor::Green, Color::Green),
-            (IssueFocusColor::Cyan, Color::Cyan),
             (IssueFocusColor::Magenta, Color::Magenta),
             (IssueFocusColor::Red, Color::Red),
             (IssueFocusColor::Blue, Color::Blue),
             (IssueFocusColor::White, Color::White),
+            (IssueFocusColor::Cyan, Color::Cyan),
+            (IssueFocusColor::Green, Color::Green),
         ];
         let mut color = IssueFocusColor::Yellow;
 
@@ -14306,7 +14306,8 @@ mod tests {
             color = color.next();
         }
 
-        assert_eq!(color, IssueFocusColor::Cyan);
+        // Seven steps from Yellow wraps back to Yellow.
+        assert_eq!(color, IssueFocusColor::Yellow);
     }
 
     #[test]

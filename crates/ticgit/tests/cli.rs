@@ -34,6 +34,12 @@ impl TestRepo {
             "TICGIT_STATE_FILE",
             self.state_file.path().join("state.json"),
         );
+        // Keep tests hermetic: the editor-resolution order is GIT_EDITOR ->
+        // core.editor -> VISUAL -> EDITOR, so an ambient GIT_EDITOR/VISUAL in
+        // the developer's shell would shadow a test's own `EDITOR` override.
+        cmd.env_remove("GIT_EDITOR");
+        cmd.env_remove("VISUAL");
+        cmd.env_remove("EDITOR");
         cmd
     }
 }
