@@ -2370,7 +2370,7 @@ impl App {
                 lines.push(review_commit_summary_line(
                     versions.get(idx).copied().unwrap_or(1),
                     &review,
-                    *sha,
+                    sha,
                     self.review_commit_cache.get(*sha),
                     self.review_status_cache.get(*sha),
                     width,
@@ -5567,7 +5567,7 @@ impl App {
             || self.base_state.is_some()
             || self.assigned_filter.is_some()
             || self.only_tagged
-            || self.hide_subissues != !self.show_subissues_preference
+            || self.hide_subissues == self.show_subissues_preference
             || self.sort_order.is_some()
             || !self.filter.is_empty()
             || !self.tag_filter.is_empty()
@@ -10100,7 +10100,7 @@ fn progress_segment(
     let filled = if total == 0 {
         0
     } else {
-        ((count * bar_width) + total - 1) / total
+        (count * bar_width).div_ceil(total)
     }
     .min(bar_width);
     vec![
@@ -12921,15 +12921,13 @@ fn compact_ticket_list_line(
     let mut meta = meta.to_vec();
 
     while compact_title_width(short_id, &meta, width) < title_target_width {
-        if !remove_first_meta_width(&mut meta, LIST_STATE_WIDTH) {
-            if !remove_first_meta_width(&mut meta, LIST_AGE_WIDTH) {
-                if short_id.take().is_none()
+        if !remove_first_meta_width(&mut meta, LIST_STATE_WIDTH)
+            && !remove_first_meta_width(&mut meta, LIST_AGE_WIDTH)
+                && short_id.take().is_none()
                     && !remove_first_meta_width(&mut meta, LIST_PRIORITY_WIDTH)
                 {
                     break;
                 }
-            }
-        }
     }
 
     ticket_list_line_from_parts(
@@ -15008,11 +15006,9 @@ mod tests {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
         let grandchild = uuid::Uuid::from_u128(3);
-        let tickets = vec![
-            test_ticket(root, None, &[child]),
+        let tickets = [test_ticket(root, None, &[child]),
             test_ticket(child, Some(root), &[grandchild]),
-            test_ticket(grandchild, Some(child), &[]),
-        ];
+            test_ticket(grandchild, Some(child), &[])];
         let ticket_by_id = tickets
             .iter()
             .map(|ticket| (ticket.id, ticket))
@@ -15027,10 +15023,8 @@ mod tests {
     fn issue_title_prefix_marks_parents_even_when_graph_is_hidden() {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
-        let tickets = vec![
-            test_ticket(root, None, &[child]),
-            test_ticket(child, Some(root), &[]),
-        ];
+        let tickets = [test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[])];
         let ticket_by_id = tickets
             .iter()
             .map(|ticket| (ticket.id, ticket))

@@ -347,12 +347,13 @@ fn merge_ticket(store: &TicketStore, local: &Ticket, remote: &Ticket) -> Result<
     }
 
     // Parent: take remote's if different (but don't clear if remote has none).
-    if remote.parent.is_some() && remote.parent != local.parent {
-        let parent_id = remote.parent.unwrap();
-        let p = store.session().target(&ticgit_lib::Target::project());
-        let pid = parent_id.to_string();
-        p.set(&ticgit_lib::keys::ticket_field(id, "parent"), pid.as_str())?;
-        changed = true;
+    if let Some(parent_id) = remote.parent {
+        if Some(parent_id) != local.parent {
+            let p = store.session().target(&ticgit_lib::Target::project());
+            let pid = parent_id.to_string();
+            p.set(&ticgit_lib::keys::ticket_field(id, "parent"), pid.as_str())?;
+            changed = true;
+        }
     }
 
     // Children: union.

@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use crate::ticket::{self, Ticket, TicketState, TicketStatus};
+use crate::ticket::{Ticket, TicketState, TicketStatus};
 use uuid::Uuid;
 
 /// All knobs `ti list` understands. Build one by parsing CLI flags and

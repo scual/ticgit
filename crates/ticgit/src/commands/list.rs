@@ -117,7 +117,7 @@ pub fn run(args: Args) -> Result<()> {
             status: saved.status.clone(),
             all: saved.all,
             open: false,
-            tag: saved_tags(&saved),
+            tag: saved_tags(saved),
             tag_mode: if saved.tag_match_all { "all" } else { "any" }.to_string(),
             assigned: saved.assigned.clone(),
             only_tagged: saved.only_tagged,

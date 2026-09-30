@@ -67,7 +67,7 @@ pub fn run(args: Args) -> Result<()> {
         .unwrap_or(0);
 
     // Rank candidates: higher score = better candidate
-    candidates.sort_by(|a, b| score(b, max_priority).cmp(&score(a, max_priority)));
+    candidates.sort_by_key(|t| std::cmp::Reverse(score(t, max_priority)));
 
     let ticket = match candidates.into_iter().next() {
         Some(t) => t,
