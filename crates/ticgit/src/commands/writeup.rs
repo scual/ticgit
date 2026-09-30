@@ -64,6 +64,10 @@ pub struct ListArgs {
     /// Include closed writeups.
     #[arg(long = "all")]
     pub all: bool,
+
+    /// Output as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -74,6 +78,10 @@ pub struct ShowArgs {
     /// Show every version instead of only the latest version.
     #[arg(long = "all")]
     pub all: bool,
+
+    /// Output as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -148,9 +156,52 @@ fn run_new(args: NewArgs) -> Result<()> {
     Ok(())
 }
 
+/// Build a stable JSON object for a writeup. With `all_versions` false, only the
+/// latest version is included.
+fn writeup_json(writeup: &Writeup, all_versions: bool) -> serde_json::Value {
+    let mut versions: Vec<serde_json::Value> = writeup
+        .versions
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "author": v.author,
+                "at": v.at.format(&Rfc3339).unwrap_or_default(),
+                "body": v.body,
+            })
+        })
+        .collect();
+    if !all_versions {
+        versions = versions.split_off(versions.len().saturating_sub(1));
+    }
+    serde_json::json!({
+        "id": writeup.id.to_string(),
+        "short_id": writeup.short_id(),
+        "title": writeup.title,
+        "status": writeup.status.as_str(),
+        "priority": writeup.priority,
+        "created_at": writeup.created_at.format(&Rfc3339).unwrap_or_default(),
+        "created_by": writeup.created_by,
+        "authors": writeup.authors,
+        "tags": writeup.tags,
+        "tickets": writeup.tickets.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+        "versions": versions,
+    })
+}
+
 fn run_list(args: ListArgs) -> Result<()> {
     let store = open_store()?;
     let writeups = store.list_writeups()?;
+
+    if args.json {
+        let items: Vec<serde_json::Value> = writeups
+            .iter()
+            .filter(|w| args.all || w.status != WriteupStatus::Closed)
+            .map(|w| writeup_json(w, false))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
     let mut shown = 0;
     for writeup in writeups {
         if !args.all && writeup.status == WriteupStatus::Closed {
@@ -189,6 +240,13 @@ fn run_show(args: ShowArgs) -> Result<()> {
     let store = open_store()?;
     let id = store.resolve_writeup_id(&args.id)?;
     let writeup = store.load_writeup(&id)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&writeup_json(&writeup, args.all))?
+        );
+        return Ok(());
+    }
     print_writeup(&writeup, args.all)
 }
 

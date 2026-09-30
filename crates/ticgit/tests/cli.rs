@@ -2257,6 +2257,49 @@ fn new_subissue_under_closed_parent_is_rejected() {
 }
 
 #[test]
+fn writeup_show_and_list_json() {
+    let repo = TestRepo::new();
+    let out = repo
+        .ti()
+        .args([
+            "writeup", "new", "--title", "Big idea", "--body", "first cut", "--id-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id = String::from_utf8(out).unwrap().trim().to_string();
+
+    let output = repo
+        .ti()
+        .args(["writeup", "show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["title"], "Big idea");
+    assert_eq!(json["status"], "open");
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0]["body"], "first cut");
+
+    let output = repo
+        .ti()
+        .args(["writeup", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let arr: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["title"], "Big idea");
+}
+
+#[test]
 fn depends_json_includes_the_dependency_counterpart() {
     let repo = TestRepo::new();
     let dependent = create_ticket(&repo, "dependent");
