@@ -2256,6 +2256,46 @@ fn new_subissue_under_closed_parent_is_rejected() {
         .stderr(predicate::str::contains("closed ticket"));
 }
 
+#[test]
+fn depends_json_includes_the_dependency_counterpart() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "the blocker");
+
+    let output = repo
+        .ti()
+        .args(["depends", "--ticket", &dependent, &blocker, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ticket"]["id"], dependent);
+    assert_eq!(json["dependency"]["id"], blocker);
+    assert_eq!(json["dependency"]["title"], "the blocker");
+}
+
+#[test]
+fn subissue_json_includes_the_parent_counterpart() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent feature");
+    let child = create_ticket(&repo, "child");
+
+    let output = repo
+        .ti()
+        .args(["subissue", "--ticket", &child, &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ticket"]["id"], child);
+    assert_eq!(json["parent"]["id"], parent);
+    assert_eq!(json["parent"]["title"], "parent feature");
+}
+
 /// Run `ti next --json` and parse the result.
 fn next_json(repo: &TestRepo) -> Value {
     let output = repo
