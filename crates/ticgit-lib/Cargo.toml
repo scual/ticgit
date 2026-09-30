@@ -20,8 +20,6 @@ include = [
 [dependencies]
 git-meta-lib = { workspace = true }
 gix          = { workspace = true }
-# Force the older gix-actor to work around the winnow split.
-gix-actor    = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
