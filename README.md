@@ -101,6 +101,10 @@ available at [`https://ticgit.dev/schema/v1.json`](https://ticgit.dev/schema/v1.
 `ti list --json` emits an array of ticket objects. Ticket metadata appears under
 `.meta` as an object whose values are strings.
 
+`ti next --json` emits a ticket object when a workable ticket is found, or the
+sentinel `{ "next": null }` when nothing matches — check that key before parsing
+a ticket.
+
 `--porcelain` and `--format json` are not supported compatibility aliases today;
 use `--json` for schema-stable output.
 
