@@ -446,6 +446,8 @@ impl TableLayout {
         layout
     }
 
+    // Cohesive column-width layout inputs; a struct would only add indirection.
+    #[allow(clippy::too_many_arguments)]
     fn fixed_width_without_title(
         &self,
         id_width: usize,
@@ -1261,7 +1263,7 @@ mod tests {
             "priority ticket",
             TicketState::New,
         );
-        let refs = open_ticket_ref_lengths(&[ticket.clone()]);
+        let refs = open_ticket_ref_lengths(std::slice::from_ref(&ticket));
 
         let table = strip_ansi(&tickets_table_with_width(
             &[ticket],

@@ -4789,8 +4789,6 @@ impl App {
             KeyCode::Char('p') => {
                 if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
                     self.next_review_commit();
-                } else if self.active_tab == TuiTab::Writeups {
-                    self.begin_input(InputKind::Priority);
                 } else {
                     self.begin_input(InputKind::Priority);
                 }
@@ -11330,9 +11328,11 @@ fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
 fn diff_line_for_file(line: String, file_key: Option<&str>) -> Line<'static> {
     let style = if line.starts_with("@@") {
         Style::default().fg(Color::LightBlue)
-    } else if line.starts_with("diff --git") || line.starts_with("index ") {
-        Style::default().fg(Color::DarkGray)
-    } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+    } else if line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+    {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -12086,6 +12086,9 @@ fn issue_table_header(columns: &[IssueColumn], widths: &[usize], width: usize) -
     table_header_line(&columns, width)
 }
 
+// Cohesive per-row layout inputs (column widths + display flags); grouping them
+// into a struct would add indirection without improving clarity.
+#[allow(clippy::too_many_arguments)]
 fn ticket_table_line(
     ticket: &Ticket,
     columns: &[IssueColumn],
