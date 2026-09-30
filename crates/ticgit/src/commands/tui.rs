@@ -6077,12 +6077,20 @@ impl App {
             self.status = Some("Select a review first.".to_string());
             return Ok(());
         };
+        // Close the ticket first (guarded): if it has open sub-issues, surface
+        // the error and leave the review branch open rather than half-closing.
+        if let Err(e) =
+            self.store
+                .set_lifecycle(&ticket_id, TicketStatus::Closed, TicketState::Resolved)
+        {
+            self.status = Some(e.to_string());
+            self.mode = Mode::Normal;
+            return Ok(());
+        }
         self.store
             .session()
             .target(&Target::branch(&branch_id))
             .set("status", "closed")?;
-        self.store
-            .set_lifecycle(&ticket_id, TicketStatus::Closed, TicketState::Resolved)?;
         self.mode = Mode::Normal;
         self.clear_review_caches();
         self.reload_all(Some(ticket_id), None)?;
@@ -6757,7 +6765,13 @@ impl App {
             return Ok(());
         };
         let id = ticket.id;
-        self.store.set_lifecycle(&id, status, state)?;
+        // Surface the open-sub-issue guard (and any other error) in the status
+        // line instead of tearing down the TUI event loop.
+        if let Err(e) = self.store.set_lifecycle(&id, status, state) {
+            self.status = Some(e.to_string());
+            self.mode = Mode::Normal;
+            return Ok(());
+        }
         self.status = Some(format!("Changed lifecycle to {status}:{state}."));
         self.mode = Mode::Normal;
         self.reload(Some(id))?;

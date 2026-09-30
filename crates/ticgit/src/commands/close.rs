@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use ticgit_lib::{TicketState, TicketStatus};
 
@@ -18,12 +18,22 @@ pub struct Args {
     /// Output the updated ticket as Markdown.
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
+
+    /// Close even if the ticket still has open sub-issues.
+    #[arg(long = "force")]
+    pub force: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let id = resolve_ticket(&store, args.ticket.as_deref())?;
-    store.set_lifecycle(&id, TicketStatus::Closed, TicketState::Resolved)?;
+    if args.force {
+        store.set_lifecycle_forced(&id, TicketStatus::Closed, TicketState::Resolved)?;
+    } else {
+        store
+            .set_lifecycle(&id, TicketStatus::Closed, TicketState::Resolved)
+            .map_err(|e| anyhow!("{e} (use --force to override)"))?;
+    }
 
     let git_dir = store.session().repo_git_dir();
     let mut state = State::load().unwrap_or_default();

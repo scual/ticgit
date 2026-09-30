@@ -36,6 +36,17 @@ fn validate_email(email: &str) -> Result<()> {
     }
 }
 
+/// Format a list of open sub-issues for the [`Error::OpenSubissues`] message,
+/// e.g. `2 open sub-issue(s): a1b2c3 "title", d4e5f6 "other"`.
+fn format_open_children(children: &[Ticket]) -> String {
+    let list = children
+        .iter()
+        .map(|c| format!("{} \"{}\"", c.short_id(), c.title))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} open sub-issue(s): {list}", children.len())
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -255,7 +266,54 @@ impl TicketStore {
         self.set_lifecycle(id, state.status(), state)
     }
 
+    /// Direct children of `id` that are still open (`status == Open`).
+    ///
+    /// Dangling child references that fail to load are skipped rather than
+    /// propagated, mirroring the `.ok()` handling in `set_parent`'s ancestor
+    /// walk, so a corrupt reference can never wedge a close.
+    pub fn open_children(&self, id: &Uuid) -> Result<Vec<Ticket>> {
+        let ticket = self.load(id)?;
+        let mut open = Vec::new();
+        for child_id in &ticket.children {
+            if let Ok(child) = self.load(child_id) {
+                if child.status == TicketStatus::Open {
+                    open.push(child);
+                }
+            }
+        }
+        Ok(open)
+    }
+
+    /// Change a ticket's lifecycle, rejecting a close while it still has open
+    /// sub-issues (children). Only a genuine open→closed transition is guarded;
+    /// reclassifying an already-closed ticket among closed states is allowed.
     pub fn set_lifecycle(&self, id: &Uuid, status: TicketStatus, state: TicketState) -> Result<()> {
+        if status == TicketStatus::Closed {
+            let current = self.load(id)?;
+            if current.status == TicketStatus::Open {
+                let open = self.open_children(id)?;
+                if !open.is_empty() {
+                    return Err(Error::OpenSubissues(format_open_children(&open)));
+                }
+            }
+        }
+        self.write_lifecycle(id, status, state)
+    }
+
+    /// Change a ticket's lifecycle without the open-sub-issue guard. Used by the
+    /// `--force` CLI path and by sync (where the remote is authoritative).
+    pub fn set_lifecycle_forced(
+        &self,
+        id: &Uuid,
+        status: TicketStatus,
+        state: TicketState,
+    ) -> Result<()> {
+        self.write_lifecycle(id, status, state)
+    }
+
+    /// Raw lifecycle write: validates the status/state pair is coherent, then
+    /// persists `status`/`state` and stamps or clears `closed-by`.
+    fn write_lifecycle(&self, id: &Uuid, status: TicketStatus, state: TicketState) -> Result<()> {
         if state.status() != status {
             return Err(Error::InvalidState(format!(
                 "{}:{}",
@@ -1352,6 +1410,108 @@ mod tests {
         let loaded = store.load(&t.id).unwrap();
         assert_eq!(loaded.status, TicketStatus::Open);
         assert_eq!(loaded.state, TicketState::Blocked);
+    }
+
+    /// Create a child ticket parented to `parent`.
+    fn child_of(store: &TicketStore, parent: &Uuid, title: &str) -> Ticket {
+        store
+            .create(
+                title,
+                NewTicketOpts {
+                    parent: Some(*parent),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn close_rejected_while_a_subissue_is_open() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        let err = store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap_err();
+        assert!(matches!(err, Error::OpenSubissues(_)));
+
+        let open = store.open_children(&parent.id).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, child.id);
+        // Parent stayed open.
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Open);
+    }
+
+    #[test]
+    fn close_allowed_once_all_subissues_are_closed() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        store.set_state(&child.id, TicketState::Resolved).unwrap();
+        store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn subissue_closed_as_wontfix_counts_as_solved() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        // A child dropped as wontfix is "dealt with" — it must not block.
+        store.set_state(&child.id, TicketState::Wontfix).unwrap();
+        assert!(store.open_children(&parent.id).unwrap().is_empty());
+        store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn forced_close_bypasses_open_subissue_guard() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        child_of(&store, &parent.id, "child");
+
+        store
+            .set_lifecycle_forced(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn close_with_no_children_is_unaffected() {
+        let (store, _td) = test_store();
+        let t = store.create("solo", NewTicketOpts::default()).unwrap();
+        store
+            .set_lifecycle(&t.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&t.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn reclassifying_a_closed_parent_is_not_blocked_by_open_child() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        // Force the parent closed while a child is still open (legacy-style state).
+        store
+            .set_lifecycle_forced(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert!(!store.open_children(&parent.id).unwrap().is_empty());
+
+        // Closed→closed reclassification must not re-trigger the guard.
+        store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Wontfix)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().state, TicketState::Wontfix);
+        // Child untouched.
+        assert_eq!(store.load(&child.id).unwrap().status, TicketStatus::Open);
     }
 
     #[test]

@@ -139,6 +139,16 @@ Closed tickets use `resolved`, `wontfix`, `duplicate`, or `invalid`.
 New tickets start as `open:new`; `ti state closed` defaults to
 `closed:resolved`.
 
+Closing a ticket is rejected while it still has an open sub-issue, so a
+"done" parent never hides unfinished work. A sub-issue counts as handled once
+it reaches any closed state (`resolved`, `wontfix`, `duplicate`, or `invalid`).
+Pass `--force` to `ti close` or `ti state` to override the check:
+
+```sh
+ti close <id> --force
+ti state closed:wontfix --ticket <id> --force
+```
+
 Recent tickets:
 
 ```sh

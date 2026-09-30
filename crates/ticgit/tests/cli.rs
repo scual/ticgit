@@ -1952,3 +1952,85 @@ JSON
             "Skipped 2 issue(s) that were already imported.",
         ));
 }
+
+/// Create a ticket that is a sub-issue of `parent`, returning its id.
+fn create_subissue(repo: &TestRepo, parent: &str, title: &str) -> String {
+    let out = repo
+        .ti()
+        .args(["new", "--title", title, "--subissue", parent, "--id-only"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out).unwrap().trim().to_string()
+}
+
+#[test]
+fn close_rejected_with_open_subissue_then_force_succeeds() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let child_short: String = child.chars().take(6).collect();
+
+    // Plain close is rejected and names the open sub-issue.
+    repo.ti()
+        .args(["close", &parent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("open sub-issue"))
+        .stderr(predicate::str::contains(child_short))
+        .stderr(predicate::str::contains("--force"));
+
+    // Parent is still open.
+    let output = repo
+        .ti()
+        .args(["show", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "open");
+
+    // --force overrides.
+    repo.ti()
+        .args(["close", &parent, "--force"])
+        .assert()
+        .success();
+    let output = repo
+        .ti()
+        .args(["show", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "closed");
+}
+
+#[test]
+fn state_close_wontfix_rejected_with_open_subissue() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    // Any close transition is guarded, not just resolve.
+    repo.ti()
+        .args(["state", "closed:wontfix", "-t", &parent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("open sub-issue"));
+}
+
+#[test]
+fn close_succeeds_after_subissue_resolved() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+
+    repo.ti().args(["close", &child]).assert().success();
+    repo.ti().args(["close", &parent]).assert().success();
+}

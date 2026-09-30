@@ -1,6 +1,6 @@
 use std::io::{self, IsTerminal};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::Select;
@@ -26,6 +26,10 @@ pub struct Args {
     /// Output the updated ticket as Markdown.
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
+
+    /// Apply the change even if closing a ticket with open sub-issues.
+    #[arg(long = "force")]
+    pub force: bool,
 }
 
 fn interactive_lifecycle_spec(ticket: &Ticket) -> Result<Option<String>> {
@@ -87,7 +91,13 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     let lifecycle = TicketLifecycle::parse(&lifecycle_spec)?;
-    store.set_lifecycle(&id, lifecycle.status, lifecycle.state)?;
+    if args.force {
+        store.set_lifecycle_forced(&id, lifecycle.status, lifecycle.state)?;
+    } else {
+        store
+            .set_lifecycle(&id, lifecycle.status, lifecycle.state)
+            .map_err(|e| anyhow!("{e} (use --force to override)"))?;
+    }
     let ticket = store.load(&id)?;
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);

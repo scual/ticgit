@@ -302,7 +302,9 @@ fn merge_ticket(store: &TicketStore, local: &Ticket, remote: &Ticket) -> Result<
         changed = true;
     }
     if remote.state != local.state {
-        store.set_state(id, remote.state)?;
+        // The remote is authoritative during sync; bypass the open-sub-issue
+        // guard so mirroring a remote close never fails locally.
+        store.set_lifecycle_forced(id, remote.state.status(), remote.state)?;
         changed = true;
     }
     if remote.assigned != local.assigned {
