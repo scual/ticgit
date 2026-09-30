@@ -686,6 +686,62 @@ fn push_sends_tickets_to_bare_remote() {
 }
 
 #[test]
+fn push_json_emits_result_object() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+    create_ticket(&repo, "pushed ticket");
+
+    let output = repo
+        .ti()
+        .args(["push", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["remote"], "origin");
+    assert_eq!(json["ref"], "refs/meta/main");
+    assert_eq!(json["url"], remote_url);
+    assert_eq!(json["pushed_total"], 1);
+    // The human-readable lines must not leak into JSON stdout.
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Done."));
+}
+
+#[test]
+fn sync_json_emits_result_object() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+    create_ticket(&repo, "synced ticket");
+    // Seed the remote so the pull half of sync succeeds.
+    repo.ti().arg("push").assert().success();
+
+    let output = repo
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ref"], "refs/meta/main");
+    assert_eq!(json["pushed_total"], 1);
+    assert!(json["pulled"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn new_show_and_list_round_trip() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "first bug");
