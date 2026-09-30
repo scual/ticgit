@@ -2255,3 +2255,146 @@ fn new_subissue_under_closed_parent_is_rejected() {
         .failure()
         .stderr(predicate::str::contains("closed ticket"));
 }
+
+/// Run `ti next --json` and parse the result.
+fn next_json(repo: &TestRepo) -> Value {
+    let output = repo
+        .ti()
+        .args(["next", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+#[test]
+fn next_skips_tickets_with_unresolved_dependencies() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    // The dependent has an open dependency, so next picks the blocker.
+    assert_eq!(next_json(&repo)["id"], blocker);
+
+    // Once the blocker is resolved, the dependent becomes workable.
+    repo.ti().args(["close", &blocker]).assert().success();
+    assert_eq!(next_json(&repo)["id"], dependent);
+}
+
+#[test]
+fn next_prefers_lower_priority_number() {
+    let repo = TestRepo::new();
+    let lo = create_ticket(&repo, "low priority");
+    let hi = create_ticket(&repo, "high priority");
+    repo.ti().args(["priority", "5", "-t", &lo]).assert().success();
+    repo.ti().args(["priority", "1", "-t", &hi]).assert().success();
+
+    assert_eq!(next_json(&repo)["id"], hi);
+}
+
+#[test]
+fn next_skips_subissues() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    // The child is a sub-issue and is skipped; the parent is picked.
+    assert_eq!(next_json(&repo)["id"], parent);
+}
+
+#[test]
+fn next_json_is_null_when_nothing_workable() {
+    let repo = TestRepo::new();
+    let output = repo
+        .ti()
+        .args(["next", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json["next"].is_null());
+}
+
+#[test]
+fn users_add_list_and_remove() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["users", "add", "scott", "scott@example.com"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["users", "add", "scott", "chacon@example.com"])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["users", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["scott"].as_array().unwrap().len(), 2);
+
+    // Remove one email.
+    repo.ti()
+        .args(["users", "rm", "scott", "chacon@example.com"])
+        .assert()
+        .success();
+    let output = repo
+        .ti()
+        .args(["users", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["scott"].as_array().unwrap().len(), 1);
+
+    // Remove the whole user.
+    repo.ti().args(["users", "rm", "scott"]).assert().success();
+    let output = repo
+        .ti()
+        .args(["users", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json.get("scott").is_none());
+}
+
+#[test]
+fn assign_resolves_user_nick_to_email() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["users", "add", "scott", "scott@example.com"])
+        .assert()
+        .success();
+    let id = create_ticket(&repo, "task");
+
+    repo.ti().args(["assign", "scott", "-t", &id]).assert().success();
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["assigned"], "scott@example.com");
+}
