@@ -2339,6 +2339,111 @@ fn subissue_json_includes_the_parent_counterpart() {
     assert_eq!(json["parent"]["title"], "parent feature");
 }
 
+/// Fetch one field of a ticket via `ti show --json`.
+fn show_field(repo: &TestRepo, id: &str, key: &str) -> Value {
+    let output = repo
+        .ti()
+        .args(["show", id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    json[key].clone()
+}
+
+#[test]
+fn field_clear_mutations_round_trip() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "fields");
+
+    repo.ti().args(["priority", "2", "-t", &id]).assert().success();
+    assert_eq!(show_field(&repo, &id, "priority"), 2);
+    repo.ti().args(["priority", "--clear", "-t", &id]).assert().success();
+    assert!(show_field(&repo, &id, "priority").is_null());
+
+    repo.ti().args(["milestone", "v1", "-t", &id]).assert().success();
+    assert_eq!(show_field(&repo, &id, "milestone"), "v1");
+    repo.ti().args(["milestone", "--clear", "-t", &id]).assert().success();
+    assert!(show_field(&repo, &id, "milestone").is_null());
+
+    repo.ti().args(["spec", "some notes", "-t", &id]).assert().success();
+    assert_eq!(show_field(&repo, &id, "spec"), "some notes");
+    repo.ti().args(["spec", "--clear", "-t", &id]).assert().success();
+    assert!(show_field(&repo, &id, "spec").is_null());
+}
+
+#[test]
+fn code_set_clear_and_invalid_rejected() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "code ticket");
+
+    repo.ti()
+        .args(["code", "https://github.com/o/r:main", "-t", &id])
+        .assert()
+        .success();
+    assert_eq!(show_field(&repo, &id, "code"), "https://github.com/o/r:main");
+    repo.ti().args(["code", "--clear", "-t", &id]).assert().success();
+    assert!(show_field(&repo, &id, "code").is_null());
+
+    // A URI without an http(s) scheme is rejected.
+    repo.ti()
+        .args(["code", "not-a-valid-uri", "-t", &id])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn pull_transfers_tickets_between_repos() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    // Repo A creates a ticket and pushes it.
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    a.ti().arg("push").assert().success();
+
+    // Repo B pulls from the same remote and sees the ticket.
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().args(["pull", &remote_url]).assert().success();
+
+    let output = b
+        .ti()
+        .args(["list", "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert!(tickets
+        .iter()
+        .any(|t| t["id"] == id && t["title"] == "shared ticket"));
+}
+
+#[test]
+fn stats_history_recent_and_mine_run() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "a ticket");
+
+    repo.ti()
+        .arg("stats")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("STATS"));
+    repo.ti().args(["history", "-t", &id]).assert().success();
+    repo.ti().arg("recent").assert().success();
+    // `mine` uses git user.email; the ticket isn't assigned to the tester,
+    // so this is empty but must still succeed.
+    repo.ti().arg("mine").assert().success();
+}
+
 /// Run `ti next --json` and parse the result.
 fn next_json(repo: &TestRepo) -> Value {
     let output = repo
