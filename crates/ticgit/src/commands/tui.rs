@@ -71,7 +71,7 @@ const DETAIL_WIDTH_PERCENT_STEP: u16 = 5;
 
 use crate::commands::{open_store, SessionGitDir};
 use crate::editor;
-use crate::session_state::{SavedView, State};
+use crate::session_state::{IssueFocusColor, SavedView, State};
 use crate::timefmt::relative_time;
 
 #[derive(Debug, Parser)]
@@ -248,6 +248,9 @@ struct App {
     detail: Option<usize>,
     writeup_detail: Option<usize>,
     review_detail: Option<usize>,
+    issue_detail_focus: IssuePaneFocus,
+    issue_detail_scroll: u16,
+    issue_focus_color: IssueFocusColor,
     review_mode: ReviewMode,
     writeup_detail_focus: WriteupPaneFocus,
     writeup_detail_scroll: u16,
@@ -281,6 +284,51 @@ enum WriteupPaneFocus {
     List,
     Detail,
     Toc,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum IssuePaneFocus {
+    #[default]
+    List,
+    Detail,
+}
+
+impl IssueFocusColor {
+    fn color(self) -> Color {
+        match self {
+            Self::Cyan => Color::Cyan,
+            Self::Green => Color::Green,
+            Self::Yellow => Color::Yellow,
+            Self::Magenta => Color::Magenta,
+            Self::Red => Color::Red,
+            Self::Blue => Color::Blue,
+            Self::White => Color::White,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cyan => "cyan",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Magenta => "magenta",
+            Self::Red => "red",
+            Self::Blue => "blue",
+            Self::White => "white",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Cyan => Self::Green,
+            Self::Green => Self::Yellow,
+            Self::Yellow => Self::Magenta,
+            Self::Magenta => Self::Red,
+            Self::Red => Self::Blue,
+            Self::Blue => Self::White,
+            Self::White => Self::Cyan,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -596,6 +644,7 @@ impl App {
             .unwrap_or(DETAIL_WIDTH_PERCENT_DEFAULT)
             .clamp(DETAIL_WIDTH_PERCENT_MIN, DETAIL_WIDTH_PERCENT_MAX);
         let show_subissues_preference = project_settings.show_subissues.unwrap_or(false);
+        let issue_focus_color = project_settings.issue_focus_color.unwrap_or_default();
         let (review_commit_info_sender, review_commit_info_receiver) = mpsc::channel();
         let mut app = Self {
             store,
@@ -667,6 +716,9 @@ impl App {
             detail: None,
             writeup_detail: None,
             review_detail: None,
+            issue_detail_focus: IssuePaneFocus::List,
+            issue_detail_scroll: 0,
+            issue_focus_color,
             review_mode: ReviewMode::Summary,
             writeup_detail_focus: WriteupPaneFocus::List,
             writeup_detail_scroll: 0,
@@ -1630,14 +1682,30 @@ impl App {
                         },
                     ]
                 } else if self.detail.is_some() {
+                    let move_hint = if self.issue_detail_focus == IssuePaneFocus::Detail {
+                        MenuHint {
+                            key: "j/k",
+                            desc: "scroll",
+                        }
+                    } else {
+                        MenuHint {
+                            key: "j/k",
+                            desc: "tickets",
+                        }
+                    };
                     vec![
                         MenuHint {
                             key: "Tab",
                             desc: "writeups",
                         },
+                        move_hint,
                         MenuHint {
-                            key: "j/k",
-                            desc: "tickets",
+                            key: "h/l",
+                            desc: "pane",
+                        },
+                        MenuHint {
+                            key: "z",
+                            desc: "focus color",
                         },
                         MenuHint {
                             key: "b",
@@ -1822,7 +1890,14 @@ impl App {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(tabs_title(self.active_tab, ""))
-            .title(view_state_title(title));
+            .title(view_state_title(title))
+            .border_style(
+                if self.detail.is_some() && self.issue_detail_focus == IssuePaneFocus::List {
+                    Style::default().fg(self.issue_focus_color.color())
+                } else {
+                    Style::default()
+                },
+            );
         let row_width =
             table_row_width(area, &block).saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
         let compact = self.detail.is_some();
@@ -2191,10 +2266,18 @@ impl App {
             }
         }
 
-        let detail_block = Block::default().borders(Borders::ALL).title("Details");
+        let detail_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Details")
+            .border_style(if self.issue_detail_focus == IssuePaneFocus::Detail {
+                Style::default().fg(self.issue_focus_color.color())
+            } else {
+                Style::default()
+            });
         let detail = Paragraph::new(detail_lines)
             .block(detail_block)
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((self.issue_detail_scroll, 0));
         frame.render_widget(detail, area);
     }
 
@@ -4174,6 +4257,7 @@ impl App {
                     Some(("n/N", "new/subissue")),
                 ));
                 lines.push(help_columns(("P", "jump parent"), Some(("m", "comments"))));
+                lines.push(help_columns(("z", "focus color"), None));
                 lines.push(help_columns(("+/-", "resize detail"), None));
                 lines.push(help_columns(("r", "refresh"), None));
 
@@ -4372,6 +4456,8 @@ impl App {
                 } else if self.detail.is_some() {
                     self.detail = None;
                     self.comments_mode = false;
+                    self.issue_detail_focus = IssuePaneFocus::List;
+                    self.issue_detail_scroll = 0;
                     false
                 } else if self.view == ViewMode::Board {
                     self.view = ViewMode::List;
@@ -4444,6 +4530,12 @@ impl App {
             KeyCode::Char('b') => {
                 if self.active_tab == TuiTab::Issues {
                     self.handle_board_key()?;
+                }
+                false
+            }
+            KeyCode::Char('z') => {
+                if self.active_tab == TuiTab::Issues && self.detail.is_some() {
+                    self.cycle_issue_focus_color();
                 }
                 false
             }
@@ -4527,6 +4619,11 @@ impl App {
                     && self.writeup_detail_focus == WriteupPaneFocus::Detail
                 {
                     self.scroll_writeup_detail(1);
+                } else if self.active_tab == TuiTab::Issues
+                    && self.detail.is_some()
+                    && self.issue_detail_focus == IssuePaneFocus::Detail
+                {
+                    self.scroll_issue_detail(1);
                 } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail_focus == WriteupPaneFocus::Toc
                 {
@@ -4556,6 +4653,11 @@ impl App {
                     && self.writeup_detail_focus == WriteupPaneFocus::Detail
                 {
                     self.scroll_writeup_detail(-1);
+                } else if self.active_tab == TuiTab::Issues
+                    && self.detail.is_some()
+                    && self.issue_detail_focus == IssuePaneFocus::Detail
+                {
+                    self.scroll_issue_detail(-1);
                 } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail_focus == WriteupPaneFocus::Toc
                 {
@@ -4575,6 +4677,8 @@ impl App {
                     self.focus_next_review_commit_pane();
                 } else if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
                     self.focus_next_writeup_pane();
+                } else if self.active_tab == TuiTab::Issues && self.detail.is_some() {
+                    self.issue_detail_focus = IssuePaneFocus::Detail;
                 } else if self.active_tab == TuiTab::Issues
                     && self.view == ViewMode::Board
                     && self.detail.is_none()
@@ -4588,6 +4692,8 @@ impl App {
                     self.focus_previous_review_commit_pane();
                 } else if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
                     self.focus_previous_writeup_pane();
+                } else if self.active_tab == TuiTab::Issues && self.detail.is_some() {
+                    self.issue_detail_focus = IssuePaneFocus::List;
                 } else if self.active_tab == TuiTab::Issues
                     && self.view == ViewMode::Board
                     && self.detail.is_none()
@@ -7637,6 +7743,15 @@ impl App {
         self.sync_writeup_toc_to_scroll();
     }
 
+    fn scroll_issue_detail(&mut self, delta: i16) {
+        self.issue_detail_scroll = if delta.is_negative() {
+            self.issue_detail_scroll
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.issue_detail_scroll.saturating_add(delta as u16)
+        };
+    }
+
     fn toggle_writeup_toc(&mut self) {
         if self.writeup_toc_open {
             self.writeup_toc_open = false;
@@ -7760,8 +7875,18 @@ impl App {
         let mut settings = state.project_settings_for(&git_dir);
         settings.detail_width_percent = Some(self.detail_width_percent);
         settings.show_subissues = Some(self.show_subissues_preference);
+        settings.issue_focus_color = Some(self.issue_focus_color);
         state.set_project_settings(&git_dir, settings);
         state.save()
+    }
+
+    fn cycle_issue_focus_color(&mut self) {
+        self.issue_focus_color = self.issue_focus_color.next();
+        let color_name = self.issue_focus_color.label();
+        self.status = Some(match self.save_project_settings() {
+            Ok(()) => format!("Focus color: {color_name}."),
+            Err(err) => format!("Focus color: {color_name}. Settings not saved: {err}"),
+        });
     }
 
     fn review_commit_info_cached(&mut self, sha: &str) -> ReviewCommitInfo {
@@ -8115,6 +8240,12 @@ impl App {
             return;
         }
         if let Some(idx) = self.selected_ticket_index() {
+            if self.detail != Some(idx) {
+                self.issue_detail_scroll = 0;
+            }
+            if self.detail.is_none() {
+                self.issue_detail_focus = IssuePaneFocus::List;
+            }
             self.detail = Some(idx);
             self.select_list_ticket_by_index(idx);
             self.comments_mode = false;
@@ -8166,7 +8297,11 @@ impl App {
             .position(|idx| self.tickets[*idx].id == id)
         {
             self.list_state.select(Some(list_pos));
+            if self.detail != list_indices.get(list_pos).copied() {
+                self.issue_detail_scroll = 0;
+            }
             self.detail = list_indices.get(list_pos).copied();
+            self.issue_detail_focus = IssuePaneFocus::List;
             self.comments_mode = false;
             self.sync_comment_selection();
         }
@@ -14133,6 +14268,31 @@ mod tests {
         assert!(title.contains(" writeups "));
         assert!(title.contains("[reviews]"));
         assert!(title.contains("Open reviews"));
+    }
+
+    #[test]
+    fn issue_focus_color_cycles_through_terminal_palette() {
+        let palette = [
+            (IssueFocusColor::Yellow, Color::Yellow),
+            (IssueFocusColor::Green, Color::Green),
+            (IssueFocusColor::Cyan, Color::Cyan),
+            (IssueFocusColor::Magenta, Color::Magenta),
+            (IssueFocusColor::Red, Color::Red),
+            (IssueFocusColor::Blue, Color::Blue),
+            (IssueFocusColor::White, Color::White),
+        ];
+        let mut color = IssueFocusColor::Yellow;
+
+        for (index, (expected, terminal_color)) in palette.iter().enumerate() {
+            assert_eq!(&color, expected);
+            assert_eq!(color.color(), *terminal_color);
+            assert!(!palette[..index]
+                .iter()
+                .any(|(previous, _)| previous == expected));
+            color = color.next();
+        }
+
+        assert_eq!(color, IssueFocusColor::Cyan);
     }
 
     #[test]

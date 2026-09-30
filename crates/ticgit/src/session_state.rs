@@ -38,6 +38,21 @@ pub struct ProjectSettings {
     pub detail_width_percent: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_subissues: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_focus_color: Option<IssueFocusColor>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueFocusColor {
+    #[default]
+    Cyan,
+    Green,
+    Yellow,
+    Magenta,
+    Red,
+    Blue,
+    White,
 }
 
 /// A saved set of list filter parameters.
@@ -213,6 +228,22 @@ fn key_for(git_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_focus_color_settings_are_backward_compatible() {
+        let legacy: ProjectSettings =
+            serde_json::from_str(r#"{"detail_width_percent":58}"#).unwrap();
+        assert_eq!(legacy.issue_focus_color, None);
+
+        let settings = ProjectSettings {
+            issue_focus_color: Some(IssueFocusColor::Magenta),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let decoded: ProjectSettings = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.issue_focus_color, Some(IssueFocusColor::Magenta));
+    }
 
     #[test]
     fn list_views_orders_newest_first() {
