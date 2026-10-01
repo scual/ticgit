@@ -1297,6 +1297,128 @@ fn close_explicit_ticket_keeps_other_checkout() {
 }
 
 #[test]
+fn delete_removes_a_ticket_with_yes() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "doomed");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    // Gone from list.
+    let out = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn delete_without_yes_fails_non_interactively() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "keep me");
+    repo.ti().args(["delete", &id]).assert().failure();
+    // Still present.
+    repo.ti().args(["show", &id, "--json"]).assert().success();
+}
+
+#[test]
+fn delete_unknown_id_is_atomic() {
+    let repo = TestRepo::new();
+    let keep = create_ticket(&repo, "survivor");
+    // Second arg is a bogus prefix; nothing should be deleted.
+    repo.ti()
+        .args(["delete", &keep, "ffffffff", "--yes"])
+        .assert()
+        .failure();
+    repo.ti().args(["show", &keep, "--json"]).assert().success();
+}
+
+#[test]
+fn delete_parent_orphans_children_by_default() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    repo.ti()
+        .args(["delete", &parent, "--yes"])
+        .assert()
+        .success();
+    // Child survives and is now top-level (parent is null).
+    let out = repo
+        .ti()
+        .args(["show", &child, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let t: Value = serde_json::from_slice(&out).unwrap();
+    assert!(t["parent"].is_null());
+}
+
+#[test]
+fn delete_recursive_removes_subtree_including_closed() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let grandchild = create_subissue(&repo, &child, "grandchild");
+    // Close the grandchild to prove recursive delete ignores status.
+    repo.ti().args(["close", &grandchild]).assert().success();
+    repo.ti()
+        .args(["delete", &parent, "--recursive", "--yes"])
+        .assert()
+        .success();
+    for id in [&parent, &child, &grandchild] {
+        repo.ti().args(["show", id, "--json"]).assert().failure();
+    }
+}
+
+#[test]
+fn delete_multiple_ids_in_one_invocation() {
+    let repo = TestRepo::new();
+    let a = create_ticket(&repo, "a");
+    let b = create_ticket(&repo, "b");
+    repo.ti()
+        .args(["delete", &a, &b, "--yes"])
+        .assert()
+        .success();
+    let out = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn delete_clears_checked_out_ticket() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "current");
+    repo.ti().args(["checkout", &id]).assert().success();
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    // After clearing, `ti show` with no id fails with the "none checked out"
+    // message. If the session were NOT cleared, it would instead fail trying to
+    // load the dangling current id — so asserting this specific message proves
+    // the pointer was cleared, not left dangling.
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
 fn new_checkout_selects_created_ticket() {
     let repo = TestRepo::new();
 

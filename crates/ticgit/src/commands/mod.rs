@@ -8,6 +8,7 @@ pub mod claim;
 pub mod close;
 pub mod code;
 pub mod comment;
+pub mod delete;
 pub mod depends;
 pub mod edit;
 pub mod history;
