@@ -42,4 +42,13 @@ pub enum Error {
     Time(String),
 }
 
+impl Error {
+    /// True when a pull failed only because the remote has no meta ref yet.
+    /// git-meta-lib reports this as an opaque git error, so this is the one
+    /// place that knows its wording.
+    pub fn is_missing_remote_ref(&self) -> bool {
+        matches!(self, Error::GitMeta(_)) && self.to_string().contains("couldn't find remote ref")
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

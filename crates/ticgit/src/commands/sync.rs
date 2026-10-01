@@ -100,7 +100,7 @@ pub(crate) fn sync_tickets(
     // A remote that has never received tickets has no meta ref to pull yet;
     // the push below creates it.
     if let Err(err) = store.pull(remote) {
-        if !format!("{err:#}").contains("couldn't find remote ref") {
+        if !err.is_missing_remote_ref() {
             return Err(err.into());
         }
     }

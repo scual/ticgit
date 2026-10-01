@@ -104,7 +104,7 @@ fn install(args: TargetArgs) -> Result<()> {
 }
 
 fn check(args: TargetArgs) -> Result<()> {
-    let path = hook_path(args.target.map_or_else(detect_target, Ok)?)?;
+    let path = resolve_hook_path(args.target)?;
     let current = std::fs::read_to_string(&path)
         .map(|contents| contents.contains(&block()))
         .unwrap_or(false);
@@ -119,7 +119,7 @@ fn check(args: TargetArgs) -> Result<()> {
 }
 
 fn uninstall(args: TargetArgs) -> Result<()> {
-    let path = hook_path(args.target.map_or_else(detect_target, Ok)?)?;
+    let path = resolve_hook_path(args.target)?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let Some(next) = remove_block(&existing) else {
         println!("No Sync hook in {}.", path.display());
@@ -132,6 +132,11 @@ fn uninstall(args: TargetArgs) -> Result<()> {
     }
     println!("Removed Sync hook from {}.", path.display());
     Ok(())
+}
+
+/// Path of the hook file for an explicit target, or the detected one.
+fn resolve_hook_path(target: Option<Target>) -> Result<PathBuf> {
+    hook_path(target.map_or_else(detect_target, Ok)?)
 }
 
 fn prompt_target(detected: Target) -> Result<Target> {

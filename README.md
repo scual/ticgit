@@ -199,7 +199,7 @@ remote from Git config.
 Install a Sync hook so tickets travel with your code:
 
 ```sh
-ti hook install            # detects Husky (.husky/) or falls back to .git/hooks
+ti hook install            # detects Husky (.husky/) or falls back to the git hooks directory
 ti hook install --target husky|git
 ti hook check              # exits non-zero if missing or out of date
 ti hook uninstall
