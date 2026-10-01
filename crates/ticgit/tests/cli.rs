@@ -2133,6 +2133,47 @@ fn show_resolves_relationships_to_title_and_status() {
 }
 
 #[test]
+fn show_json_includes_recursive_subissues() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let grandchild = create_subissue(&repo, &child, "grandchild");
+
+    let out = repo
+        .ti()
+        .args(["show", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["id"], parent);
+    assert!(v["children"].is_array()); // flat UUID array preserved
+    assert_eq!(v["subissues"][0]["id"], child);
+    assert_eq!(v["subissues"][0]["subissues"][0]["id"], grandchild);
+}
+
+#[test]
+fn show_text_shows_subissue_tree() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    let out = repo
+        .ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Sub-issues:"), "missing header in:\n{text}");
+    assert!(text.contains("child"), "missing child in:\n{text}");
+}
+
+#[test]
 fn close_rejected_with_open_dependency_then_force_succeeds() {
     let repo = TestRepo::new();
     let dependent = create_ticket(&repo, "dependent");
@@ -2262,7 +2303,13 @@ fn writeup_show_and_list_json() {
     let out = repo
         .ti()
         .args([
-            "writeup", "new", "--title", "Big idea", "--body", "first cut", "--id-only",
+            "writeup",
+            "new",
+            "--title",
+            "Big idea",
+            "--body",
+            "first cut",
+            "--id-only",
         ])
         .assert()
         .success()
@@ -2358,19 +2405,37 @@ fn field_clear_mutations_round_trip() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "fields");
 
-    repo.ti().args(["priority", "2", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["priority", "2", "-t", &id])
+        .assert()
+        .success();
     assert_eq!(show_field(&repo, &id, "priority"), 2);
-    repo.ti().args(["priority", "--clear", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["priority", "--clear", "-t", &id])
+        .assert()
+        .success();
     assert!(show_field(&repo, &id, "priority").is_null());
 
-    repo.ti().args(["milestone", "v1", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["milestone", "v1", "-t", &id])
+        .assert()
+        .success();
     assert_eq!(show_field(&repo, &id, "milestone"), "v1");
-    repo.ti().args(["milestone", "--clear", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["milestone", "--clear", "-t", &id])
+        .assert()
+        .success();
     assert!(show_field(&repo, &id, "milestone").is_null());
 
-    repo.ti().args(["spec", "some notes", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["spec", "some notes", "-t", &id])
+        .assert()
+        .success();
     assert_eq!(show_field(&repo, &id, "spec"), "some notes");
-    repo.ti().args(["spec", "--clear", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["spec", "--clear", "-t", &id])
+        .assert()
+        .success();
     assert!(show_field(&repo, &id, "spec").is_null());
 }
 
@@ -2383,8 +2448,14 @@ fn code_set_clear_and_invalid_rejected() {
         .args(["code", "https://github.com/o/r:main", "-t", &id])
         .assert()
         .success();
-    assert_eq!(show_field(&repo, &id, "code"), "https://github.com/o/r:main");
-    repo.ti().args(["code", "--clear", "-t", &id]).assert().success();
+    assert_eq!(
+        show_field(&repo, &id, "code"),
+        "https://github.com/o/r:main"
+    );
+    repo.ti()
+        .args(["code", "--clear", "-t", &id])
+        .assert()
+        .success();
     assert!(show_field(&repo, &id, "code").is_null());
 
     // A URI without an http(s) scheme is rejected.
@@ -2480,8 +2551,14 @@ fn next_prefers_lower_priority_number() {
     let repo = TestRepo::new();
     let lo = create_ticket(&repo, "low priority");
     let hi = create_ticket(&repo, "high priority");
-    repo.ti().args(["priority", "5", "-t", &lo]).assert().success();
-    repo.ti().args(["priority", "1", "-t", &hi]).assert().success();
+    repo.ti()
+        .args(["priority", "5", "-t", &lo])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["priority", "1", "-t", &hi])
+        .assert()
+        .success();
 
     assert_eq!(next_json(&repo)["id"], hi);
 }
@@ -2620,7 +2697,10 @@ fn assign_resolves_user_nick_to_email() {
         .success();
     let id = create_ticket(&repo, "task");
 
-    repo.ti().args(["assign", "scott", "-t", &id]).assert().success();
+    repo.ti()
+        .args(["assign", "scott", "-t", &id])
+        .assert()
+        .success();
 
     let output = repo
         .ti()
