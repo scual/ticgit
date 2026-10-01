@@ -302,7 +302,9 @@ fn merge_ticket(store: &TicketStore, local: &Ticket, remote: &Ticket) -> Result<
         changed = true;
     }
     if remote.state != local.state {
-        store.set_state(id, remote.state)?;
+        // The remote is authoritative during sync; bypass the close
+        // guards so mirroring a remote close never fails locally.
+        store.set_lifecycle_forced(id, remote.state.status(), remote.state)?;
         changed = true;
     }
     if remote.assigned != local.assigned {
@@ -345,12 +347,13 @@ fn merge_ticket(store: &TicketStore, local: &Ticket, remote: &Ticket) -> Result<
     }
 
     // Parent: take remote's if different (but don't clear if remote has none).
-    if remote.parent.is_some() && remote.parent != local.parent {
-        let parent_id = remote.parent.unwrap();
-        let p = store.session().target(&ticgit_lib::Target::project());
-        let pid = parent_id.to_string();
-        p.set(&ticgit_lib::keys::ticket_field(id, "parent"), pid.as_str())?;
-        changed = true;
+    if let Some(parent_id) = remote.parent {
+        if Some(parent_id) != local.parent {
+            let p = store.session().target(&ticgit_lib::Target::project());
+            let pid = parent_id.to_string();
+            p.set(&ticgit_lib::keys::ticket_field(id, "parent"), pid.as_str())?;
+            changed = true;
+        }
     }
 
     // Children: union.

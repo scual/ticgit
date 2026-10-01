@@ -34,6 +34,12 @@ impl TestRepo {
             "TICGIT_STATE_FILE",
             self.state_file.path().join("state.json"),
         );
+        // Keep tests hermetic: the editor-resolution order is GIT_EDITOR ->
+        // core.editor -> VISUAL -> EDITOR, so an ambient GIT_EDITOR/VISUAL in
+        // the developer's shell would shadow a test's own `EDITOR` override.
+        cmd.env_remove("GIT_EDITOR");
+        cmd.env_remove("VISUAL");
+        cmd.env_remove("EDITOR");
         cmd
     }
 }
@@ -420,6 +426,13 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         schema["$defs"]["ticket"]["properties"]["meta"]["additionalProperties"]["type"],
         "string"
     );
+    // `subissues` is an optional, additive property — documented but not required.
+    assert!(schema["$defs"]["ticket"]["properties"]["subissues"].is_object());
+    assert!(!required.contains("subissues"));
+    assert_eq!(
+        schema["$defs"]["subissueNode"]["additionalProperties"],
+        false
+    );
 
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "schema ticket");
@@ -447,7 +460,10 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         .keys()
         .map(|key| key.to_string())
         .collect();
-    assert_eq!(ticket_keys, required);
+    let mut show_keys = required.clone();
+    show_keys.insert("subissues".to_string());
+    assert_eq!(ticket_keys, show_keys);
+    assert!(ticket["subissues"].is_array());
     assert_eq!(ticket["id"], id);
     assert_eq!(ticket["status"], "open");
     assert_eq!(ticket["state"], "new");
@@ -677,6 +693,62 @@ fn push_sends_tickets_to_bare_remote() {
         .stdout(predicate::str::contains(format!("URL: {remote_url}")))
         .stdout(predicate::str::contains("1 ticket(s) synced"))
         .stdout(predicate::str::contains("Done."));
+}
+
+#[test]
+fn push_json_emits_result_object() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+    create_ticket(&repo, "pushed ticket");
+
+    let output = repo
+        .ti()
+        .args(["push", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["remote"], "origin");
+    assert_eq!(json["ref"], "refs/meta/main");
+    assert_eq!(json["url"], remote_url);
+    assert_eq!(json["pushed_total"], 1);
+    // The human-readable lines must not leak into JSON stdout.
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Done."));
+}
+
+#[test]
+fn sync_json_emits_result_object() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+    create_ticket(&repo, "synced ticket");
+    // Seed the remote so the pull half of sync succeeds.
+    repo.ti().arg("push").assert().success();
+
+    let output = repo
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ref"], "refs/meta/main");
+    assert_eq!(json["pushed_total"], 1);
+    assert!(json["pulled"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -1222,6 +1294,205 @@ fn close_explicit_ticket_keeps_other_checkout() {
         .assert()
         .success()
         .stdout(predicate::str::contains("current ticket"));
+}
+
+#[test]
+fn delete_removes_a_ticket_with_yes() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "doomed");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    // Gone from list.
+    let out = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn delete_without_yes_fails_non_interactively() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "keep me");
+    repo.ti().args(["delete", &id]).assert().failure();
+    // Still present.
+    repo.ti().args(["show", &id, "--json"]).assert().success();
+}
+
+#[test]
+fn delete_unknown_id_is_atomic() {
+    let repo = TestRepo::new();
+    let keep = create_ticket(&repo, "survivor");
+    // Second arg is a bogus prefix; nothing should be deleted.
+    repo.ti()
+        .args(["delete", &keep, "ffffffff", "--yes"])
+        .assert()
+        .failure();
+    repo.ti().args(["show", &keep, "--json"]).assert().success();
+}
+
+#[test]
+fn delete_parent_orphans_children_by_default() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    repo.ti()
+        .args(["delete", &parent, "--yes"])
+        .assert()
+        .success();
+    // Child survives and is now top-level (parent is null).
+    let out = repo
+        .ti()
+        .args(["show", &child, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let t: Value = serde_json::from_slice(&out).unwrap();
+    assert!(t["parent"].is_null());
+}
+
+#[test]
+fn delete_recursive_removes_subtree_including_closed() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let grandchild = create_subissue(&repo, &child, "grandchild");
+    // Close the grandchild to prove recursive delete ignores status.
+    repo.ti().args(["close", &grandchild]).assert().success();
+    repo.ti()
+        .args(["delete", &parent, "--recursive", "--yes"])
+        .assert()
+        .success();
+    for id in [&parent, &child, &grandchild] {
+        repo.ti().args(["show", id, "--json"]).assert().failure();
+    }
+}
+
+#[test]
+fn delete_multiple_ids_in_one_invocation() {
+    let repo = TestRepo::new();
+    let a = create_ticket(&repo, "a");
+    let b = create_ticket(&repo, "b");
+    repo.ti()
+        .args(["delete", &a, &b, "--yes"])
+        .assert()
+        .success();
+    let out = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn delete_clears_checked_out_ticket() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "current");
+    repo.ti().args(["checkout", &id]).assert().success();
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    // After clearing, `ti show` with no id fails with the "none checked out"
+    // message. If the session were NOT cleared, it would instead fail trying to
+    // load the dangling current id — so asserting this specific message proves
+    // the pointer was cleared, not left dangling.
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
+fn delete_json_emits_array_of_deleted_tickets() {
+    let repo = TestRepo::new();
+    let a = create_ticket(&repo, "alpha");
+    let b = create_ticket(&repo, "beta");
+    let out = repo
+        .ti()
+        .args(["delete", &a, &b, "--yes", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).unwrap();
+    assert!(!stdout.contains("\x1b["), "no ANSI in JSON: {stdout:?}");
+    let arr: Value = serde_json::from_str(&stdout).unwrap();
+    let ids: std::collections::BTreeSet<String> = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, std::collections::BTreeSet::from([a, b]));
+}
+
+#[test]
+fn delete_json_is_array_even_for_single_id() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "solo");
+    let out = repo
+        .ti()
+        .args(["delete", &id, "--yes", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert!(v.is_array());
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["id"], id);
+}
+
+#[test]
+fn delete_json_requires_yes() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "needs yes");
+    repo.ti()
+        .args(["delete", &id, "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""));
+    // Not deleted.
+    repo.ti().args(["show", &id, "--json"]).assert().success();
+}
+
+#[test]
+fn delete_markdown_lists_deleted_tickets() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "mark me");
+    let out = repo
+        .ti()
+        .args(["delete", &id, "--yes", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let md = String::from_utf8(out).unwrap();
+    assert!(
+        md.contains("# Deleted tickets"),
+        "missing heading in:\n{md}"
+    );
+    assert!(md.contains("mark me"), "missing title in:\n{md}");
 }
 
 #[test]
@@ -1951,4 +2222,722 @@ JSON
         .stdout(predicate::str::contains(
             "Skipped 2 issue(s) that were already imported.",
         ));
+}
+
+/// Create a ticket that is a sub-issue of `parent`, returning its id.
+fn create_subissue(repo: &TestRepo, parent: &str, title: &str) -> String {
+    let out = repo
+        .ti()
+        .args(["new", "--title", title, "--subissue", parent, "--id-only"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out).unwrap().trim().to_string()
+}
+
+#[test]
+fn close_rejected_with_open_subissue_then_force_succeeds() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let child_short: String = child.chars().take(6).collect();
+
+    // Plain close is rejected and names the open sub-issue.
+    repo.ti()
+        .args(["close", &parent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("open sub-issue"))
+        .stderr(predicate::str::contains(child_short))
+        .stderr(predicate::str::contains("--force"));
+
+    // Parent is still open.
+    let output = repo
+        .ti()
+        .args(["show", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "open");
+
+    // --force overrides.
+    repo.ti()
+        .args(["close", &parent, "--force"])
+        .assert()
+        .success();
+    let output = repo
+        .ti()
+        .args(["show", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "closed");
+}
+
+#[test]
+fn state_close_wontfix_rejected_with_open_subissue() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    // Any close transition is guarded, not just resolve.
+    repo.ti()
+        .args(["state", "closed:wontfix", "-t", &parent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("open sub-issue"));
+}
+
+#[test]
+fn close_succeeds_after_subissue_resolved() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+
+    repo.ti().args(["close", &child]).assert().success();
+    repo.ti().args(["close", &parent]).assert().success();
+}
+
+#[test]
+fn show_resolves_relationships_to_title_and_status() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent feature");
+    let child = create_subissue(&repo, &parent, "child task");
+    let blocker = create_ticket(&repo, "the blocker");
+    repo.ti()
+        .args(["depends", "--ticket", &parent, &blocker])
+        .assert()
+        .success();
+
+    // Parent shows its child and dependency with title + status, not bare hex.
+    repo.ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("child task").and(predicate::str::contains("[open]")))
+        .stdout(predicate::str::contains("the blocker"));
+
+    // Markdown output carries the same relationships (was previously omitted).
+    repo.ti()
+        .args(["show", &parent, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("- Children:").and(predicate::str::contains("child task")))
+        .stdout(predicate::str::contains("- Depends on:"));
+
+    // The child points back at its parent by title.
+    repo.ti()
+        .args(["show", &child])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parent").and(predicate::str::contains("parent feature")));
+}
+
+#[test]
+fn show_json_includes_recursive_subissues() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let grandchild = create_subissue(&repo, &child, "grandchild");
+
+    let out = repo
+        .ti()
+        .args(["show", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["id"], parent);
+    assert!(v["children"].is_array()); // flat UUID array preserved
+    assert_eq!(v["subissues"][0]["id"], child);
+    assert_eq!(v["subissues"][0]["subissues"][0]["id"], grandchild);
+}
+
+#[test]
+fn show_text_shows_subissue_tree() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    let out = repo
+        .ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Sub-issues:"), "missing header in:\n{text}");
+    assert!(text.contains("child"), "missing child in:\n{text}");
+}
+
+#[test]
+fn show_markdown_shows_subissue_tree() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    let out = repo
+        .ti()
+        .args(["show", &parent, "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("## Sub-issues"), "missing header in:\n{text}");
+    assert!(text.contains("child"), "missing child in:\n{text}");
+}
+
+#[test]
+fn close_rejected_with_open_dependency_then_force_succeeds() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "the blocker");
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    // Closing the dependent is rejected while the blocker is open.
+    repo.ti()
+        .args(["close", &dependent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("open dependenc"))
+        .stderr(predicate::str::contains("--force"));
+
+    // Closing the blocker itself is allowed (the normal case).
+    repo.ti().args(["close", &blocker]).assert().success();
+    // Now the dependent closes cleanly.
+    repo.ti().args(["close", &dependent]).assert().success();
+}
+
+#[test]
+fn list_parent_shows_only_direct_children() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent feature");
+    let child_a = create_subissue(&repo, &parent, "child a");
+    let child_b = create_subissue(&repo, &parent, "child b");
+    create_ticket(&repo, "unrelated");
+
+    let output = repo
+        .ti()
+        .args(["list", "--parent", &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    // Exactly the two children, surfaced despite sub-issues being hidden by default.
+    let ids: BTreeSet<String> = tickets
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&child_a));
+    assert!(ids.contains(&child_b));
+    assert!(!ids.contains(&parent));
+}
+
+#[test]
+fn new_with_depends_on_creates_dependency() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "the blocker");
+
+    let output = repo
+        .ti()
+        .args([
+            "new",
+            "--title",
+            "dependent",
+            "--depends-on",
+            &blocker,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let deps = json["depends_on"].as_array().unwrap();
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0], blocker);
+
+    // Reverse side is set: the blocker now blocks the new ticket.
+    let new_id = json["id"].as_str().unwrap();
+    let output = repo
+        .ti()
+        .args(["show", &blocker, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocker_json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(blocker_json["blocks"].as_array().unwrap()[0], new_id);
+}
+
+#[test]
+fn new_with_bad_depends_on_fails_before_creating() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["new", "--title", "x", "--depends-on", "nonexistent"])
+        .assert()
+        .failure();
+    // Nothing was created.
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert!(tickets.is_empty());
+}
+
+#[test]
+fn new_subissue_under_closed_parent_is_rejected() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    repo.ti().args(["close", &parent]).assert().success();
+
+    repo.ti()
+        .args(["new", "--title", "late child", "--subissue", &parent])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("closed ticket"));
+}
+
+#[test]
+fn writeup_show_and_list_json() {
+    let repo = TestRepo::new();
+    let out = repo
+        .ti()
+        .args([
+            "writeup",
+            "new",
+            "--title",
+            "Big idea",
+            "--body",
+            "first cut",
+            "--id-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id = String::from_utf8(out).unwrap().trim().to_string();
+
+    let output = repo
+        .ti()
+        .args(["writeup", "show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["title"], "Big idea");
+    assert_eq!(json["status"], "open");
+    let versions = json["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0]["body"], "first cut");
+
+    let output = repo
+        .ti()
+        .args(["writeup", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let arr: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["title"], "Big idea");
+}
+
+#[test]
+fn depends_json_includes_the_dependency_counterpart() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "the blocker");
+
+    let output = repo
+        .ti()
+        .args(["depends", "--ticket", &dependent, &blocker, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ticket"]["id"], dependent);
+    assert_eq!(json["dependency"]["id"], blocker);
+    assert_eq!(json["dependency"]["title"], "the blocker");
+}
+
+#[test]
+fn subissue_json_includes_the_parent_counterpart() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent feature");
+    let child = create_ticket(&repo, "child");
+
+    let output = repo
+        .ti()
+        .args(["subissue", "--ticket", &child, &parent, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ticket"]["id"], child);
+    assert_eq!(json["parent"]["id"], parent);
+    assert_eq!(json["parent"]["title"], "parent feature");
+}
+
+/// Fetch one field of a ticket via `ti show --json`.
+fn show_field(repo: &TestRepo, id: &str, key: &str) -> Value {
+    let output = repo
+        .ti()
+        .args(["show", id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    json[key].clone()
+}
+
+#[test]
+fn field_clear_mutations_round_trip() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "fields");
+
+    repo.ti()
+        .args(["priority", "2", "-t", &id])
+        .assert()
+        .success();
+    assert_eq!(show_field(&repo, &id, "priority"), 2);
+    repo.ti()
+        .args(["priority", "--clear", "-t", &id])
+        .assert()
+        .success();
+    assert!(show_field(&repo, &id, "priority").is_null());
+
+    repo.ti()
+        .args(["milestone", "v1", "-t", &id])
+        .assert()
+        .success();
+    assert_eq!(show_field(&repo, &id, "milestone"), "v1");
+    repo.ti()
+        .args(["milestone", "--clear", "-t", &id])
+        .assert()
+        .success();
+    assert!(show_field(&repo, &id, "milestone").is_null());
+
+    repo.ti()
+        .args(["spec", "some notes", "-t", &id])
+        .assert()
+        .success();
+    assert_eq!(show_field(&repo, &id, "spec"), "some notes");
+    repo.ti()
+        .args(["spec", "--clear", "-t", &id])
+        .assert()
+        .success();
+    assert!(show_field(&repo, &id, "spec").is_null());
+}
+
+#[test]
+fn code_set_clear_and_invalid_rejected() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "code ticket");
+
+    repo.ti()
+        .args(["code", "https://github.com/o/r:main", "-t", &id])
+        .assert()
+        .success();
+    assert_eq!(
+        show_field(&repo, &id, "code"),
+        "https://github.com/o/r:main"
+    );
+    repo.ti()
+        .args(["code", "--clear", "-t", &id])
+        .assert()
+        .success();
+    assert!(show_field(&repo, &id, "code").is_null());
+
+    // A URI without an http(s) scheme is rejected.
+    repo.ti()
+        .args(["code", "not-a-valid-uri", "-t", &id])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn pull_transfers_tickets_between_repos() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    // Repo A creates a ticket and pushes it.
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    a.ti().arg("push").assert().success();
+
+    // Repo B pulls from the same remote and sees the ticket.
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().args(["pull", &remote_url]).assert().success();
+
+    let output = b
+        .ti()
+        .args(["list", "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert!(tickets
+        .iter()
+        .any(|t| t["id"] == id && t["title"] == "shared ticket"));
+}
+
+#[test]
+fn stats_history_recent_and_mine_run() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "a ticket");
+
+    repo.ti()
+        .arg("stats")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("STATS"));
+    repo.ti().args(["history", "-t", &id]).assert().success();
+    repo.ti().arg("recent").assert().success();
+    // `mine` uses git user.email; the ticket isn't assigned to the tester,
+    // so this is empty but must still succeed.
+    repo.ti().arg("mine").assert().success();
+}
+
+/// Run `ti next --json` and parse the result.
+fn next_json(repo: &TestRepo) -> Value {
+    let output = repo
+        .ti()
+        .args(["next", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+#[test]
+fn next_skips_tickets_with_open_dependencies() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+
+    // The dependent has an open dependency, so next picks the blocker.
+    assert_eq!(next_json(&repo)["id"], blocker);
+
+    // Once the blocker is resolved, the dependent becomes workable.
+    repo.ti().args(["close", &blocker]).assert().success();
+    assert_eq!(next_json(&repo)["id"], dependent);
+}
+
+#[test]
+fn next_prefers_lower_priority_number() {
+    let repo = TestRepo::new();
+    let lo = create_ticket(&repo, "low priority");
+    let hi = create_ticket(&repo, "high priority");
+    repo.ti()
+        .args(["priority", "5", "-t", &lo])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["priority", "1", "-t", &hi])
+        .assert()
+        .success();
+
+    assert_eq!(next_json(&repo)["id"], hi);
+}
+
+#[test]
+fn next_skips_subissues() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    // The child is a sub-issue and is skipped; the parent is picked.
+    assert_eq!(next_json(&repo)["id"], parent);
+}
+
+#[test]
+fn next_json_includes_recursive_subissues() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let grandchild = create_subissue(&repo, &child, "grandchild");
+
+    let v = next_json(&repo);
+    // Ticket object is unchanged; subissues is additive.
+    assert_eq!(v["id"], parent);
+    assert_eq!(v["subissues"][0]["id"], child);
+    assert_eq!(v["subissues"][0]["title"], "child");
+    assert_eq!(v["subissues"][0]["state"], "new");
+    assert_eq!(v["subissues"][0]["subissues"][0]["id"], grandchild);
+}
+
+#[test]
+fn next_json_subissues_excludes_closed() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    repo.ti().args(["close", &child]).assert().success();
+
+    let v = next_json(&repo);
+    assert_eq!(v["id"], parent);
+    assert_eq!(v["subissues"], serde_json::json!([]));
+}
+
+#[test]
+fn next_text_shows_subissue_tree() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    let out = repo
+        .ti()
+        .arg("next")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Sub-issues:"), "missing header in:\n{text}");
+    assert!(text.contains("child"), "missing child in:\n{text}");
+}
+
+#[test]
+fn next_json_is_null_when_nothing_workable() {
+    let repo = TestRepo::new();
+    let output = repo
+        .ti()
+        .args(["next", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json["next"].is_null());
+}
+
+#[test]
+fn users_add_list_and_remove() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["users", "add", "scott", "scott@example.com"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["users", "add", "scott", "chacon@example.com"])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["users", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["scott"].as_array().unwrap().len(), 2);
+
+    // Remove one email.
+    repo.ti()
+        .args(["users", "rm", "scott", "chacon@example.com"])
+        .assert()
+        .success();
+    let output = repo
+        .ti()
+        .args(["users", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["scott"].as_array().unwrap().len(), 1);
+
+    // Remove the whole user.
+    repo.ti().args(["users", "rm", "scott"]).assert().success();
+    let output = repo
+        .ti()
+        .args(["users", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json.get("scott").is_none());
+}
+
+#[test]
+fn assign_resolves_user_nick_to_email() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["users", "add", "scott", "scott@example.com"])
+        .assert()
+        .success();
+    let id = create_ticket(&repo, "task");
+
+    repo.ti()
+        .args(["assign", "scott", "-t", &id])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["assigned"], "scott@example.com");
 }

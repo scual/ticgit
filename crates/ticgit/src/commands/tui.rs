@@ -2370,7 +2370,7 @@ impl App {
                 lines.push(review_commit_summary_line(
                     versions.get(idx).copied().unwrap_or(1),
                     &review,
-                    *sha,
+                    sha,
                     self.review_commit_cache.get(*sha),
                     self.review_status_cache.get(*sha),
                     width,
@@ -4789,8 +4789,6 @@ impl App {
             KeyCode::Char('p') => {
                 if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
                     self.next_review_commit();
-                } else if self.active_tab == TuiTab::Writeups {
-                    self.begin_input(InputKind::Priority);
                 } else {
                     self.begin_input(InputKind::Priority);
                 }
@@ -5434,6 +5432,7 @@ impl App {
             }),
             depends_on: None,
             blocks: None,
+            parent: None,
             all: self.base_status.is_none() && self.base_state.is_none(),
             subissues: !self.hide_subissues,
             limit: 0,
@@ -5567,7 +5566,7 @@ impl App {
             || self.base_state.is_some()
             || self.assigned_filter.is_some()
             || self.only_tagged
-            || self.hide_subissues != !self.show_subissues_preference
+            || self.hide_subissues == self.show_subissues_preference
             || self.sort_order.is_some()
             || !self.filter.is_empty()
             || !self.tag_filter.is_empty()
@@ -6077,12 +6076,20 @@ impl App {
             self.status = Some("Select a review first.".to_string());
             return Ok(());
         };
+        // Close the ticket first (guarded): if it has open sub-issues, surface
+        // the error and leave the review branch open rather than half-closing.
+        if let Err(e) =
+            self.store
+                .set_lifecycle(&ticket_id, TicketStatus::Closed, TicketState::Resolved)
+        {
+            self.status = Some(e.to_string());
+            self.mode = Mode::Normal;
+            return Ok(());
+        }
         self.store
             .session()
             .target(&Target::branch(&branch_id))
             .set("status", "closed")?;
-        self.store
-            .set_lifecycle(&ticket_id, TicketStatus::Closed, TicketState::Resolved)?;
         self.mode = Mode::Normal;
         self.clear_review_caches();
         self.reload_all(Some(ticket_id), None)?;
@@ -6757,7 +6764,13 @@ impl App {
             return Ok(());
         };
         let id = ticket.id;
-        self.store.set_lifecycle(&id, status, state)?;
+        // Surface the open-sub-issue guard (and any other error) in the status
+        // line instead of tearing down the TUI event loop.
+        if let Err(e) = self.store.set_lifecycle(&id, status, state) {
+            self.status = Some(e.to_string());
+            self.mode = Mode::Normal;
+            return Ok(());
+        }
         self.status = Some(format!("Changed lifecycle to {status}:{state}."));
         self.mode = Mode::Normal;
         self.reload(Some(id))?;
@@ -10086,7 +10099,7 @@ fn progress_segment(
     let filled = if total == 0 {
         0
     } else {
-        ((count * bar_width) + total - 1) / total
+        (count * bar_width).div_ceil(total)
     }
     .min(bar_width);
     vec![
@@ -11315,9 +11328,11 @@ fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
 fn diff_line_for_file(line: String, file_key: Option<&str>) -> Line<'static> {
     let style = if line.starts_with("@@") {
         Style::default().fg(Color::LightBlue)
-    } else if line.starts_with("diff --git") || line.starts_with("index ") {
-        Style::default().fg(Color::DarkGray)
-    } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+    } else if line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+    {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -12071,6 +12086,9 @@ fn issue_table_header(columns: &[IssueColumn], widths: &[usize], width: usize) -
     table_header_line(&columns, width)
 }
 
+// Cohesive per-row layout inputs (column widths + display flags); grouping them
+// into a struct would add indirection without improving clarity.
+#[allow(clippy::too_many_arguments)]
 fn ticket_table_line(
     ticket: &Ticket,
     columns: &[IssueColumn],
@@ -12907,15 +12925,13 @@ fn compact_ticket_list_line(
     let mut meta = meta.to_vec();
 
     while compact_title_width(short_id, &meta, width) < title_target_width {
-        if !remove_first_meta_width(&mut meta, LIST_STATE_WIDTH) {
-            if !remove_first_meta_width(&mut meta, LIST_AGE_WIDTH) {
-                if short_id.take().is_none()
+        if !remove_first_meta_width(&mut meta, LIST_STATE_WIDTH)
+            && !remove_first_meta_width(&mut meta, LIST_AGE_WIDTH)
+                && short_id.take().is_none()
                     && !remove_first_meta_width(&mut meta, LIST_PRIORITY_WIDTH)
                 {
                     break;
                 }
-            }
-        }
     }
 
     ticket_list_line_from_parts(
@@ -14274,12 +14290,12 @@ mod tests {
     fn issue_focus_color_cycles_through_terminal_palette() {
         let palette = [
             (IssueFocusColor::Yellow, Color::Yellow),
-            (IssueFocusColor::Green, Color::Green),
-            (IssueFocusColor::Cyan, Color::Cyan),
             (IssueFocusColor::Magenta, Color::Magenta),
             (IssueFocusColor::Red, Color::Red),
             (IssueFocusColor::Blue, Color::Blue),
             (IssueFocusColor::White, Color::White),
+            (IssueFocusColor::Cyan, Color::Cyan),
+            (IssueFocusColor::Green, Color::Green),
         ];
         let mut color = IssueFocusColor::Yellow;
 
@@ -14292,7 +14308,8 @@ mod tests {
             color = color.next();
         }
 
-        assert_eq!(color, IssueFocusColor::Cyan);
+        // Seven steps from Yellow wraps back to Yellow.
+        assert_eq!(color, IssueFocusColor::Yellow);
     }
 
     #[test]
@@ -14993,11 +15010,9 @@ mod tests {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
         let grandchild = uuid::Uuid::from_u128(3);
-        let tickets = vec![
-            test_ticket(root, None, &[child]),
+        let tickets = [test_ticket(root, None, &[child]),
             test_ticket(child, Some(root), &[grandchild]),
-            test_ticket(grandchild, Some(child), &[]),
-        ];
+            test_ticket(grandchild, Some(child), &[])];
         let ticket_by_id = tickets
             .iter()
             .map(|ticket| (ticket.id, ticket))
@@ -15012,10 +15027,8 @@ mod tests {
     fn issue_title_prefix_marks_parents_even_when_graph_is_hidden() {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
-        let tickets = vec![
-            test_ticket(root, None, &[child]),
-            test_ticket(child, Some(root), &[]),
-        ];
+        let tickets = [test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[])];
         let ticket_by_id = tickets
             .iter()
             .map(|ticket| (ticket.id, ticket))

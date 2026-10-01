@@ -13,25 +13,32 @@ pub struct Args {
     /// Remote to sync with. Defaults to git-meta's first configured meta remote.
     #[arg(short = 'r', long = "remote")]
     pub remote: Option<String>,
+
+    /// Output the sync result as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 pub fn run_sync(args: Args) -> Result<()> {
     let store = open_store()?;
     let remote = sync_remote(args.remote.as_deref())?;
     let namespace = meta_namespace()?;
-    let remote_url = remote
+    let url = remote
         .as_deref()
         .map(remote_url)
         .transpose()?
         .unwrap_or_else(|| "(none)".to_string());
+    let web_url = ssh_project_web_url(&url);
 
-    if let Some(remote) = &remote {
-        println!("Remote: {remote}");
-    }
-    println!("Ref: refs/{namespace}/main");
-    println!("URL: {remote_url}");
-    if let Some(web_url) = ssh_project_web_url(&remote_url) {
-        println!("Web URL: {web_url}");
+    if !args.json {
+        if let Some(remote) = &remote {
+            println!("Remote: {remote}");
+        }
+        println!("Ref: refs/{namespace}/main");
+        println!("URL: {url}");
+        if let Some(web_url) = &web_url {
+            println!("Web URL: {web_url}");
+        }
     }
 
     // Snapshot before pull
@@ -55,6 +62,28 @@ pub fn run_sync(args: Args) -> Result<()> {
         .filter(|(id, _)| !before.contains_key(id))
         .collect();
 
+    store.push(args.remote.as_deref())?;
+    let total = after.len();
+
+    if args.json {
+        let pulled: Vec<serde_json::Value> = new_tickets
+            .iter()
+            .map(|(id, title)| {
+                serde_json::json!({ "id": id.to_string(), "title": title })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "remote": remote,
+            "ref": format!("refs/{namespace}/main"),
+            "url": url,
+            "web_url": web_url,
+            "pulled": pulled,
+            "pushed_total": total,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     if new_tickets.is_empty() {
         println!("Pull: no new tickets.");
     } else {
@@ -68,9 +97,6 @@ pub fn run_sync(args: Args) -> Result<()> {
         }
     }
 
-    store.push(args.remote.as_deref())?;
-
-    let total = after.len();
     println!("Push: {total} ticket(s) synced.");
     println!("Done.");
     Ok(())

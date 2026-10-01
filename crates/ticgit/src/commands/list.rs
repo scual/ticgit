@@ -62,6 +62,10 @@ pub struct Args {
     #[arg(long = "blocks")]
     pub blocks: Option<String>,
 
+    /// Show the direct sub-issues (children) of this ticket.
+    #[arg(long = "parent")]
+    pub parent: Option<String>,
+
     /// Maximum number of tickets to show. Defaults to available terminal rows.
     #[arg(short = 'n', long = "limit", default_value_t = 0)]
     pub limit: usize,
@@ -92,6 +96,7 @@ impl Default for Args {
             subissues: false,
             depends_on: None,
             blocks: None,
+            parent: None,
             limit: 0,
             json: false,
             markdown: false,
@@ -117,7 +122,7 @@ pub fn run(args: Args) -> Result<()> {
             status: saved.status.clone(),
             all: saved.all,
             open: false,
-            tag: saved_tags(&saved),
+            tag: saved_tags(saved),
             tag_mode: if saved.tag_match_all { "all" } else { "any" }.to_string(),
             assigned: saved.assigned.clone(),
             only_tagged: saved.only_tagged,
@@ -126,6 +131,7 @@ pub fn run(args: Args) -> Result<()> {
             subissues: saved.subissues,
             depends_on: saved.depends_on.clone(),
             blocks: saved.blocks.clone(),
+            parent: saved.parent.clone(),
             limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
@@ -172,6 +178,11 @@ pub fn run(args: Args) -> Result<()> {
         .as_deref()
         .map(|reference| store.resolve_id(reference))
         .transpose()?;
+    let parent = args
+        .parent
+        .as_deref()
+        .map(|reference| store.resolve_id(reference))
+        .transpose()?;
 
     let filter = Filter {
         status,
@@ -185,6 +196,7 @@ pub fn run(args: Args) -> Result<()> {
         order,
         depends_on,
         blocks,
+        parent,
         hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
@@ -218,6 +230,7 @@ pub fn run(args: Args) -> Result<()> {
             order: args.order.clone(),
             depends_on: depends_on.map(|id| id.to_string()),
             blocks: blocks.map(|id| id.to_string()),
+            parent: parent.map(|id| id.to_string()),
             all: args.all,
             subissues: args.subissues,
             limit: args.limit,

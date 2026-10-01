@@ -26,6 +26,12 @@ pub enum Error {
     #[error("invalid value: {0}")]
     InvalidValue(String),
 
+    #[error("cannot close: ticket has {0}")]
+    OpenSubissues(String),
+
+    #[error("cannot close: ticket has {0}")]
+    OpenDependencies(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

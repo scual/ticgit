@@ -101,6 +101,10 @@ available at [`https://ticgit.dev/schema/v1.json`](https://ticgit.dev/schema/v1.
 `ti list --json` emits an array of ticket objects. Ticket metadata appears under
 `.meta` as an object whose values are strings.
 
+`ti next --json` emits a ticket object when a workable ticket is found, or the
+sentinel `{ "next": null }` when nothing matches — check that key before parsing
+a ticket.
+
 `--porcelain` and `--format json` are not supported compatibility aliases today;
 use `--json` for schema-stable output.
 
@@ -138,6 +142,20 @@ Open tickets use `new`, `assigned`, `in-progress`, `blocked`, or `review`.
 Closed tickets use `resolved`, `wontfix`, `duplicate`, or `invalid`.
 New tickets start as `open:new`; `ti state closed` defaults to
 `closed:resolved`.
+
+Closing a ticket is rejected while it still has an open sub-issue or an
+unresolved dependency (an open ticket in its `depends_on`), so a "done" ticket
+never hides unfinished work. Closing a ticket that only *blocks* others is
+allowed — that is the normal "finished the blocker" case. A sub-issue or
+dependency counts as handled once it reaches any closed state (`resolved`,
+`wontfix`, `duplicate`, or `invalid`). For the same reason, you cannot add a
+sub-issue to an already-closed ticket without reopening it first. Pass `--force`
+to `ti close` or `ti state` to override the close check:
+
+```sh
+ti close <id> --force
+ti state closed:wontfix --ticket <id> --force
+```
 
 Recent tickets:
 

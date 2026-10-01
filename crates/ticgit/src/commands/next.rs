@@ -30,6 +30,8 @@ pub fn run(args: Args) -> Result<()> {
     let git_dir = store.session().repo_git_dir();
     let all_tickets = store.list()?;
 
+    let by_id = render::by_id_map(&all_tickets);
+
     // Build a set of closed ticket IDs for dependency checking
     let closed_ids: std::collections::HashSet<uuid::Uuid> = all_tickets
         .iter()
@@ -37,8 +39,8 @@ pub fn run(args: Args) -> Result<()> {
         .map(|t| t.id)
         .collect();
 
-    let mut candidates: Vec<Ticket> = all_tickets
-        .into_iter()
+    let mut candidates: Vec<&Ticket> = all_tickets
+        .iter()
         .filter(|t| t.status == TicketStatus::Open)
         .filter(|t| t.parent.is_none())
         // Skip tickets whose dependencies are not all resolved
@@ -67,7 +69,7 @@ pub fn run(args: Args) -> Result<()> {
         .unwrap_or(0);
 
     // Rank candidates: higher score = better candidate
-    candidates.sort_by(|a, b| score(b, max_priority).cmp(&score(a, max_priority)));
+    candidates.sort_by_key(|t| std::cmp::Reverse(score(t, max_priority)));
 
     let ticket = match candidates.into_iter().next() {
         Some(t) => t,
@@ -89,11 +91,15 @@ pub fn run(args: Args) -> Result<()> {
     state.save()?;
 
     if args.json {
-        println!("{}", render::ticket_json(&ticket)?);
+        println!("{}", render::ticket_json_with_subissues(ticket, &by_id)?);
         return Ok(());
     }
     if args.markdown {
-        println!("{}", render::ticket_markdown(&ticket));
+        println!("{}", render::ticket_markdown(ticket));
+        let tree = render::build_subissue_tree(ticket, &by_id);
+        if !tree.is_empty() {
+            println!("## Sub-issues\n\n{}", render::subissue_tree_markdown(&tree));
+        }
         return Ok(());
     }
 
@@ -118,6 +124,12 @@ pub fn run(args: Args) -> Result<()> {
         println!("  Tags: {}", tags.join(", "));
     }
     println!("Checked out.");
+
+    let tree = render::build_subissue_tree(ticket, &by_id);
+    if !tree.is_empty() {
+        println!("Sub-issues:");
+        print!("{}", render::subissue_tree_text(&tree));
+    }
     Ok(())
 }
 

@@ -36,6 +36,17 @@ fn validate_email(email: &str) -> Result<()> {
     }
 }
 
+/// Format a list of open sub-issues for the [`Error::OpenSubissues`] message,
+/// e.g. `2 open sub-issue(s): a1b2c3 "title", d4e5f6 "other"`.
+/// Join tickets as `shortid "title"` for guard error messages.
+fn format_ticket_refs(tickets: &[Ticket]) -> String {
+    tickets
+        .iter()
+        .map(|t| format!("{} \"{}\"", t.short_id(), t.title))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -97,6 +108,19 @@ impl TicketStore {
         let now_rfc = now
             .format(&Rfc3339)
             .map_err(|e| Error::Time(e.to_string()))?;
+
+        // Validate the parent up front so a rejected sub-issue never leaves a
+        // half-written ticket behind. A new ticket is always open, so parenting
+        // it under a closed ticket would violate the no-open-children invariant.
+        if let Some(parent_id) = opts.parent {
+            let parent = self.load(&parent_id)?;
+            if parent.status == TicketStatus::Closed {
+                return Err(Error::InvalidValue(format!(
+                    "cannot add a sub-issue to closed ticket {} (reopen it first)",
+                    parent.short_id()
+                )));
+            }
+        }
 
         // A ticket's existence is implied by its fields - no separate
         // index to maintain.
@@ -255,7 +279,86 @@ impl TicketStore {
         self.set_lifecycle(id, state.status(), state)
     }
 
+    /// Direct children of `id` that are still open (`status == Open`).
+    ///
+    /// Dangling child references that fail to load are skipped rather than
+    /// propagated, mirroring the `.ok()` handling in `set_parent`'s ancestor
+    /// walk, so a corrupt reference can never wedge a close.
+    pub fn open_children(&self, id: &Uuid) -> Result<Vec<Ticket>> {
+        let ticket = self.load(id)?;
+        let mut open = Vec::new();
+        for child_id in &ticket.children {
+            if let Ok(child) = self.load(child_id) {
+                if child.status == TicketStatus::Open {
+                    open.push(child);
+                }
+            }
+        }
+        Ok(open)
+    }
+
+    /// Direct dependencies of `id` (its `depends_on` targets) that are still
+    /// open. Dangling references that fail to load are skipped.
+    pub fn open_dependencies(&self, id: &Uuid) -> Result<Vec<Ticket>> {
+        let ticket = self.load(id)?;
+        let mut open = Vec::new();
+        for dep_id in &ticket.depends_on {
+            if let Ok(dep) = self.load(dep_id) {
+                if dep.status == TicketStatus::Open {
+                    open.push(dep);
+                }
+            }
+        }
+        Ok(open)
+    }
+
+    /// Change a ticket's lifecycle, rejecting a close while it still has open
+    /// sub-issues (children) or open dependencies (open `depends_on`
+    /// targets). Closing a ticket that still *blocks* others is allowed — that
+    /// is the normal "finished the blocker" case. Only a genuine open→closed
+    /// transition is guarded; reclassifying an already-closed ticket among
+    /// closed states is allowed.
     pub fn set_lifecycle(&self, id: &Uuid, status: TicketStatus, state: TicketState) -> Result<()> {
+        if status == TicketStatus::Closed {
+            let current = self.load(id)?;
+            if current.status == TicketStatus::Open {
+                let open_children = self.open_children(id)?;
+                if !open_children.is_empty() {
+                    return Err(Error::OpenSubissues(format!(
+                        "{} open sub-issue(s): {}",
+                        open_children.len(),
+                        format_ticket_refs(&open_children)
+                    )));
+                }
+                let open_deps = self.open_dependencies(id)?;
+                if !open_deps.is_empty() {
+                    return Err(Error::OpenDependencies(format!(
+                        "{} open dependenc{}: {}",
+                        open_deps.len(),
+                        if open_deps.len() == 1 { "y" } else { "ies" },
+                        format_ticket_refs(&open_deps)
+                    )));
+                }
+            }
+        }
+        self.write_lifecycle(id, status, state)
+    }
+
+    /// Change a ticket's lifecycle without the open sub-issue and open
+    /// dependency guards. Used by the `--force` CLI path and by sync (where
+    /// the remote is authoritative).
+    pub fn set_lifecycle_forced(
+        &self,
+        id: &Uuid,
+        status: TicketStatus,
+        state: TicketState,
+    ) -> Result<()> {
+        self.write_lifecycle(id, status, state)
+    }
+
+    /// Raw lifecycle write: validates the status/state pair is coherent, then
+    /// persists `status`/`state` and stamps or clears `closed-by`.
+    fn write_lifecycle(&self, id: &Uuid, status: TicketStatus, state: TicketState) -> Result<()> {
         if state.status() != status {
             return Err(Error::InvalidState(format!(
                 "{}:{}",
@@ -395,6 +498,17 @@ impl TicketStore {
 
         // Remove from old parent's children set if any
         let child = self.load(child_id)?;
+
+        // Keep the "a closed ticket has no open children" invariant airtight at
+        // the other entry point: don't let an open ticket become a sub-issue of
+        // a closed parent.
+        if child.status == TicketStatus::Open && parent.status == TicketStatus::Closed {
+            return Err(Error::InvalidValue(format!(
+                "cannot make an open ticket a sub-issue of closed ticket {} (reopen it first)",
+                parent.short_id()
+            )));
+        }
+
         if let Some(old_parent) = child.parent {
             p.set_remove(
                 &keys::ticket_field(&old_parent, "children"),
@@ -444,6 +558,19 @@ impl TicketStore {
 
         for child_id in &ticket.children {
             p.remove(&keys::ticket_field(child_id, "parent"))?;
+        }
+
+        // Dependencies are denormalized on both sides, so clean up the reverse
+        // references too, or other tickets keep dangling depends_on/blocks UUIDs
+        // that never resolve (e.g. silently un-workable in `ti next`).
+        for dep_id in &ticket.depends_on {
+            p.set_remove(&keys::ticket_field(dep_id, "blocks"), &id.to_string())?;
+        }
+        for blocked_id in &ticket.blocks {
+            p.set_remove(
+                &keys::ticket_field(blocked_id, "depends_on"),
+                &id.to_string(),
+            )?;
         }
 
         for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(id)))? {
@@ -780,6 +907,12 @@ impl TicketStore {
         Ok(())
     }
 
+    // The writeup<->ticket link is stored once, on the writeup
+    // (`writeups:<id>:tickets`). A ticket-side `tickets:<id>:writeups` reverse
+    // index used to be written here too, but nothing ever read it back into the
+    // `Ticket` model, so it was only dead writes and a dangling-ref liability
+    // (deletes never cleaned it). If a reverse lookup is needed, derive it from
+    // the writeups or re-add it with full read/serialize/cleanup plumbing.
     pub fn link_writeup_ticket(&self, writeup_id: &Uuid, ticket_id: &Uuid) -> Result<()> {
         self.load_writeup(writeup_id)?;
         self.load(ticket_id)?;
@@ -787,10 +920,6 @@ impl TicketStore {
         p.set_add(
             &keys::writeup_field(writeup_id, "tickets"),
             &ticket_id.to_string(),
-        )?;
-        p.set_add(
-            &keys::ticket_field(ticket_id, "writeups"),
-            &writeup_id.to_string(),
         )?;
         Ok(())
     }
@@ -802,10 +931,6 @@ impl TicketStore {
         p.set_remove(
             &keys::writeup_field(writeup_id, "tickets"),
             &ticket_id.to_string(),
-        )?;
-        p.set_remove(
-            &keys::ticket_field(ticket_id, "writeups"),
-            &writeup_id.to_string(),
         )?;
         Ok(())
     }
@@ -1354,6 +1479,194 @@ mod tests {
         assert_eq!(loaded.state, TicketState::Blocked);
     }
 
+    /// Create a child ticket parented to `parent`.
+    fn child_of(store: &TicketStore, parent: &Uuid, title: &str) -> Ticket {
+        store
+            .create(
+                title,
+                NewTicketOpts {
+                    parent: Some(*parent),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn close_rejected_while_a_subissue_is_open() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        let err = store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap_err();
+        assert!(matches!(err, Error::OpenSubissues(_)));
+
+        let open = store.open_children(&parent.id).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, child.id);
+        // Parent stayed open.
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Open);
+    }
+
+    #[test]
+    fn close_allowed_once_all_subissues_are_closed() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        store.set_state(&child.id, TicketState::Resolved).unwrap();
+        store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn subissue_closed_as_wontfix_counts_as_solved() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        // A child dropped as wontfix is "dealt with" — it must not block.
+        store.set_state(&child.id, TicketState::Wontfix).unwrap();
+        assert!(store.open_children(&parent.id).unwrap().is_empty());
+        store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn forced_close_bypasses_open_subissue_guard() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        child_of(&store, &parent.id, "child");
+
+        store
+            .set_lifecycle_forced(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn close_with_no_children_is_unaffected() {
+        let (store, _td) = test_store();
+        let t = store.create("solo", NewTicketOpts::default()).unwrap();
+        store
+            .set_lifecycle(&t.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&t.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn close_rejected_while_a_dependency_is_open() {
+        let (store, _td) = test_store();
+        let dependent = store.create("dependent", NewTicketOpts::default()).unwrap();
+        let blocker = store.create("blocker", NewTicketOpts::default()).unwrap();
+        store.add_dependency(&dependent.id, &blocker.id).unwrap();
+
+        // Can't resolve the dependent while the thing it waits on is still open.
+        let err = store
+            .set_lifecycle(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap_err();
+        assert!(matches!(err, Error::OpenDependencies(_)));
+        assert_eq!(store.open_dependencies(&dependent.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn closing_a_blocker_with_open_dependents_is_allowed() {
+        let (store, _td) = test_store();
+        let dependent = store.create("dependent", NewTicketOpts::default()).unwrap();
+        let blocker = store.create("blocker", NewTicketOpts::default()).unwrap();
+        store.add_dependency(&dependent.id, &blocker.id).unwrap();
+
+        // Finishing the blocker is the normal case, even with an open dependent.
+        store
+            .set_lifecycle(&blocker.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&blocker.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn close_allowed_once_dependency_resolved_or_forced() {
+        let (store, _td) = test_store();
+        let dependent = store.create("dependent", NewTicketOpts::default()).unwrap();
+        let blocker = store.create("blocker", NewTicketOpts::default()).unwrap();
+        store.add_dependency(&dependent.id, &blocker.id).unwrap();
+
+        // --force bypasses the guard.
+        store
+            .set_lifecycle_forced(&dependent.id, TicketStatus::Open, TicketState::New)
+            .unwrap();
+        store
+            .set_lifecycle_forced(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&dependent.id).unwrap().status, TicketStatus::Closed);
+
+        // Reopen, resolve the blocker, then a plain close succeeds.
+        store
+            .set_lifecycle_forced(&dependent.id, TicketStatus::Open, TicketState::New)
+            .unwrap();
+        store.set_state(&blocker.id, TicketState::Resolved).unwrap();
+        store
+            .set_lifecycle(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert_eq!(store.load(&dependent.id).unwrap().status, TicketStatus::Closed);
+    }
+
+    #[test]
+    fn create_subissue_under_closed_parent_is_rejected() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        store.set_state(&parent.id, TicketState::Resolved).unwrap();
+
+        let err = store
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidValue(_)));
+        // No half-written ticket leaked: only the parent exists.
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn set_parent_rejects_open_child_under_closed_parent() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = store.create("child", NewTicketOpts::default()).unwrap();
+        store.set_state(&parent.id, TicketState::Resolved).unwrap();
+
+        assert!(store.set_parent(&child.id, &parent.id).is_err());
+    }
+
+    #[test]
+    fn reclassifying_a_closed_parent_is_not_blocked_by_open_child() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = child_of(&store, &parent.id, "child");
+
+        // Force the parent closed while a child is still open (legacy-style state).
+        store
+            .set_lifecycle_forced(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        assert!(!store.open_children(&parent.id).unwrap().is_empty());
+
+        // Closed→closed reclassification must not re-trigger the guard.
+        store
+            .set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Wontfix)
+            .unwrap();
+        assert_eq!(store.load(&parent.id).unwrap().state, TicketState::Wontfix);
+        // Child untouched.
+        assert_eq!(store.load(&child.id).unwrap().status, TicketStatus::Open);
+    }
+
     #[test]
     fn tag_add_and_remove() {
         let (store, _td) = test_store();
@@ -1576,6 +1889,12 @@ mod tests {
             .unwrap()
             .tickets
             .contains(&ticket.id));
+        // The link is stored only on the writeup; no ticket-side reverse index.
+        assert!(store
+            .project_handle()
+            .get_value(&keys::ticket_field(&ticket.id, "writeups"))
+            .unwrap()
+            .is_none());
         store
             .unlink_writeup_ticket(&writeup.id, &ticket.id)
             .unwrap();
@@ -1766,5 +2085,59 @@ mod tests {
         assert!(store.load(&parent.id).is_err());
         let child = store.load(&child.id).unwrap();
         assert_eq!(child.parent, None);
+    }
+
+    #[test]
+    fn delete_ticket_removes_dangling_dependency_references() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+        let c = store.create("c", NewTicketOpts::default()).unwrap();
+
+        // a depends on b; c depends on a. Deleting a must clean both sides.
+        store.add_dependency(&a.id, &b.id).unwrap();
+        store.add_dependency(&c.id, &a.id).unwrap();
+
+        store.delete_ticket(&a.id).unwrap();
+
+        // b no longer lists a in `blocks`.
+        assert!(!store.load(&b.id).unwrap().blocks.contains(&a.id));
+        // c no longer lists a in `depends_on`.
+        assert!(!store.load(&c.id).unwrap().depends_on.contains(&a.id));
+    }
+
+    #[test]
+    fn add_dependency_rejects_self_dependency() {
+        let (store, _td) = test_store();
+        let t = store.create("t", NewTicketOpts::default()).unwrap();
+        assert!(store.add_dependency(&t.id, &t.id).is_err());
+    }
+
+    #[test]
+    fn add_dependency_rejects_cycle() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+        let c = store.create("c", NewTicketOpts::default()).unwrap();
+
+        // a -> b -> c; closing the loop c -> a must be rejected.
+        store.add_dependency(&a.id, &b.id).unwrap();
+        store.add_dependency(&b.id, &c.id).unwrap();
+        assert!(store.add_dependency(&c.id, &a.id).is_err());
+    }
+
+    #[test]
+    fn remove_dependency_clears_both_sides() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+
+        store.add_dependency(&a.id, &b.id).unwrap();
+        assert!(store.load(&a.id).unwrap().depends_on.contains(&b.id));
+        assert!(store.load(&b.id).unwrap().blocks.contains(&a.id));
+
+        store.remove_dependency(&a.id, &b.id).unwrap();
+        assert!(store.load(&a.id).unwrap().depends_on.is_empty());
+        assert!(store.load(&b.id).unwrap().blocks.is_empty());
     }
 }

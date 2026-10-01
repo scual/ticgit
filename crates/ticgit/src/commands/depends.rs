@@ -42,7 +42,7 @@ pub fn run(args: Args) -> Result<()> {
             store.remove_dependency(&id, &dep_id)?;
         }
         let ticket = store.load(&id)?;
-        return output(&ticket, args.json, args.markdown);
+        return output(&ticket, None, args.json, args.markdown);
     }
 
     let dep_ref = args
@@ -55,7 +55,7 @@ pub fn run(args: Args) -> Result<()> {
         let ticket = store.load(&id)?;
         let dep = store.load(&dep_id)?;
         if args.json || args.markdown {
-            return output(&ticket, args.json, args.markdown);
+            return output(&ticket, Some(&dep), args.json, args.markdown);
         }
         println!(
             "{} no longer depends on {}",
@@ -70,7 +70,7 @@ pub fn run(args: Args) -> Result<()> {
     let dep = store.load(&dep_id)?;
 
     if args.json || args.markdown {
-        return output(&ticket, args.json, args.markdown);
+        return output(&ticket, Some(&dep), args.json, args.markdown);
     }
 
     println!(
@@ -83,9 +83,19 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn output(ticket: &ticgit_lib::Ticket, json: bool, markdown: bool) -> Result<()> {
+fn output(
+    ticket: &ticgit_lib::Ticket,
+    dependency: Option<&ticgit_lib::Ticket>,
+    json: bool,
+    markdown: bool,
+) -> Result<()> {
     if json {
-        println!("{}", render::ticket_json(ticket)?);
+        // Include the resolved counterpart so an agent sees both sides.
+        let mut obj = serde_json::json!({ "ticket": serde_json::to_value(ticket)? });
+        if let Some(dep) = dependency {
+            obj["dependency"] = serde_json::to_value(dep)?;
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
     } else if markdown {
         println!("{}", render::ticket_markdown(ticket));
     }

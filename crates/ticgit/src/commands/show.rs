@@ -41,13 +41,36 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if args.json {
-        println!("{}", render::ticket_json(&ticket)?);
+        let all = store.list().unwrap_or_default();
+        let by_id = render::by_id_map(&all);
+        println!("{}", render::ticket_json_with_subissues(&ticket, &by_id)?);
     } else if args.markdown {
-        println!("{}", render::ticket_markdown(&ticket));
+        let all = store.list().unwrap_or_default();
+        let rels = render::build_rel_lookup(&all);
+        println!(
+            "{}",
+            render::ticket_markdown_with_rels(&ticket, Some(&rels))
+        );
+        let by_id = render::by_id_map(&all);
+        let tree = render::build_subissue_tree(&ticket, &by_id);
+        if !tree.is_empty() {
+            println!("## Sub-issues\n\n{}", render::subissue_tree_markdown(&tree));
+        }
     } else {
         let users = store.list_users().unwrap_or_default();
         let nicks = render::build_nick_map(&users);
-        print!("{}", render::ticket_detail(&ticket, Some(&nicks)));
+        let all = store.list().unwrap_or_default();
+        let rels = render::build_rel_lookup(&all);
+        print!(
+            "{}",
+            render::ticket_detail(&ticket, Some(&nicks), Some(&rels))
+        );
+        let by_id = render::by_id_map(&all);
+        let tree = render::build_subissue_tree(&ticket, &by_id);
+        if !tree.is_empty() {
+            println!("Sub-issues:");
+            print!("{}", render::subissue_tree_text(&tree));
+        }
     }
     Ok(())
 }
@@ -121,8 +144,16 @@ Available filters:
   .status
   .state
   .assigned
+  .closed_by
+  .priority
   .points
   .milestone
+  .code
+  .spec
+  .parent
+  .children
+  .depends_on
+  .blocks
   .tags
   .meta
   .comments

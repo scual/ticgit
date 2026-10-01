@@ -42,7 +42,16 @@ pub fn run(args: Args) -> Result<()> {
 
     let ticket = store.load(&id)?;
     if args.json {
-        println!("{}", render::ticket_json(&ticket)?);
+        // Include the resolved parent so an agent sees both sides.
+        let parent = match ticket.parent {
+            Some(pid) => serde_json::to_value(store.load(&pid)?)?,
+            None => serde_json::Value::Null,
+        };
+        let obj = serde_json::json!({
+            "ticket": serde_json::to_value(&ticket)?,
+            "parent": parent,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
     }
     if args.markdown {
