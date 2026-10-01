@@ -1419,6 +1419,83 @@ fn delete_clears_checked_out_ticket() {
 }
 
 #[test]
+fn delete_json_emits_array_of_deleted_tickets() {
+    let repo = TestRepo::new();
+    let a = create_ticket(&repo, "alpha");
+    let b = create_ticket(&repo, "beta");
+    let out = repo
+        .ti()
+        .args(["delete", &a, &b, "--yes", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).unwrap();
+    assert!(!stdout.contains("\x1b["), "no ANSI in JSON: {stdout:?}");
+    let arr: Value = serde_json::from_str(&stdout).unwrap();
+    let ids: std::collections::BTreeSet<String> = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, std::collections::BTreeSet::from([a, b]));
+}
+
+#[test]
+fn delete_json_is_array_even_for_single_id() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "solo");
+    let out = repo
+        .ti()
+        .args(["delete", &id, "--yes", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert!(v.is_array());
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["id"], id);
+}
+
+#[test]
+fn delete_json_requires_yes() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "needs yes");
+    repo.ti()
+        .args(["delete", &id, "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""));
+    // Not deleted.
+    repo.ti().args(["show", &id, "--json"]).assert().success();
+}
+
+#[test]
+fn delete_markdown_lists_deleted_tickets() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "mark me");
+    let out = repo
+        .ti()
+        .args(["delete", &id, "--yes", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let md = String::from_utf8(out).unwrap();
+    assert!(
+        md.contains("# Deleted tickets"),
+        "missing heading in:\n{md}"
+    );
+    assert!(md.contains("mark me"), "missing title in:\n{md}");
+}
+
+#[test]
 fn new_checkout_selects_created_ticket() {
     let repo = TestRepo::new();
 
