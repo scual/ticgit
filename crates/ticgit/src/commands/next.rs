@@ -30,8 +30,7 @@ pub fn run(args: Args) -> Result<()> {
     let git_dir = store.session().repo_git_dir();
     let all_tickets = store.list()?;
 
-    let by_id: std::collections::HashMap<uuid::Uuid, &Ticket> =
-        all_tickets.iter().map(|t| (t.id, t)).collect();
+    let by_id = render::by_id_map(&all_tickets);
 
     // Build a set of closed ticket IDs for dependency checking
     let closed_ids: std::collections::HashSet<uuid::Uuid> = all_tickets

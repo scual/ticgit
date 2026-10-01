@@ -42,6 +42,11 @@ pub fn build_rel_lookup(tickets: &[Ticket]) -> RelLookup {
         .collect()
 }
 
+/// Build an id → ticket lookup over the full ticket set, for sub-issue tree building.
+pub fn by_id_map(all: &[Ticket]) -> HashMap<Uuid, &Ticket> {
+    all.iter().map(|t| (t.id, t)).collect()
+}
+
 fn short_hex(id: &Uuid) -> String {
     id.to_string().chars().take(6).collect()
 }
@@ -116,7 +121,13 @@ pub fn subissue_tree_text(nodes: &[SubissueNode]) -> String {
 fn write_subissue_text(nodes: &[SubissueNode], depth: usize, out: &mut String) {
     for n in nodes {
         let indent = "  ".repeat(depth);
-        let _ = writeln!(out, "{indent}{} {}  {}", short_hex(&n.id), n.state, n.title);
+        let _ = writeln!(
+            out,
+            "{indent}{} {}  {}",
+            short_hex(&n.id),
+            n.state,
+            flatten(&n.title)
+        );
         write_subissue_text(&n.subissues, depth + 1, out);
     }
 }

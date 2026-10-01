@@ -2184,6 +2184,25 @@ fn show_text_shows_subissue_tree() {
 }
 
 #[test]
+fn show_markdown_shows_subissue_tree() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    let out = repo
+        .ti()
+        .args(["show", &parent, "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("## Sub-issues"), "missing header in:\n{text}");
+    assert!(text.contains("child"), "missing child in:\n{text}");
+}
+
+#[test]
 fn close_rejected_with_open_dependency_then_force_succeeds() {
     let repo = TestRepo::new();
     let dependent = create_ticket(&repo, "dependent");

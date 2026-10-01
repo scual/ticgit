@@ -42,8 +42,7 @@ pub fn run(args: Args) -> Result<()> {
 
     if args.json {
         let all = store.list().unwrap_or_default();
-        let by_id: std::collections::HashMap<uuid::Uuid, &ticgit_lib::Ticket> =
-            all.iter().map(|t| (t.id, t)).collect();
+        let by_id = render::by_id_map(&all);
         println!("{}", render::ticket_json_with_subissues(&ticket, &by_id)?);
     } else if args.markdown {
         let all = store.list().unwrap_or_default();
@@ -52,14 +51,10 @@ pub fn run(args: Args) -> Result<()> {
             "{}",
             render::ticket_markdown_with_rels(&ticket, Some(&rels))
         );
-        let by_id: std::collections::HashMap<uuid::Uuid, &ticgit_lib::Ticket> =
-            all.iter().map(|t| (t.id, t)).collect();
+        let by_id = render::by_id_map(&all);
         let tree = render::build_subissue_tree(&ticket, &by_id);
         if !tree.is_empty() {
-            println!(
-                "\n## Sub-issues\n\n{}",
-                render::subissue_tree_markdown(&tree)
-            );
+            println!("## Sub-issues\n\n{}", render::subissue_tree_markdown(&tree));
         }
     } else {
         let users = store.list_users().unwrap_or_default();
@@ -70,8 +65,7 @@ pub fn run(args: Args) -> Result<()> {
             "{}",
             render::ticket_detail(&ticket, Some(&nicks), Some(&rels))
         );
-        let by_id: std::collections::HashMap<uuid::Uuid, &ticgit_lib::Ticket> =
-            all.iter().map(|t| (t.id, t)).collect();
+        let by_id = render::by_id_map(&all);
         let tree = render::build_subissue_tree(&ticket, &by_id);
         if !tree.is_empty() {
             println!("Sub-issues:");
