@@ -1,6 +1,6 @@
 //! Terminal output: tables, single-ticket details, JSON, and Markdown.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use ticgit_lib::Ticket;
@@ -48,10 +48,7 @@ fn short_hex(id: &Uuid) -> String {
 
 /// Format related ticket ids as a comma-separated list. With a lookup each
 /// entry becomes `shortid "title" [status]`; without one, just `shortid`.
-fn format_related<'a>(
-    ids: impl Iterator<Item = &'a Uuid>,
-    rels: Option<&RelLookup>,
-) -> String {
+fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLookup>) -> String {
     ids.map(|id| {
         let short = short_hex(id);
         match rels.and_then(|r| r.get(id)) {
@@ -61,6 +58,107 @@ fn format_related<'a>(
     })
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+/// A node in the recursive, open-only sub-issue tree. Each node carries a
+/// child's id, title, specific state, and its own sub-issues.
+pub struct SubissueNode {
+    pub id: Uuid,
+    pub title: String,
+    pub state: String,
+    pub subissues: Vec<SubissueNode>,
+}
+
+/// Build the recursive sub-issue tree for `root`, using `by_id` to resolve child
+/// ids. Closed sub-issues (and their whole subtree) are omitted; a visited set
+/// guards against cycles, and ids absent from `by_id` are skipped.
+pub fn build_subissue_tree(root: &Ticket, by_id: &HashMap<Uuid, &Ticket>) -> Vec<SubissueNode> {
+    let mut visited = HashSet::new();
+    visited.insert(root.id);
+    build_subissue_nodes(&root.children, by_id, &mut visited)
+}
+
+fn build_subissue_nodes(
+    ids: &BTreeSet<Uuid>,
+    by_id: &HashMap<Uuid, &Ticket>,
+    visited: &mut HashSet<Uuid>,
+) -> Vec<SubissueNode> {
+    let mut out = Vec::new();
+    for id in ids {
+        if visited.contains(id) {
+            continue;
+        }
+        let Some(child) = by_id.get(id) else {
+            continue;
+        };
+        if child.status == TicketStatus::Closed {
+            continue;
+        }
+        visited.insert(*id);
+        out.push(SubissueNode {
+            id: child.id,
+            title: child.title.clone(),
+            state: child.state.as_str().to_string(),
+            subissues: build_subissue_nodes(&child.children, by_id, visited),
+        });
+    }
+    out
+}
+
+/// Render the sub-issue tree as indented plain text (2 spaces per level, no
+/// header). Returns an empty string when there are no nodes.
+pub fn subissue_tree_text(nodes: &[SubissueNode]) -> String {
+    let mut out = String::new();
+    write_subissue_text(nodes, 1, &mut out);
+    out
+}
+
+fn write_subissue_text(nodes: &[SubissueNode], depth: usize, out: &mut String) {
+    for n in nodes {
+        let indent = "  ".repeat(depth);
+        let _ = writeln!(out, "{indent}{} {}  {}", short_hex(&n.id), n.state, n.title);
+        write_subissue_text(&n.subissues, depth + 1, out);
+    }
+}
+
+/// Render the sub-issue tree as a recursive JSON array. Each element is
+/// `{ id, title, state, subissues }`. Returns `[]` for no nodes.
+pub fn subissue_tree_json(nodes: &[SubissueNode]) -> serde_json::Value {
+    serde_json::Value::Array(
+        nodes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id.to_string(),
+                    "title": n.title,
+                    "state": n.state,
+                    "subissues": subissue_tree_json(&n.subissues),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Render the sub-issue tree as a nested Markdown bullet list (no header).
+/// Returns an empty string when there are no nodes.
+pub fn subissue_tree_markdown(nodes: &[SubissueNode]) -> String {
+    let mut out = String::new();
+    write_subissue_markdown(nodes, 0, &mut out);
+    out
+}
+
+fn write_subissue_markdown(nodes: &[SubissueNode], depth: usize, out: &mut String) {
+    for n in nodes {
+        let indent = "  ".repeat(depth);
+        let _ = writeln!(
+            out,
+            "{indent}- {} `{}` — {}",
+            short_hex(&n.id),
+            n.state,
+            markdown_inline(&flatten(&n.title))
+        );
+        write_subissue_markdown(&n.subissues, depth + 1, out);
+    }
 }
 
 /// Build a NickMap from the user list returned by `TicketStore::list_users`.
@@ -1162,7 +1260,7 @@ fn friendly_date(when: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use ticgit_lib::TicketState;
     use uuid::Uuid;
 
@@ -1362,6 +1460,80 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "tester@example.com".to_string(),
         }
+    }
+
+    // Build a ticket with a fresh id, given state, and the given children.
+    // Reuses the existing `ticket()` helper (status derived from state).
+    fn sub(title: &str, state: TicketState, children: &[Uuid]) -> Ticket {
+        let mut t = ticket(&Uuid::new_v4().to_string(), title, state);
+        t.children = children.iter().copied().collect();
+        t
+    }
+
+    fn node_ids(nodes: &[SubissueNode]) -> Vec<Uuid> {
+        nodes.iter().map(|n| n.id).collect()
+    }
+
+    #[test]
+    fn build_subissue_tree_nests_multiple_levels() {
+        let grand = sub("grandchild", TicketState::New, &[]);
+        let child = sub("child", TicketState::New, &[grand.id]);
+        let root = sub("root", TicketState::New, &[child.id]);
+        let all = [&root, &child, &grand];
+        let by_id: HashMap<Uuid, &Ticket> = all.iter().map(|t| (t.id, *t)).collect();
+
+        let tree = build_subissue_tree(&root, &by_id);
+        assert_eq!(node_ids(&tree), vec![child.id]);
+        assert_eq!(node_ids(&tree[0].subissues), vec![grand.id]);
+        assert_eq!(tree[0].title, "child");
+        assert_eq!(tree[0].state, "new");
+    }
+
+    #[test]
+    fn build_subissue_tree_prunes_closed_subtree() {
+        let grand = sub("grandchild", TicketState::New, &[]);
+        // Resolved => status Closed.
+        let child = sub("child", TicketState::Resolved, &[grand.id]);
+        let root = sub("root", TicketState::New, &[child.id]);
+        let all = [&root, &child, &grand];
+        let by_id: HashMap<Uuid, &Ticket> = all.iter().map(|t| (t.id, *t)).collect();
+
+        // Closed child is dropped along with its (open) grandchild.
+        assert!(build_subissue_tree(&root, &by_id).is_empty());
+    }
+
+    #[test]
+    fn build_subissue_tree_survives_cycle() {
+        let mut a = sub("a", TicketState::New, &[]);
+        let mut b = sub("b", TicketState::New, &[]);
+        a.children = [b.id].into_iter().collect();
+        b.children = [a.id].into_iter().collect();
+        let all = [&a, &b];
+        let by_id: HashMap<Uuid, &Ticket> = all.iter().map(|t| (t.id, *t)).collect();
+
+        let tree = build_subissue_tree(&a, &by_id);
+        assert_eq!(node_ids(&tree), vec![b.id]);
+        assert!(tree[0].subissues.is_empty()); // a already visited
+    }
+
+    #[test]
+    fn subissue_tree_json_is_recursive() {
+        let grand = sub("grandchild", TicketState::New, &[]);
+        let child = sub("child", TicketState::New, &[grand.id]);
+        let root = sub("root", TicketState::New, &[child.id]);
+        let all = [&root, &child, &grand];
+        let by_id: HashMap<Uuid, &Ticket> = all.iter().map(|t| (t.id, *t)).collect();
+
+        let json = subissue_tree_json(&build_subissue_tree(&root, &by_id));
+        assert_eq!(json[0]["title"], "child");
+        assert_eq!(json[0]["state"], "new");
+        assert_eq!(json[0]["id"], child.id.to_string());
+        assert_eq!(json[0]["subissues"][0]["id"], grand.id.to_string());
+    }
+
+    #[test]
+    fn subissue_tree_json_empty_is_array() {
+        assert_eq!(subissue_tree_json(&[]), serde_json::json!([]));
     }
 
     fn strip_ansi(input: &str) -> String {
