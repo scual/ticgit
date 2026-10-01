@@ -313,7 +313,7 @@ impl TicketStore {
     }
 
     /// Change a ticket's lifecycle, rejecting a close while it still has open
-    /// sub-issues (children) or unresolved dependencies (open `depends_on`
+    /// sub-issues (children) or open dependencies (open `depends_on`
     /// targets). Closing a ticket that still *blocks* others is allowed — that
     /// is the normal "finished the blocker" case. Only a genuine open→closed
     /// transition is guarded; reclassifying an already-closed ticket among
@@ -333,7 +333,7 @@ impl TicketStore {
                 let open_deps = self.open_dependencies(id)?;
                 if !open_deps.is_empty() {
                     return Err(Error::OpenDependencies(format!(
-                        "{} unresolved dependenc{}: {}",
+                        "{} open dependenc{}: {}",
                         open_deps.len(),
                         if open_deps.len() == 1 { "y" } else { "ies" },
                         format_ticket_refs(&open_deps)
@@ -344,8 +344,9 @@ impl TicketStore {
         self.write_lifecycle(id, status, state)
     }
 
-    /// Change a ticket's lifecycle without the open-sub-issue guard. Used by the
-    /// `--force` CLI path and by sync (where the remote is authoritative).
+    /// Change a ticket's lifecycle without the open sub-issue and open
+    /// dependency guards. Used by the `--force` CLI path and by sync (where
+    /// the remote is authoritative).
     pub fn set_lifecycle_forced(
         &self,
         id: &Uuid,

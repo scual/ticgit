@@ -2416,7 +2416,7 @@ fn close_rejected_with_open_dependency_then_force_succeeds() {
         .args(["close", &dependent])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unresolved dependenc"))
+        .stderr(predicate::str::contains("open dependenc"))
         .stderr(predicate::str::contains("--force"));
 
     // Closing the blocker itself is allowed (the normal case).
@@ -2757,7 +2757,7 @@ fn next_json(repo: &TestRepo) -> Value {
 }
 
 #[test]
-fn next_skips_tickets_with_unresolved_dependencies() {
+fn next_skips_tickets_with_open_dependencies() {
     let repo = TestRepo::new();
     let blocker = create_ticket(&repo, "blocker");
     let dependent = create_ticket(&repo, "dependent");

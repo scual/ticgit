@@ -19,7 +19,7 @@ pub struct Args {
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
 
-    /// Close even if the ticket still has open sub-issues.
+    /// Close even if the ticket still has open sub-issues or open dependencies.
     #[arg(long = "force")]
     pub force: bool,
 }

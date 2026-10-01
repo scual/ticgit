@@ -27,7 +27,7 @@ pub struct Args {
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
 
-    /// Apply the change even if closing a ticket with open sub-issues.
+    /// Apply the change even if closing a ticket with open sub-issues or open dependencies.
     #[arg(long = "force")]
     pub force: bool,
 }

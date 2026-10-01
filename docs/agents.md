@@ -157,7 +157,7 @@ ti depends <blocker-id> -t <id>
 ti depends <blocker-id> -t <id> --remove
 ```
 
-`ti next` skips tickets with unresolved dependencies.
+`ti next` skips tickets with open dependencies.
 
 ## Sub-Issues
 
