@@ -41,36 +41,12 @@ pub fn run_sync(args: Args) -> Result<()> {
         }
     }
 
-    // Snapshot before pull
-    let before: BTreeMap<Uuid, String> = store
-        .list()?
-        .into_iter()
-        .map(|t| (t.id, t.title.clone()))
-        .collect();
-
-    store.pull(args.remote.as_deref())?;
-
-    // Snapshot after pull to find new tickets
-    let after: BTreeMap<Uuid, String> = store
-        .list()?
-        .into_iter()
-        .map(|t| (t.id, t.title.clone()))
-        .collect();
-
-    let new_tickets: Vec<(&Uuid, &String)> = after
-        .iter()
-        .filter(|(id, _)| !before.contains_key(id))
-        .collect();
-
-    store.push(args.remote.as_deref())?;
-    let total = after.len();
+    let SyncOutcome { new_tickets, total } = sync_tickets(&store, args.remote.as_deref())?;
 
     if args.json {
         let pulled: Vec<serde_json::Value> = new_tickets
             .iter()
-            .map(|(id, title)| {
-                serde_json::json!({ "id": id.to_string(), "title": title })
-            })
+            .map(|(id, title)| serde_json::json!({ "id": id.to_string(), "title": title }))
             .collect();
         let out = serde_json::json!({
             "remote": remote,
@@ -100,6 +76,52 @@ pub fn run_sync(args: Args) -> Result<()> {
     println!("Push: {total} ticket(s) synced.");
     println!("Done.");
     Ok(())
+}
+
+/// Result of one pull-then-push round.
+pub(crate) struct SyncOutcome {
+    /// Tickets that appeared during the pull.
+    pub new_tickets: Vec<(Uuid, String)>,
+    /// Ticket count after the sync.
+    pub total: usize,
+}
+
+/// Pull from then push to `remote`, reporting which tickets arrived.
+pub(crate) fn sync_tickets(
+    store: &ticgit_lib::TicketStore,
+    remote: Option<&str>,
+) -> Result<SyncOutcome> {
+    let before: BTreeMap<Uuid, String> = store
+        .list()?
+        .into_iter()
+        .map(|t| (t.id, t.title.clone()))
+        .collect();
+
+    // A remote that has never received tickets has no meta ref to pull yet;
+    // the push below creates it.
+    if let Err(err) = store.pull(remote) {
+        if !format!("{err:#}").contains("couldn't find remote ref") {
+            return Err(err.into());
+        }
+    }
+
+    let after: BTreeMap<Uuid, String> = store
+        .list()?
+        .into_iter()
+        .map(|t| (t.id, t.title.clone()))
+        .collect();
+
+    let new_tickets = after
+        .iter()
+        .filter(|(id, _)| !before.contains_key(id))
+        .map(|(id, title)| (*id, title.clone()))
+        .collect();
+
+    store.push(remote)?;
+    Ok(SyncOutcome {
+        new_tickets,
+        total: after.len(),
+    })
 }
 
 pub(crate) fn sync_remote(explicit: Option<&str>) -> Result<Option<String>> {

@@ -667,7 +667,7 @@ fn sync_prints_remote_url_and_ref() {
     repo.ti()
         .arg("sync")
         .assert()
-        .failure()
+        .success()
         .stdout(predicate::str::contains("Remote: origin"))
         .stdout(predicate::str::contains("Ref: refs/meta/main"))
         .stdout(predicate::str::contains(format!("URL: {remote_url}")));
@@ -2940,4 +2940,81 @@ fn assign_resolves_user_nick_to_email() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["assigned"], "scott@example.com");
+}
+
+#[test]
+fn hook_install_check_and_uninstall_git_target() {
+    let repo = TestRepo::new();
+    repo.ti()
+        .args(["hook", "check", "--target", "git"])
+        .assert()
+        .failure();
+
+    repo.ti()
+        .args(["hook", "install", "--target", "git"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pre-push"));
+    let hook = repo.dir.path().join(".git/hooks/pre-push");
+    let text = fs::read_to_string(&hook).unwrap();
+    assert!(text.starts_with("#!/usr/bin/env sh\n"));
+    assert!(text.contains("ti hook run pre-push"));
+
+    repo.ti()
+        .args(["hook", "check", "--target", "git"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["hook", "install", "--target", "git"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&hook).unwrap(), text);
+
+    repo.ti()
+        .args(["hook", "uninstall", "--target", "git"])
+        .assert()
+        .success();
+    assert!(!hook.exists());
+}
+
+#[test]
+fn hook_install_detects_husky_and_keeps_existing_steps() {
+    let repo = TestRepo::new();
+    let husky = repo.dir.path().join(".husky");
+    fs::create_dir_all(&husky).unwrap();
+    fs::write(husky.join("pre-push"), "#!/usr/bin/env sh\nnpm test\n").unwrap();
+
+    repo.ti().args(["hook", "install"]).assert().success();
+    let text = fs::read_to_string(husky.join("pre-push")).unwrap();
+    assert!(text.find("npm test").unwrap() < text.find("ti hook run").unwrap());
+
+    repo.ti().args(["hook", "uninstall"]).assert().success();
+    assert_eq!(
+        fs::read_to_string(husky.join("pre-push")).unwrap(),
+        "#!/usr/bin/env sh\nnpm test\n"
+    );
+}
+
+#[test]
+fn hook_run_never_fails_and_respects_the_recursion_guard() {
+    let repo = TestRepo::new();
+    let line = format!(
+        "refs/heads/main {} refs/heads/main {}\n",
+        "1".repeat(40),
+        "0".repeat(40)
+    );
+    // No remote configured: nothing to sync, still exits 0 and stays quiet.
+    repo.ti()
+        .args(["hook", "run", "pre-push", "origin", "url"])
+        .write_stdin(line.clone())
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+    repo.ti()
+        .args(["hook", "run", "pre-push", "origin", "url"])
+        .env("TI_SYNC_IN_PROGRESS", "1")
+        .write_stdin(line)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
 }

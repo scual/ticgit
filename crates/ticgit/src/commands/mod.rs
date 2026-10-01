@@ -12,6 +12,7 @@ pub mod delete;
 pub mod depends;
 pub mod edit;
 pub mod history;
+pub mod hook;
 pub mod import;
 pub mod init;
 pub mod list;

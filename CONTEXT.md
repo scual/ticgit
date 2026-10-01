@@ -53,6 +53,12 @@ _Avoid_: Proposal, RFC, spec (a spec belongs to a Ticket, not a Writeup)
 Turn a Writeup into a Ticket, carrying over its title, tags, priority, and latest body. The Writeup is then closed and stays linked to the Ticket it became.
 _Avoid_: Convert, publish
 
+### Syncing
+
+**Sync hook**:
+A git hook that runs a sync before code is pushed, so tickets travel with the code. It only acts when a branch is pushed to the remote that tickets sync with.
+_Avoid_: Auto-sync, pre-push script
+
 ### Working context
 
 **Checked-out ticket**:

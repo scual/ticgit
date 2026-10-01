@@ -194,6 +194,22 @@ ti sync
 named git-meta remote is used; otherwise git-meta resolves the default metadata
 remote from Git config.
 
+### Sync on push
+
+Install a Sync hook so tickets travel with your code:
+
+```sh
+ti hook install            # detects Husky (.husky/) or falls back to .git/hooks
+ti hook install --target husky|git
+ti hook check              # exits non-zero if missing or out of date
+ti hook uninstall
+```
+
+The hook is a small marked block appended to `pre-push`, so existing steps are
+kept. It syncs only when a branch is pushed to the remote tickets sync with,
+prints one status line, and never blocks the push: a failed sync is a warning.
+See `docs/adr/0001-sync-hook-logic-lives-in-binary.md`.
+
 ## What It Stores
 
 All TicGit data is written on the git-meta `project` target under the
