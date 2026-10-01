@@ -688,6 +688,21 @@ pub fn ticket_json(t: &Ticket) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(t)
 }
 
+/// Serialize a ticket as pretty JSON with an additive `subissues` field holding
+/// the recursive open-only sub-issue tree. The ticket object itself is
+/// unchanged (schema v1), so `subissues` is a pure addition.
+pub fn ticket_json_with_subissues(
+    t: &Ticket,
+    by_id: &HashMap<Uuid, &Ticket>,
+) -> Result<String, serde_json::Error> {
+    let mut value = serde_json::to_value(t)?;
+    if let serde_json::Value::Object(map) = &mut value {
+        let tree = build_subissue_tree(t, by_id);
+        map.insert("subissues".to_string(), subissue_tree_json(&tree));
+    }
+    serde_json::to_string_pretty(&value)
+}
+
 pub fn tickets_json(t: &[Ticket]) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(t)
 }
@@ -1534,6 +1549,33 @@ mod tests {
     #[test]
     fn subissue_tree_json_empty_is_array() {
         assert_eq!(subissue_tree_json(&[]), serde_json::json!([]));
+    }
+
+    #[test]
+    fn ticket_json_with_subissues_is_additive() {
+        let child = sub("child", TicketState::New, &[]);
+        let root = sub("root", TicketState::New, &[child.id]);
+        let all = [&root, &child];
+        let by_id: HashMap<Uuid, &Ticket> = all.iter().map(|t| (t.id, *t)).collect();
+
+        let s = ticket_json_with_subissues(&root, &by_id).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+
+        // Original ticket fields are untouched.
+        assert_eq!(v["id"], root.id.to_string());
+        assert_eq!(v["title"], "root");
+        assert!(v["children"].is_array()); // existing UUID array preserved
+                                           // New additive field carries the nested tree.
+        assert_eq!(v["subissues"][0]["id"], child.id.to_string());
+    }
+
+    #[test]
+    fn ticket_json_with_subissues_empty_when_no_children() {
+        let root = sub("root", TicketState::New, &[]);
+        let by_id: HashMap<Uuid, &Ticket> = [(root.id, &root)].into_iter().collect();
+        let s = ticket_json_with_subissues(&root, &by_id).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["subissues"], serde_json::json!([]));
     }
 
     fn strip_ansi(input: &str) -> String {
