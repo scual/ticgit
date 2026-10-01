@@ -426,6 +426,13 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         schema["$defs"]["ticket"]["properties"]["meta"]["additionalProperties"]["type"],
         "string"
     );
+    // `subissues` is an optional, additive property — documented but not required.
+    assert!(schema["$defs"]["ticket"]["properties"]["subissues"].is_object());
+    assert!(!required.contains("subissues"));
+    assert_eq!(
+        schema["$defs"]["subissueNode"]["additionalProperties"],
+        false
+    );
 
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "schema ticket");
@@ -453,7 +460,10 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         .keys()
         .map(|key| key.to_string())
         .collect();
-    assert_eq!(ticket_keys, required);
+    let mut show_keys = required.clone();
+    show_keys.insert("subissues".to_string());
+    assert_eq!(ticket_keys, show_keys);
+    assert!(ticket["subissues"].is_array());
     assert_eq!(ticket["id"], id);
     assert_eq!(ticket["status"], "open");
     assert_eq!(ticket["state"], "new");

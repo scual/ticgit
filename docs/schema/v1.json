@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ticgit.dev/schema/v1.json",
   "title": "TicGit machine output schema v1",
-  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches.",
+  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree).",
   "oneOf": [
     {
       "$ref": "#/$defs/ticket"
@@ -153,6 +153,13 @@
           },
           "uniqueItems": true
         },
+        "subissues": {
+          "type": "array",
+          "description": "Recursive open-only sub-issue tree. Additive, optional field emitted by `ti next` and `ti show`; absent from `ti list` and mutation output. Not a stored field.",
+          "items": {
+            "$ref": "#/$defs/subissueNode"
+          }
+        },
         "depends_on": {
           "type": "array",
           "items": {
@@ -196,6 +203,29 @@
         },
         "created_by": {
           "type": "string"
+        }
+      }
+    },
+    "subissueNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "state", "subissues"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "subissues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/subissueNode"
+          }
         }
       }
     },
