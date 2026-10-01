@@ -145,7 +145,7 @@ New tickets start as `open:new`; `ti state closed` defaults to
 
 Closing a ticket is rejected while it still has an open sub-issue or an
 unresolved dependency (an open ticket in its `depends_on`), so a "done" ticket
-never hides unfinished work. Closing a ticket that only *blocks* others is
+never hides unfinished work. Closing a ticket that only _blocks_ others is
 allowed — that is the normal "finished the blocker" case. A sub-issue or
 dependency counts as handled once it reaches any closed state (`resolved`,
 `wontfix`, `duplicate`, or `invalid`). For the same reason, you cannot add a
@@ -280,7 +280,9 @@ cargo publish -p ticgit
 The CLI crate depends on `ticgit-lib` by both local `path` and published
 `version`, so publish `ticgit-lib` first.
 
-To install locally, after build, from project folder:
+## Install locally
+
+To install locally, from project folder:
 
 ```sh
 cargo install --path crates/ticgit --force --locked
