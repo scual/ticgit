@@ -14,7 +14,7 @@ Two conventions repeat almost everywhere, so they're stated once here:
 ## Table of contents
 
 - [Create & browse](#create--browse) — `new` `list` `show` `recent` `mine` `history` `tui`
-- [Work on tickets](#work-on-tickets) — `checkout` `next` `edit` `comment` `state` `close` `claim`
+- [Work on tickets](#work-on-tickets) — `checkout` `next` `edit` `comment` `state` `close` `claim` `delete`
 - [Ticket fields](#ticket-fields) — `tag` `assign` `priority` `points` `milestone` `subissue` `code` `depends`/`dep` `spec` `meta`
 - [Views & import](#views--import) — `views` `writeup` `review` `stats` `import`
 - [Team](#team) — `users` `mine`
@@ -66,8 +66,13 @@ Two conventions repeat almost everywhere, so they're stated once here:
 [TICKET]                   Id/prefix. Defaults to the checked-out ticket.
     --json / --markdown
     --filter [<FILTER>]    Output one JSON field via a small jq-like path,
-                           e.g. `.title`, `.spec`, `.comments[0].body`.
+                           e.g. `.title`, `.spec`, `.parent`, `.children`,
+                           `.comments[0].body`.
 ```
+Like `ti next`, the output includes the ticket's **open sub-issues as a recursive
+tree** (closed pruned); `--json` adds the same additive `subissues` array
+alongside the flat `children` id list (which is unchanged). `--filter` reads from
+the plain stored fields (it does not expose `subissues`).
 
 ### `ti recent` — most recently touched
 ```
@@ -108,7 +113,10 @@ No options. Browses open tickets interactively. (Not for non-interactive use.)
 -a, --assigned <ASSIGNED>  Only consider tickets assigned to this user.
     --json / --markdown
 ```
-Skips tickets with unresolved dependencies.
+Skips tickets with unresolved dependencies. The output shows the chosen ticket's
+**open sub-issues as a recursive tree** (any depth; closed sub-issues pruned). In
+`--json` this is an additive `subissues` array on the ticket object — each node is
+`{id, title, state, subissues:[…]}` — so the rest of the ticket object is unchanged.
 
 ### `ti edit` — edit title + description
 ```
@@ -147,6 +155,22 @@ Shorthand for `ti state resolved`; records the current user as `closed_by`.
 -t, --ticket <TICKET>      Id/prefix. Defaults to checked-out.
     --json / --markdown
 ```
+
+### `ti delete` — permanently delete ticket(s)
+```
+[IDS]...                   One or more ids/prefixes (REQUIRED, POSITIONAL).
+                           No default-to-checked-out — a destructive op must be explicit.
+-r, --recursive            Also delete the whole descendant subtree (incl. closed).
+-y, --yes                  Skip the confirmation prompt.
+    --json / --markdown    Output the deleted ticket(s). --json emits an ARRAY of
+                           ticket objects (even for one id). Both require --yes.
+```
+**Irreversible.** Resolves every id first — if any is unknown/ambiguous the whole
+batch aborts and nothing is deleted. Without `--recursive`, a deleted parent's
+sub-issues are **orphaned** (kept as top-level tickets), not deleted; `--recursive`
+removes the entire subtree. Prompts `[y/N]` unless `--yes`; machine mode
+(`--json`/`--markdown`) and non-interactive shells **require `--yes`** (they error
+instead of prompting). Clears the checked-out pointer if you delete the current ticket.
 
 ---
 
@@ -360,6 +384,10 @@ CLI version — useful when a new `ti` release adds subcommands not listed here.
 
 - **`ti close` takes the id positionally**, unlike most field/state commands
   which use `-t`. `ti close <id>`, not `ti close -t <id>`.
+- **`ti delete` is irreversible and non-interactive-safe only with `--yes`.**
+  It takes ids positionally (like `close`), accepts several at once, and refuses
+  to run in `--json`/`--markdown` or a non-TTY without `--yes`. Deleting a parent
+  orphans its sub-issues unless you pass `--recursive`. There is no undo.
 - **`ti dep`** is an exact alias of **`ti depends`** — same flags.
 - **Dependency direction:** `ti depends <blocker> -t <id>` means *`<id>` depends
   on `<blocker>`* (i.e. `<blocker>` must be resolved first). `ti next` and

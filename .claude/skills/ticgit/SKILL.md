@@ -1,6 +1,6 @@
 ---
 name: ticgit
-description: Use for durable task/ticket tracking in this repo — planning, progress notes, triage, resolving work. Tickets live in git as metadata via the `ti` CLI (TicGit). Trigger whenever creating, listing, updating, or closing tickets/tasks/issues; managing sub-issues, dependencies, milestones, priorities, tags, points, specs, writeups, saved views, code reviews, or stats; importing issues from GitHub/Linear; syncing ticket metadata; or when the user says "ticket", "TicGit", "ti", "track this", "backlog", or "next ticket". For the full command catalog with every flag, read reference.md.
+description: Use for durable task/ticket tracking in this repo — planning, progress notes, triage, resolving work. Tickets live in git as metadata via the `ti` CLI (TicGit). Trigger whenever creating, listing, updating, closing, or deleting tickets/tasks/issues; managing sub-issues, dependencies, milestones, priorities, tags, points, specs, writeups, saved views, code reviews, or stats; importing issues from GitHub/Linear; syncing ticket metadata; or when the user says "ticket", "TicGit", "ti", "track this", "backlog", or "next ticket". For the full command catalog with every flag, read reference.md.
 ---
 
 # TicGit (`ti`) — git-native tickets for this repo
@@ -41,6 +41,10 @@ ti stats --markdown          # dashboard
 Filter `list`/`mine` with `--tag`, `--state`, `--status`, `--search title:foo`,
 `--order priority`, `--subissues`, `--depends-on <id>`, `--blocks <id>`. See reference.md.
 
+`ti next` and `ti show` render the chosen ticket's **open sub-issues as a recursive
+tree** (any depth; closed pruned). In `--json` this is an additive `subissues` array
+of `{id, title, state, subissues:[…]}` nodes — the rest of the ticket object is unchanged.
+
 ## Create / edit
 
 ```sh
@@ -59,7 +63,12 @@ ti comment -t <id> "found the failing case"   # progress / blockers / verificati
 ti state in-progress -t <id> # lifecycle: status, state, or status:state
 ti state blocked -t <id>
 ti close <id>                # resolve (positional id, not -t); records closed_by
+ti delete <id> [<id>...] --yes          # permanently delete (positional ids); irreversible
+ti delete <parent> --recursive --yes    # also delete the whole sub-issue subtree
 ```
+`ti delete` requires explicit id(s) (no default-to-current) and prompts unless
+`--yes`; `--json`/`--markdown` and non-interactive shells require `--yes`. Deleting
+a parent **orphans** its sub-issues (kept top-level) unless `--recursive`. No undo.
 Lifecycle — **open:** `new assigned in-progress blocked review` · **closed:**
 `resolved wontfix duplicate invalid`.
 
