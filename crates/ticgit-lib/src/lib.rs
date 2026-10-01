@@ -61,7 +61,9 @@ pub mod writeup;
 pub mod test_support;
 
 pub use error::{Error, Result};
-pub use query::{Filter, SearchFilter, SearchScope, SortKey, SortOrder};
+pub use query::{
+    next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
+};
 pub use store::TicketStore;
 pub use ticket::{
     validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,

@@ -1,11 +1,20 @@
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::{Ticket, TicketState, TicketStatus};
+use ticgit_lib::{next_queue, NextOptions};
 
 use crate::commands::{open_store, SessionGitDir};
 use crate::render;
 use crate::session_state::State;
 
+/// Pick the next ticket to work on.
+///
+/// Excludes closed tickets, sub-issues, tickets with unresolved dependencies,
+/// and tickets tagged `deferred`/`backlog` (restore with `--include-deferred`).
+///
+/// Ordering (first = work on next): priority ascending — lower is more
+/// important, and unprioritised (`none`) tickets always sort last, so a numeric
+/// priority (even a large one) cannot sink below them; then state
+/// (in-progress, assigned, review, new, then blocked last); then oldest-created.
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Only consider tickets with this tag.
@@ -15,6 +24,10 @@ pub struct Args {
     /// Only consider tickets assigned to this user.
     #[arg(short = 'a', long = "assigned")]
     pub assigned: Option<String>,
+
+    /// Include tickets tagged `deferred` or `backlog` (hidden by default).
+    #[arg(long = "include-deferred")]
+    pub include_deferred: bool,
 
     /// Output as JSON.
     #[arg(long = "json")]
@@ -32,44 +45,12 @@ pub fn run(args: Args) -> Result<()> {
 
     let by_id = render::by_id_map(&all_tickets);
 
-    // Build a set of closed ticket IDs for dependency checking
-    let closed_ids: std::collections::HashSet<uuid::Uuid> = all_tickets
-        .iter()
-        .filter(|t| t.status == TicketStatus::Closed)
-        .map(|t| t.id)
-        .collect();
-
-    let mut candidates: Vec<&Ticket> = all_tickets
-        .iter()
-        .filter(|t| t.status == TicketStatus::Open)
-        .filter(|t| t.parent.is_none())
-        // Skip tickets whose dependencies are not all resolved
-        .filter(|t| t.depends_on.iter().all(|dep| closed_ids.contains(dep)))
-        .filter(|t| {
-            if let Some(tag) = &args.tag {
-                t.tags.contains(tag)
-            } else {
-                true
-            }
-        })
-        .filter(|t| {
-            if let Some(assigned) = &args.assigned {
-                t.assigned.as_deref() == Some(assigned.as_str())
-            } else {
-                true
-            }
-        })
-        .collect();
-
-    // Find the max priority value among candidates for relative scoring
-    let max_priority = candidates
-        .iter()
-        .filter_map(|t| t.priority)
-        .max()
-        .unwrap_or(0);
-
-    // Rank candidates: higher score = better candidate
-    candidates.sort_by_key(|t| std::cmp::Reverse(score(t, max_priority)));
+    let opts = NextOptions {
+        tag: args.tag.clone(),
+        assigned: args.assigned.clone(),
+        include_deferred: args.include_deferred,
+    };
+    let candidates = next_queue(&all_tickets, &opts);
 
     let ticket = match candidates.into_iter().next() {
         Some(t) => t,
@@ -131,42 +112,4 @@ pub fn run(args: Args) -> Result<()> {
         print!("{}", render::subissue_tree_text(&tree));
     }
     Ok(())
-}
-
-/// Score a ticket for work priority. Higher = should be worked on first.
-/// `max_priority` is the highest priority value among open candidates,
-/// used to score lower-numbered priorities higher.
-fn score(t: &Ticket, max_priority: i64) -> i64 {
-    let mut s: i64 = 0;
-
-    // Prefer tickets already in progress
-    match t.state {
-        TicketState::InProgress => s += 100,
-        TicketState::Assigned => s += 80,
-        TicketState::Review => s += 60,
-        TicketState::Blocked => s -= 200, // skip blocked tickets
-        TicketState::New => s += 40,
-        _ => {}
-    }
-
-    // Prefer assigned tickets (someone decided this matters)
-    if t.assigned.is_some() {
-        s += 20;
-    }
-
-    // Prefer lower explicit priority (1 = highest, dominant factor)
-    if let Some(p) = t.priority {
-        s += (max_priority + 1 - p) * 50;
-    }
-
-    // Prefer higher points (estimate)
-    if let Some(p) = t.points {
-        s += p * 10;
-    }
-
-    // Prefer older tickets (days since creation, capped)
-    let age_days = (time::OffsetDateTime::now_utc() - t.created_at).whole_days();
-    s += age_days.min(30);
-
-    s
 }

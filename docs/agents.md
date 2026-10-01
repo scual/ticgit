@@ -126,7 +126,7 @@ Use priority, tags, estimates, milestones, and assignee to keep work easy to
 sort:
 
 ```sh
-ti priority -t <id> 2
+ti priority -t <id> 2        # lower = more important; unprioritised sorts last
 ti tag -t <id> bug parser
 ti points -t <id> 3
 ti milestone -t <id> v1.0
@@ -158,6 +158,31 @@ ti depends <blocker-id> -t <id> --remove
 ```
 
 `ti next` skips tickets with open dependencies.
+
+## Picking The Next Ticket
+
+`ti next` chooses one open ticket to work on and checks it out. It **excludes**
+closed tickets, sub-issues, tickets with unresolved dependencies, and tickets
+tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
+deferred/backlog ones too.
+
+Among the remaining tickets it orders by, in precedence:
+
+1. **Priority** — ascending (lower number = more important). Unprioritised
+   (`none`) tickets always sort **last**: `none` is the least-important band, so
+   a numeric priority — even a large one like `100` — always ranks *above* the
+   unprioritised pile. A number cannot sink a ticket below unprioritised ones.
+2. **State** — `in-progress`, then `assigned`, `review`, `new`, and finally
+   `blocked` (blocked is demoted to the back but is not excluded).
+3. **Age** — oldest-created first.
+
+To park deferred work so it drops out of `ti next`, tag it `deferred` (or
+`backlog`) rather than overloading priority or `blocked`:
+
+```sh
+ti tag -t <id> deferred      # hidden from `ti next`
+ti next --include-deferred   # bring deferred/backlog tickets back in
+```
 
 ## Sub-Issues
 

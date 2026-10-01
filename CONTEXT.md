@@ -58,3 +58,16 @@ _Avoid_: Convert, publish
 **Checked-out ticket**:
 The one ticket a person is currently focused on, so commands can act on it when no ticket is named. It is personal to each user and each clone, and is never shared through the repository. It may be a Closed ticket.
 _Avoid_: Current ticket, active ticket, selected ticket
+
+### Prioritising work
+
+**Priority**:
+An optional integer on a ticket where lower is more important. Unprioritised (`none`) is the least-important band: a numeric priority — even a large one — always ranks above unprioritised tickets, so a number can never sink a ticket below the unprioritised pile. To push work down, leave it unprioritised, mark it Deferred, or set it Blocked.
+_Avoid_: Treating a high number as a demotion below unprioritised tickets
+
+**Deferred**:
+Work parked out of the active queue, marked by the `deferred` or `backlog` tag. `ti next` hides Deferred tickets by default; `ti next --include-deferred` brings them back. This is the non-abusive way to shelve work, distinct from Blocked (stalled) and from a low Priority.
+_Avoid_: Using Blocked to mean deferred, or a large Priority number to shelve work
+
+**Next queue**:
+The ordering `ti next` uses to pick one ticket to work on. It excludes Closed tickets, Sub-issues, tickets with an unfinished Dependency, and Deferred tickets, then orders the rest by Priority (unprioritised last), then State (Blocked last), then oldest-created first.
