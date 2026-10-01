@@ -2497,6 +2497,53 @@ fn next_skips_subissues() {
 }
 
 #[test]
+fn next_json_includes_recursive_subissues() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let grandchild = create_subissue(&repo, &child, "grandchild");
+
+    let v = next_json(&repo);
+    // Ticket object is unchanged; subissues is additive.
+    assert_eq!(v["id"], parent);
+    assert_eq!(v["subissues"][0]["id"], child);
+    assert_eq!(v["subissues"][0]["title"], "child");
+    assert_eq!(v["subissues"][0]["state"], "new");
+    assert_eq!(v["subissues"][0]["subissues"][0]["id"], grandchild);
+}
+
+#[test]
+fn next_json_subissues_excludes_closed() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    repo.ti().args(["close", &child]).assert().success();
+
+    let v = next_json(&repo);
+    assert_eq!(v["id"], parent);
+    assert_eq!(v["subissues"], serde_json::json!([]));
+}
+
+#[test]
+fn next_text_shows_subissue_tree() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    create_subissue(&repo, &parent, "child");
+
+    let out = repo
+        .ti()
+        .arg("next")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Sub-issues:"), "missing header in:\n{text}");
+    assert!(text.contains("child"), "missing child in:\n{text}");
+}
+
+#[test]
 fn next_json_is_null_when_nothing_workable() {
     let repo = TestRepo::new();
     let output = repo
