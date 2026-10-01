@@ -42,3 +42,19 @@ _Avoid_: Stage, phase
 **Blocked**:
 An open State set by hand, meaning work is stalled for any reason, including ones outside the tracker. Unrelated to Dependency: a Dependency never sets it, and a ticket with an unfinished Dependency need not be Blocked.
 _Avoid_: Using "blocked" for a ticket that merely has an unfinished Dependency
+
+### Writeups
+
+**Writeup**:
+A versioned markdown draft that precedes work. It is either promoted into a Ticket or closed without one.
+_Avoid_: Proposal, RFC, spec (a spec belongs to a Ticket, not a Writeup)
+
+**Promote**:
+Turn a Writeup into a Ticket, carrying over its title, tags, priority, and latest body. The Writeup is then closed and stays linked to the Ticket it became.
+_Avoid_: Convert, publish
+
+### Working context
+
+**Checked-out ticket**:
+The one ticket a person is currently focused on, so commands can act on it when no ticket is named. It is personal to each user and each clone, and is never shared through the repository. It may be a Closed ticket.
+_Avoid_: Current ticket, active ticket, selected ticket
