@@ -241,6 +241,100 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     tickets
 }
 
+/// Tags that park a ticket out of the `ti next` work queue by default.
+/// Restore them with [`NextOptions::include_deferred`].
+pub const DEFERRED_TAGS: &[&str] = &["deferred", "backlog"];
+
+/// Knobs for [`next_queue`] — the ticket `ti next` picks to work on.
+#[derive(Debug, Clone, Default)]
+pub struct NextOptions {
+    /// Only consider tickets carrying this tag.
+    pub tag: Option<String>,
+    /// Only consider tickets assigned to this user.
+    pub assigned: Option<String>,
+    /// Include tickets tagged with a [`DEFERRED_TAGS`] value (normally hidden).
+    pub include_deferred: bool,
+}
+
+/// Rank for the `ti next` sort key's state component: tickets being actively
+/// worked rank first, `blocked` ranks last. Closed states never reach here
+/// (they are excluded before sorting) but are given high ranks for totality.
+fn next_state_rank(s: TicketState) -> u8 {
+    match s {
+        TicketState::InProgress => 0,
+        TicketState::Assigned => 1,
+        TicketState::Review => 2,
+        TicketState::New => 3,
+        TicketState::Blocked => 4,
+        // Closed states are filtered out of the queue; keep the match total.
+        TicketState::Resolved => 5,
+        TicketState::Wontfix => 6,
+        TicketState::Duplicate => 7,
+        TicketState::Invalid => 8,
+    }
+}
+
+/// Open, actionable tickets ordered best-first for `ti next`.
+///
+/// A ticket is **excluded** from the queue when any of these hold:
+/// - it is closed (`status == Closed`);
+/// - it is a sub-issue (has a `parent`);
+/// - it has an unresolved dependency (a `depends_on` id whose ticket is not
+///   closed, or is missing);
+/// - it is tagged with a [`DEFERRED_TAGS`] value, unless
+///   [`NextOptions::include_deferred`] is set.
+///
+/// Plus the optional [`NextOptions::tag`] / [`NextOptions::assigned`] narrowing.
+///
+/// Remaining tickets are ordered by an ascending lexicographic key (first =
+/// work on next):
+/// 1. **priority** — numeric priorities first, ascending (lower = more
+///    important); `none` sorts last (it is the least-important band, so a
+///    numeric priority — even a large one — always ranks above unprioritised
+///    tickets; numbers cannot sink a ticket below the unprioritised pile).
+/// 2. **state** — `in-progress`, `assigned`, `review`, `new`, then `blocked`
+///    (blocked sorts last but is not excluded).
+/// 3. **created_at** — oldest first.
+pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Ticket> {
+    let closed_ids: std::collections::HashSet<Uuid> = tickets
+        .iter()
+        .filter(|t| t.status == TicketStatus::Closed)
+        .map(|t| t.id)
+        .collect();
+
+    let mut candidates: Vec<&Ticket> = tickets
+        .iter()
+        .filter(|t| t.status == TicketStatus::Open)
+        .filter(|t| t.parent.is_none())
+        .filter(|t| t.depends_on.iter().all(|dep| closed_ids.contains(dep)))
+        .filter(|t| {
+            opts.include_deferred
+                || !t
+                    .tags
+                    .iter()
+                    .any(|tag| DEFERRED_TAGS.contains(&tag.as_str()))
+        })
+        .filter(|t| match &opts.tag {
+            Some(tag) => t.tags.contains(tag),
+            None => true,
+        })
+        .filter(|t| match &opts.assigned {
+            Some(assigned) => t.assigned.as_deref() == Some(assigned.as_str()),
+            None => true,
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        priority_rank(a.priority)
+            .cmp(&priority_rank(b.priority))
+            .then_with(|| next_state_rank(a.state).cmp(&next_state_rank(b.state)))
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    candidates
+}
+
 fn filter_tags(filter: &Filter) -> Vec<&String> {
     let mut tags = Vec::new();
     if let Some(tag) = &filter.tag {
@@ -622,7 +716,14 @@ mod tests {
         let parent_id = Uuid::new_v4();
         let mut child = t("child", TicketStatus::Open, TicketState::New, None, None, 1);
         child.parent = Some(parent_id);
-        let unrelated = t("unrelated", TicketStatus::Open, TicketState::New, None, None, 2);
+        let unrelated = t(
+            "unrelated",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        );
         // hide_subissues is on by default; a --parent match must still show.
         let f = Filter {
             parent: Some(parent_id),
@@ -822,5 +923,174 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, comment.title);
+    }
+
+    // --- `ti next` queue (next_queue) ---------------------------------------
+
+    fn open(title: &str, ts: i64) -> Ticket {
+        t(title, TicketStatus::Open, TicketState::New, None, None, ts)
+    }
+
+    #[test]
+    fn next_numeric_priority_ranks_above_none() {
+        let mut numbered = open("numbered", 1);
+        numbered.priority = Some(100);
+        let unprioritised = open("unprioritised", 2);
+
+        let input = [unprioritised, numbered];
+        let out = next_queue(&input, &NextOptions::default());
+
+        // A large number still outranks `none`: none is the floor.
+        assert_eq!(out[0].title, "numbered");
+        assert_eq!(out[1].title, "unprioritised");
+    }
+
+    #[test]
+    fn next_numeric_priorities_order_ascending() {
+        let mut low = open("low-number", 1);
+        low.priority = Some(1);
+        let mut high = open("high-number", 2);
+        high.priority = Some(5);
+
+        let input = [high, low];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out[0].title, "low-number");
+        assert_eq!(out[1].title, "high-number");
+    }
+
+    #[test]
+    fn next_blocked_sorts_last_at_equal_priority() {
+        let actionable = open("actionable", 1);
+        let blocked = t(
+            "blocked",
+            TicketStatus::Open,
+            TicketState::Blocked,
+            None,
+            None,
+            2,
+        );
+
+        let input = [blocked, actionable];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out[0].title, "actionable");
+        assert_eq!(out[1].title, "blocked");
+    }
+
+    #[test]
+    fn next_excludes_deferred_and_backlog_tags_by_default() {
+        let active = open("active", 1);
+        let deferred = t(
+            "deferred-work",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("deferred"),
+            None,
+            2,
+        );
+        let backlog = t(
+            "backlog-work",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("backlog"),
+            None,
+            3,
+        );
+
+        let input = [active, deferred, backlog];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "active");
+    }
+
+    #[test]
+    fn next_include_deferred_restores_tagged_tickets() {
+        let active = open("active", 1);
+        let deferred = t(
+            "deferred-work",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("deferred"),
+            None,
+            2,
+        );
+
+        let input = [active, deferred];
+        let out = next_queue(
+            &input,
+            &NextOptions {
+                include_deferred: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn next_excludes_closed_tickets() {
+        let open_ticket = open("open", 1);
+        let closed = t(
+            "closed",
+            TicketStatus::Closed,
+            TicketState::Resolved,
+            None,
+            None,
+            2,
+        );
+
+        let input = [open_ticket, closed];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "open");
+    }
+
+    #[test]
+    fn next_excludes_subissues() {
+        let top = open("top", 1);
+        let mut child = open("child", 2);
+        child.parent = Some(Uuid::new_v4());
+
+        let input = [top, child];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "top");
+    }
+
+    #[test]
+    fn next_excludes_tickets_with_unresolved_dependencies() {
+        let blocker = open("blocker", 1);
+        let blocker_id = blocker.id;
+        let mut dependent = open("dependent", 2);
+        dependent.depends_on.insert(blocker_id);
+
+        // Blocker is open -> dependent is not actionable yet.
+        let input = [blocker.clone(), dependent.clone()];
+        let out = next_queue(&input, &NextOptions::default());
+        assert!(out.iter().all(|x| x.title != "dependent"));
+
+        // Close the blocker -> dependent becomes actionable.
+        let mut closed_blocker = blocker;
+        closed_blocker.status = TicketStatus::Closed;
+        closed_blocker.state = TicketState::Resolved;
+        let input = [closed_blocker, dependent];
+        let out = next_queue(&input, &NextOptions::default());
+        assert!(out.iter().any(|x| x.title == "dependent"));
+    }
+
+    #[test]
+    fn next_breaks_ties_by_oldest_created_first() {
+        let newer = open("newer", 100);
+        let older = open("older", 10);
+
+        let input = [newer, older];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out[0].title, "older");
+        assert_eq!(out[1].title, "newer");
     }
 }

@@ -334,7 +334,9 @@ fn agent_prints_markdown_guide() {
         .stdout(predicate::str::contains("ti list --markdown"))
         .stdout(predicate::str::contains("Prefer `--markdown`"))
         .stdout(predicate::str::contains("ti close -t <id>"))
-        .stdout(predicate::str::contains("--json").not());
+        // The guide steers agents to --markdown for reading, while still
+        // documenting --json for machine parsing.
+        .stdout(predicate::str::contains("--json"));
 }
 
 #[test]
@@ -2789,6 +2791,69 @@ fn next_prefers_lower_priority_number() {
         .success();
 
     assert_eq!(next_json(&repo)["id"], hi);
+}
+
+#[test]
+fn next_numeric_priority_outranks_none_even_when_large() {
+    let repo = TestRepo::new();
+    // `_plain` is created first, so it is older and would win the created-at
+    // tie-break while both are unprioritised.
+    let _plain = create_ticket(&repo, "plain-older");
+    let numbered = create_ticket(&repo, "numbered-newer");
+    // A deliberately large number is NOT a demotion: `none` is the
+    // least-important band, so any numeric priority ranks above it.
+    repo.ti()
+        .args(["priority", "100", "-t", &numbered])
+        .assert()
+        .success();
+
+    assert_eq!(
+        next_json(&repo)["id"],
+        numbered,
+        "a numeric priority (even 100) must rank above unprioritised tickets"
+    );
+}
+
+#[test]
+fn next_excludes_deferred_tag_unless_included() {
+    let repo = TestRepo::new();
+    // `parked` is older, so without exclusion it would win the tie-break.
+    let parked = create_ticket(&repo, "parked-older");
+    let active = create_ticket(&repo, "active-newer");
+    repo.ti()
+        .args(["tag", "-t", &parked, "deferred"])
+        .assert()
+        .success();
+
+    // deferred-tagged `parked` is excluded; `active` is picked.
+    assert_eq!(next_json(&repo)["id"], active);
+
+    // --include-deferred restores it; being older it now wins the tie.
+    let out = repo
+        .ti()
+        .args(["next", "--include-deferred", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["id"], parked);
+}
+
+#[test]
+fn next_blocked_sorts_after_actionable() {
+    let repo = TestRepo::new();
+    // `blocked` is older and would otherwise win the created-at tie-break.
+    let blocked = create_ticket(&repo, "blocked-older");
+    let active = create_ticket(&repo, "active-newer");
+    repo.ti()
+        .args(["state", "blocked", "-t", &blocked])
+        .assert()
+        .success();
+
+    // blocked is not excluded, but sorts last among states, so `active` wins.
+    assert_eq!(next_json(&repo)["id"], active);
 }
 
 #[test]

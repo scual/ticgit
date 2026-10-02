@@ -4,3 +4,4 @@ rdoc/
 pkg/
 target/
 .DS_Store
+.idea/

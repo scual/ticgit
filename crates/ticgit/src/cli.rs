@@ -135,6 +135,11 @@ pub enum Command {
     Checkout(commands::checkout::Args),
 
     /// Pick the next best ticket to work on and check it out.
+    ///
+    /// Orders by priority (lower = more important; unprioritised last), then
+    /// state (blocked last), then oldest-created. Excludes closed tickets,
+    /// sub-issues, tickets with unresolved dependencies, and tickets tagged
+    /// `deferred`/`backlog` (see --include-deferred).
     Next(commands::next::Args),
 
     /// Assign a ticket to you and mark it assigned.
