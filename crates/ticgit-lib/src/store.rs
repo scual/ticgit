@@ -1556,6 +1556,22 @@ mod tests {
     }
 
     #[test]
+    fn load_ignores_unknown_fields() {
+        // Forward-compat contract (roadmap step 3): a reader must tolerate
+        // fields a newer client added that it does not understand — it ignores
+        // them and keeps the known fields intact, never erroring. The op-log
+        // envelope extends this same guarantee to unknown op *kinds* in step 4.
+        let (store, _td) = test_store();
+        let t = store.create("keep me", NewTicketOpts::default()).unwrap();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&t.id, "future-widget"), "42")
+            .unwrap();
+        let loaded = store.load(&t.id).unwrap();
+        assert_eq!(loaded.title, "keep me");
+        assert_eq!(loaded.state, TicketState::New);
+    }
+
+    #[test]
     fn create_stamps_current_format_version() {
         let (store, _td) = test_store();
         let t = store.create("x", NewTicketOpts::default()).unwrap();
