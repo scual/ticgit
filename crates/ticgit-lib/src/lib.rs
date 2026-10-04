@@ -62,7 +62,7 @@ pub mod writeup;
 pub mod test_support;
 
 pub use error::{Error, Result};
-pub use oplog::{canonical_json, content_id, OpId};
+pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
 pub use query::{
     next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
