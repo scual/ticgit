@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::keys;
+use crate::oplog::{Op, OpKind};
 use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
 use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 
@@ -1219,6 +1220,57 @@ impl TicketStore {
     }
 
     // -------------------------------------------------------------------
+    // Operation log (append-only, synced source of truth for scalars)
+    // -------------------------------------------------------------------
+
+    /// Next Lamport value for a ticket: one past the max found by scanning its
+    /// op keys (0 if none). No separate counter — the scan that reads the log
+    /// yields the max for free, consistent with the no-index model.
+    pub fn next_lamport(&self, id: &Uuid) -> Result<u64> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::ticket_ops_prefix(id)))?;
+        let mut max: Option<u64> = None;
+        for (key, _) in pairs {
+            if let Some((_, lamport, _)) = keys::parse_ticket_op(&key) {
+                max = Some(max.map_or(lamport, |m| m.max(lamport)));
+            }
+        }
+        Ok(max.map_or(0, |m| m + 1))
+    }
+
+    /// Append an operation to a ticket's log and return it. The op's Lamport is
+    /// assigned from [`Self::next_lamport`] and its content-derived id becomes
+    /// part of the key, so the write is to a fresh key (append-only, never an
+    /// overwrite).
+    pub fn append_op(&self, id: &Uuid, kind: OpKind) -> Result<Op> {
+        let lamport = self.next_lamport(id)?;
+        let author = self.session.email().to_string();
+        let op = Op::new(lamport, &author, OffsetDateTime::now_utc(), kind)?;
+        let p = self.session.target(&Target::project());
+        p.set(
+            &keys::ticket_op(id, op.lamport, &op.id),
+            serde_json::to_string(&op)?.as_str(),
+        )?;
+        Ok(op)
+    }
+
+    /// Load every operation for a ticket (unordered; [`crate::oplog::replay`]
+    /// sorts and folds them).
+    pub fn load_ops(&self, id: &Uuid) -> Result<Vec<Op>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::ticket_ops_prefix(id)))?;
+        let mut ops = Vec::new();
+        for (key, value) in pairs {
+            if keys::parse_ticket_op(&key).is_some() {
+                if let MetaValue::String(s) = value {
+                    ops.push(serde_json::from_str::<Op>(&s)?);
+                }
+            }
+        }
+        Ok(ops)
+    }
+
+    // -------------------------------------------------------------------
     // Sync porcelain
     // -------------------------------------------------------------------
 
@@ -1553,6 +1605,40 @@ mod tests {
     fn list_is_empty_for_fresh_repo() {
         let (store, _td) = test_store();
         assert!(store.list().unwrap().is_empty());
+    }
+
+    fn one_field(field: &str, value: &str) -> OpKind {
+        let mut fields = BTreeMap::new();
+        fields.insert(field.to_string(), value.to_string());
+        OpKind::SetField { fields }
+    }
+
+    #[test]
+    fn append_and_load_ops_round_trips_and_replays() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        store
+            .append_op(&t.id, one_field("title", "renamed"))
+            .unwrap();
+        store.append_op(&t.id, one_field("priority", "2")).unwrap();
+
+        let ops = store.load_ops(&t.id).unwrap();
+        assert_eq!(ops.len(), 2);
+        let state = crate::oplog::replay(&ops);
+        assert_eq!(state.get("title").map(String::as_str), Some("renamed"));
+        assert_eq!(state.get("priority").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn append_op_increments_lamport_from_scan() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        assert_eq!(store.next_lamport(&t.id).unwrap(), 0);
+        let op0 = store.append_op(&t.id, one_field("a", "1")).unwrap();
+        assert_eq!(op0.lamport, 0);
+        assert_eq!(store.next_lamport(&t.id).unwrap(), 1);
+        let op1 = store.append_op(&t.id, one_field("b", "2")).unwrap();
+        assert_eq!(op1.lamport, 1);
     }
 
     #[test]
