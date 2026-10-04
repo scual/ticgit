@@ -68,6 +68,15 @@ pub struct MigrationOutcome {
     pub changed: bool,
 }
 
+/// Per-ticket outcome of a [`TicketStore::verify`] run.
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyOutcome {
+    pub id: Uuid,
+    pub short_id: String,
+    pub ok: bool,
+    pub issues: Vec<String>,
+}
+
 /// Read a ticket's declared format version from its raw fields, enforcing the
 /// [`Error::FormatTooNew`] guard. Absent marker = current baseline (legacy
 /// tickets stay readable); a malformed marker is [`Error::InvalidFormatVersion`].
@@ -1193,28 +1202,32 @@ impl TicketStore {
         }
     }
 
-    /// Roll every ticket forward to [`CURRENT_TICKET_FORMAT`], returning a
-    /// per-ticket plan. With `write == false` this is a dry run (reports what
-    /// would change, mutates nothing); with `write == true` it stamps the
-    /// `format-version` marker on tickets that lack the current one. Idempotent:
-    /// re-running over already-current tickets reports `changed == false`.
-    /// A ticket whose version exceeds this binary's support surfaces
-    /// [`Error::FormatTooNew`] (you cannot migrate downward).
+    /// Roll every ticket forward to [`CURRENT_TICKET_FORMAT`] (the op-log
+    /// format), returning a per-ticket plan. With `write == false` this is a
+    /// dry run. With `write == true` each legacy (scalar-key, no-op) ticket is
+    /// converted: its current scalar fields are snapshotted into a single
+    /// `create` op at Lamport 0, the legacy synced scalar keys are removed, and
+    /// the `format-version` marker is stamped. Idempotent — a ticket that
+    /// already has ops is left untouched (`changed == false`). A ticket whose
+    /// version exceeds this binary surfaces [`Error::FormatTooNew`].
     pub fn migrate(&self, write: bool) -> Result<Vec<MigrationOutcome>> {
         let p = self.session.target(&Target::project());
         let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
-        let mut by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        let mut has_ops: BTreeSet<Uuid> = BTreeSet::new();
         for (key, value) in pairs {
-            if let Some((id, field)) = keys::parse_ticket_field(&key) {
-                by_id
+            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
+                has_ops.insert(id);
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                fields_by_id
                     .entry(id)
                     .or_default()
                     .push((field.to_string(), value));
             }
         }
 
-        let mut out = Vec::with_capacity(by_id.len());
-        for (id, fields) in by_id {
+        let mut out = Vec::with_capacity(fields_by_id.len());
+        for (id, fields) in fields_by_id {
             // Enforce the too-new / malformed guards before touching anything.
             read_format_version(id, &fields)?;
             let present = fields.iter().find_map(|(field, value)| {
@@ -1225,13 +1238,37 @@ impl TicketStore {
                 }
                 None
             });
-            let changed = present != Some(CURRENT_TICKET_FORMAT);
+
+            // A ticket is already migrated iff it has ops. Legacy tickets are
+            // scalar-key only and need conversion.
+            let changed = !has_ops.contains(&id);
             if changed && write {
+                let ticket = build_ticket(id, fields.clone())
+                    .ok_or_else(|| Error::InvalidValue(format!("cannot migrate ticket {id}")))?;
+                let snapshot = snapshot_scalar_fields(&ticket);
+                let author = self.session.email().to_string();
+                let op = Op::new(
+                    0,
+                    &author,
+                    ticket.created_at,
+                    OpKind::Create { fields: snapshot },
+                )?;
+                p.set(
+                    &keys::ticket_op(&id, op.lamport, &op.id),
+                    serde_json::to_string(&op)?.as_str(),
+                )?;
+                // Remove the now-redundant legacy scalar keys (clean cutover).
+                for (field, _) in &fields {
+                    if is_op_managed_scalar(field) {
+                        p.remove(&keys::ticket_field(&id, field))?;
+                    }
+                }
                 p.set(
                     &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
                     CURRENT_TICKET_FORMAT.to_string().as_str(),
                 )?;
             }
+
             out.push(MigrationOutcome {
                 id,
                 short_id: id.to_string().chars().take(6).collect(),
@@ -1276,6 +1313,77 @@ impl TicketStore {
             serde_json::to_string(&op)?.as_str(),
         )?;
         Ok(op)
+    }
+
+    /// Consistency oracle: for every ticket, confirm each op's stored bytes
+    /// still hash to its key and envelope id (catching corruption or tampering)
+    /// and that the log projects to a valid ticket. Read-only; returns a
+    /// per-ticket report. Unknown op kinds are not errors (forward-compat).
+    pub fn verify(&self) -> Result<Vec<VerifyOutcome>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut ops_by_id: BTreeMap<Uuid, Vec<(String, Op)>> = BTreeMap::new();
+        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, _lamport, hash)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    let op = serde_json::from_str::<Op>(&s)?;
+                    ops_by_id
+                        .entry(id)
+                        .or_default()
+                        .push((hash.to_string(), op));
+                }
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                fields_by_id
+                    .entry(id)
+                    .or_default()
+                    .push((field.to_string(), value));
+            }
+        }
+
+        let ids: BTreeSet<Uuid> = fields_by_id
+            .keys()
+            .chain(ops_by_id.keys())
+            .copied()
+            .collect();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut issues = Vec::new();
+            let ops_with_hash = ops_by_id.remove(&id).unwrap_or_default();
+            let fields = fields_by_id.remove(&id).unwrap_or_default();
+
+            let mut ops = Vec::with_capacity(ops_with_hash.len());
+            for (key_hash, op) in ops_with_hash {
+                if op.id != key_hash {
+                    issues.push(format!(
+                        "op key hash {key_hash} does not match envelope id {}",
+                        op.id
+                    ));
+                }
+                match op.recompute_id() {
+                    Ok(rid) if rid == op.id => {}
+                    Ok(rid) => issues.push(format!(
+                        "op {} content-id mismatch (recomputed {rid}) — tampered or corrupt",
+                        op.id
+                    )),
+                    Err(e) => issues.push(format!("op {} failed to hash: {e}", op.id)),
+                }
+                ops.push(op);
+            }
+
+            let projected = project_scalar_fields(fields, &ops);
+            if build_ticket(id, projected).is_none() {
+                issues.push("does not project to a valid ticket state".to_string());
+            }
+
+            out.push(VerifyOutcome {
+                id,
+                short_id: id.to_string().chars().take(6).collect(),
+                ok: issues.is_empty(),
+                issues,
+            });
+        }
+        Ok(out)
     }
 
     /// Load every operation for a ticket (unordered; [`crate::oplog::replay`]
@@ -1358,6 +1466,49 @@ fn project_scalar_fields(fields: Vec<(String, MetaValue)>, ops: &[Op]) -> Vec<(S
         out.push((field, MetaValue::String(value)));
     }
     out
+}
+
+/// Snapshot a ticket's op-managed scalar fields into the `create`-op payload
+/// used by `ti migrate` v1→v2. Only present (non-`None`) fields are included;
+/// values are the canonical current forms (legacy state folding already applied
+/// by [`build_ticket`]).
+fn snapshot_scalar_fields(t: &Ticket) -> BTreeMap<String, String> {
+    let mut f = BTreeMap::new();
+    f.insert("title".to_string(), t.title.clone());
+    f.insert("status".to_string(), t.status.as_str().to_string());
+    f.insert("state".to_string(), t.state.as_str().to_string());
+    if let Ok(s) = t.created_at.format(&Rfc3339) {
+        f.insert("created-at".to_string(), s);
+    }
+    f.insert("created-by".to_string(), t.created_by.clone());
+    if let Some(ref a) = t.assigned {
+        f.insert("assigned".to_string(), a.clone());
+    }
+    if let Some(ref c) = t.closed_by {
+        f.insert("closed-by".to_string(), c.clone());
+    }
+    if let Some(p) = t.priority {
+        f.insert("priority".to_string(), p.to_string());
+    }
+    if let Some(p) = t.points {
+        f.insert("points".to_string(), p.to_string());
+    }
+    if let Some(ref m) = t.milestone {
+        f.insert("milestone".to_string(), m.clone());
+    }
+    if let Some(ref c) = t.code {
+        f.insert("code".to_string(), c.clone());
+    }
+    if let Some(parent) = t.parent {
+        f.insert("parent".to_string(), parent.to_string());
+    }
+    if let Some(ref d) = t.description {
+        f.insert("description".to_string(), d.clone());
+    }
+    if let Some(ref s) = t.spec {
+        f.insert("spec".to_string(), s.clone());
+    }
+    f
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,6 +1865,42 @@ mod tests {
     }
 
     #[test]
+    fn verify_passes_healthy_and_flags_tampered_ops() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        store.set_priority(&t.id, Some(2)).unwrap();
+
+        let report = store.verify().unwrap();
+        assert!(
+            report.iter().all(|o| o.ok),
+            "healthy repo must verify clean: {report:?}"
+        );
+
+        // Tamper: overwrite an op key's value so its envelope id no longer
+        // matches the key hash nor its own recomputed content-id.
+        let p = store.session().target(&Target::project());
+        let pairs = p
+            .get_all_values(Some(&keys::ticket_ops_prefix(&t.id)))
+            .unwrap();
+        let (key, _) = pairs
+            .into_iter()
+            .find(|(k, _)| keys::parse_ticket_op(k).is_some())
+            .unwrap();
+        p.set(
+            &key,
+            "{\"id\":\"deadbeef\",\"lamport\":0,\"author\":\"x@y.z\",\
+             \"created_at\":\"1970-01-01T00:00:00Z\",\"format_version\":1,\
+             \"kind\":\"set-field\",\"payload\":{\"fields\":{\"title\":\"evil\"}}}",
+        )
+        .unwrap();
+
+        let report = store.verify().unwrap();
+        let outcome = report.iter().find(|o| o.id == t.id).unwrap();
+        assert!(!outcome.ok, "tampered op must be flagged");
+        assert!(!outcome.issues.is_empty());
+    }
+
+    #[test]
     fn load_ignores_unknown_fields() {
         // Forward-compat contract (roadmap step 3): a reader must tolerate
         // fields a newer client added that it does not understand — it ignores
@@ -1761,29 +1948,43 @@ mod tests {
     }
 
     #[test]
-    fn migrate_stamps_unversioned_tickets_and_is_idempotent() {
+    fn migrate_converts_legacy_ticket_to_op_and_is_idempotent() {
         let (store, _td) = test_store();
-        // A legacy ticket written WITHOUT a format-version marker.
+        // A legacy ticket written as raw scalar keys, no ops, no version marker.
         let id = Uuid::new_v4();
         let p = store.session().target(&Target::project());
         p.set(&keys::ticket_field(&id, "title"), "legacy").unwrap();
         p.set(&keys::ticket_field(&id, "status"), "open").unwrap();
         p.set(&keys::ticket_field(&id, "state"), "new").unwrap();
+        p.set(&keys::ticket_field(&id, "priority"), "3").unwrap();
+        p.set(&keys::ticket_field(&id, "created-by"), "old@example.com")
+            .unwrap();
+        p.set(
+            &keys::ticket_field(&id, "created-at"),
+            "2020-01-01T00:00:00Z",
+        )
+        .unwrap();
 
-        // Dry-run reports the needed change but writes nothing.
+        // Dry-run reports the conversion but writes nothing.
         let plan = store.migrate(false).unwrap();
         let outcome = plan.iter().find(|o| o.id == id).expect("ticket in plan");
         assert_eq!(outcome.from, None);
         assert_eq!(outcome.to, 2);
         assert!(outcome.changed);
+        assert!(store.load_ops(&id).unwrap().is_empty());
+
+        // Write converts: a create op appears, legacy scalar keys are gone,
+        // format-version is stamped, and the ticket still reads identically.
+        store.migrate(true).unwrap();
+        assert_eq!(store.load_ops(&id).unwrap().len(), 1);
         assert!(p
-            .get_value(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD))
+            .get_value(&keys::ticket_field(&id, "title"))
             .unwrap()
             .is_none());
-
-        // Write stamps the marker.
-        let plan = store.migrate(true).unwrap();
-        assert!(plan.iter().find(|o| o.id == id).unwrap().changed);
+        let t = store.load(&id).unwrap();
+        assert_eq!(t.title, "legacy");
+        assert_eq!(t.priority, Some(3));
+        assert_eq!(t.created_by, "old@example.com");
         match p
             .get_value(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD))
             .unwrap()
@@ -1792,9 +1993,10 @@ mod tests {
             other => panic!("expected stamped version, got {other:?}"),
         }
 
-        // Idempotent: a second write reports no change.
+        // Idempotent: the ticket now has ops, so a second run is a no-op.
         let plan = store.migrate(true).unwrap();
         assert!(!plan.iter().find(|o| o.id == id).unwrap().changed);
+        assert_eq!(store.load_ops(&id).unwrap().len(), 1);
     }
 
     #[test]

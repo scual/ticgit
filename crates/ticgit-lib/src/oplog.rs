@@ -197,6 +197,21 @@ impl Op {
     pub fn decoded(&self) -> Option<OpKind> {
         OpKind::decode(&self.kind, &self.payload)
     }
+
+    /// Recompute the content-derived id from this op's envelope. A healthy op
+    /// satisfies `op.id == op.recompute_id()?`; a mismatch means the stored
+    /// bytes were tampered with or corrupted (used by `ti verify`).
+    pub fn recompute_id(&self) -> Result<String> {
+        let digest = OpDigest {
+            lamport: self.lamport,
+            author: &self.author,
+            created_at: self.created_at,
+            format_version: self.format_version,
+            kind: &self.kind,
+            payload: &self.payload,
+        };
+        Ok(content_id(&canonical_json(&digest)?).as_str().to_string())
+    }
 }
 
 /// Fold an operation set into the scalar field state it projects to. Ops are

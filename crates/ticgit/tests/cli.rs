@@ -3029,3 +3029,82 @@ fn migrate_dry_run_reports_current_tickets_as_json() {
     assert_eq!(json["current_format"], 2);
     assert!(json["tickets"].as_array().unwrap().len() == 1);
 }
+
+#[test]
+fn verify_reports_ok_for_healthy_repo_as_json() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "a ticket");
+    repo.ti()
+        .args(["priority", "2", "-t", &id])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["verify", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["failed"], 0);
+    assert!(json["total"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn concurrent_edits_to_different_fields_both_survive_across_clones() {
+    // The op-log's headline: two clones editing DIFFERENT scalar fields of the
+    // same ticket both keep their edit after a sync, instead of one clobbering
+    // the other under last-write-wins.
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    // Clone A creates the ticket and seeds the remote.
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    a.ti().arg("push").assert().success();
+
+    // Clone B pulls the ticket down.
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    // Concurrent edits: A sets priority, B sets milestone (different fields).
+    a.ti().args(["priority", "1", "-t", &id]).assert().success();
+    b.ti()
+        .args(["milestone", "v1", "-t", &id])
+        .assert()
+        .success();
+
+    // Gossip to the fixpoint. The op-log is a CRDT: convergence is guaranteed
+    // once both op sets have propagated, which takes a couple of sync rounds
+    // (a clone can push its edit before it has received the other's).
+    a.ti().arg("push").assert().success();
+    b.ti().arg("sync").assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    // Both clones now see BOTH edits — neither clobbered the other.
+    for repo in [&a, &b] {
+        let output = repo
+            .ti()
+            .args(["show", &id, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["priority"], 1, "priority edit must survive the merge");
+        assert_eq!(
+            json["milestone"], "v1",
+            "milestone edit must survive the merge"
+        );
+    }
+}

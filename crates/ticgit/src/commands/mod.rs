@@ -37,6 +37,7 @@ pub mod tag;
 pub mod tui;
 pub mod update;
 pub mod users;
+pub mod verify;
 pub mod view;
 pub mod writeup;
 
