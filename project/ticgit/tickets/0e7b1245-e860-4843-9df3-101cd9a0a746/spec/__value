@@ -87,9 +87,35 @@ Steps 1–3 make step 4's migration survivable for existing repos.
 - `ticket.rs` — model ops / replay folding into the `Ticket` state.
 - new `ti verify` command in `commands/`.
 
-## Open questions
+## Resolved decisions (2026-10-04, pending partner review)
 
-- Op granularity: one op per field-set vs batched edits per `ti edit`.
-- Lamport clock storage/advance across the prefix-scan model (no index today).
-- Migration path for existing repos: synthesize a single create-op from current
-  state, or a per-field op sequence.
+### 1. Op granularity → one compound op per user command
+
+One operation per *logical user action*, not per field and not one giant batch.
+A `ti edit` that changes several fields emits a single compound op carrying a
+`field → value` map (git-bug's SetMetadata/EditComment style). Rationale: the op
+is the atomic unit of a user action, fewer ops to replay, and merge stays
+conflict-free — concurrent compound ops union and resolve per-field by clock
+order, so two clones editing *different* fields of the same ticket both survive.
+
+### 2. Lamport clock → embedded in each op, max derived from the scan
+
+Each op embeds its Lamport value; `<lamport>` is already in the key. The current
+max is derived for free during the same prefix scan that builds the cache (no
+separate index — consistent with ticgit's no-index model). Append does
+`new = max(seen) + 1`; `cache:head` memoizes the last-seen max so steady-state
+appends skip a full rescan (incremental). Concurrent equal-lamport ops tiebreak
+by content hash, which is already the second key component.
+
+### 3. Migration → single snapshot create-op per ticket
+
+`ti migrate` synthesizes ONE "import" op per existing ticket capturing the full
+current state as a snapshot (lamport 0, authored by a synthetic migration
+identity). We do NOT fabricate a per-field op sequence: there is no real history
+to reconstruct and a fake one would assert false provenance. Real edits append
+normally from lamport 1 onward. Deterministic, offline, idempotent.
+
+## Still open (separate from the three above)
+
+- **Cache placement** — recommendation stands (local, gitignored build artifact;
+  only the op-log syncs). Final sign-off deferred; see the decision table above.
