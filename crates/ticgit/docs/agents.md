@@ -272,6 +272,28 @@ Map contributor nicks to emails so assignees resolve consistently:
 ti users add scott scott@example.com
 ```
 
+## Storage And Integrity
+
+Ticket scalar fields are stored as an append-only **operation log** (a CRDT), so
+concurrent edits from different clones merge without last-write-wins clobber.
+You rarely touch this directly, but two commands expose it:
+
+```sh
+ti verify                     # check op-log integrity + signatures (--json/--markdown)
+ti verify --json              # non-zero exit if any ticket fails
+ti migrate                    # dry-run plan to roll tickets to the current format
+ti migrate --write            # apply it (idempotent); needed after upgrading ti
+```
+
+`ti verify` recomputes every operation's content id, confirms it matches the
+stored id, validates any signatures, and checks the log still projects to a
+valid ticket. Unsigned operations are trusted by default and reported as
+warnings, not failures.
+
+Operations can be **signed** with your existing SSH key (git-signing style): set
+`TICGIT_SIGNING_KEY` to a private key path and new operations are signed with
+`ssh-keygen -Y`; the public key is published so other clones can verify.
+
 ## Code Reviews
 
 Open a review when a branch is ready for review. Link it to the ticket so the

@@ -65,6 +65,10 @@ use crate::commands;
   setup      Configure git-meta remote from .git-meta
   update     Update ti to the latest release
 
+\x1b[1;36mMaintenance:\x1b[0m
+  migrate    Roll tickets forward to the current on-disk format
+  verify     Check op-log integrity and operation signatures
+
 \x1b[1;36mAgents:\x1b[0m
   agent      Markdown guide for AI agents
   list --markdown          Markdown ticket list
