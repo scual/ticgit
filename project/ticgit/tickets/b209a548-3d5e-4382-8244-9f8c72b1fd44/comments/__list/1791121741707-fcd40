@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Slice 2 landed: op-log persisted/loaded through git-meta. keys op layout (ops:<lamport>:<hash>, zero-padded) + append_op/load_ops/next_lamport. Additive, all tests green (102 lib/93 cli). Next: local cache read-through + setter rewiring + migrate v1->v2 cutover + ti verify."}
