@@ -3269,8 +3269,10 @@ version = "0.3.1"
 dependencies = [
  "git-meta-lib",
  "gix",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "time",
