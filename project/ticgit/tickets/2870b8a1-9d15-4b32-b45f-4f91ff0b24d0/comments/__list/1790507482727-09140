@@ -1,0 +1,1 @@
+{"author":"scual.project@gmail.com","body":"Implemented: renamed --depends/--blocked-by to --depends-on/--blocks (no aliases), sub-issue bypass for relationship filters, saved views now pin full UUID. Full test suite + code-review (standards+spec axes) pass. Review opened (dev@1790507479)."}

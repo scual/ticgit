@@ -1,0 +1,102 @@
+## Problem Statement
+
+`ti list` has two filters for exploring Dependencies between tickets, `--depends X` and `--blocked-by X`. Their names mislead users:
+
+- `--blocked-by X` returns the tickets that **block** X (X's blockers), the exact opposite of what the name reads as ("tickets blocked by X").
+- `--depends X` is ambiguous: it could mean "tickets that depend on X" or "tickets X depends on". (It actually means the former.)
+- The two flags *sound* like synonyms but return opposite ends of the relation.
+- Neither name matches the vocabulary the rest of TicGit uses: the relation is created with `ti depends` and shown in `ti show` as "Depends" / "Blocks".
+
+On top of that:
+
+- Both filters silently hide blockers or dependents that are sub-issues (because `ti list` hides sub-issues by default). A user asking "what blocks X?" can get an empty list when an open sub-issue is in fact blocking X — a false "nothing is blocking" answer.
+- Saved views store whatever ticket reference the user typed (often a short prefix), which can become ambiguous as tickets accumulate.
+- The CLI integration test for `--blocked-by` is currently failing: it invokes a `ti blocked-by` subcommand that does not exist.
+
+## Solution
+
+Rename the filters so each one reads as a predicate on the listed tickets and mirrors the domain vocabulary (see CONTEXT.md: **Dependency**, **Depends on**, **Blocks**):
+
+- `ti list --depends-on X` — tickets that depend on X (downstream: who waits on X).
+- `ti list --blocks X` — tickets that block X (upstream: who X waits on).
+
+The old `--depends` and `--blocked-by` flags are removed outright (no aliases). When either new flag is given, sub-issues are always included. The open-only default still applies, so by default only tickets that are *currently* blocking/waiting are shown; `--all` includes closed ones. Relations are direct only. The ticket argument is required. Saved views pin the ticket by its full id.
+
+Given `ti depends B -t A` (A depends on B, B blocks A):
+
+| Command | Result |
+|---|---|
+| `ti list --depends-on B` | A |
+| `ti list --blocks A` | B |
+| `ti list --depends-on A` | (nothing) |
+| `ti list --blocks B` | (nothing) |
+
+## User Stories
+
+1. As a TicGit user, I want `ti list --blocks X` to list the tickets that block X, so that I can see what I must finish before X can proceed.
+2. As a TicGit user, I want `ti list --depends-on X` to list the tickets that depend on X, so that I can see what finishing X will unblock.
+3. As a TicGit user, I want the flag names to match the "Depends" and "Blocks" labels in `ti show`, so that I can predict a flag's result from what a ticket displays.
+4. As a TicGit user, I want the flag names to match the `ti depends` command vocabulary, so that I only have to learn one word per direction.
+5. As a TicGit user, I want `--depends-on X` to return exactly the tickets whose "Depends" list contains X, so that the filter behaves as a literal lookup.
+6. As a TicGit user, I want `--blocks X` to return exactly the tickets whose "Blocks" list contains X, so that the filter behaves as a literal lookup.
+7. As a TicGit user, I want `ti list --blocks X` to include blockers that are sub-issues, so that I never wrongly conclude X is unblocked.
+8. As a TicGit user, I want `ti list --depends-on X` to include dependents that are sub-issues, so that I see every ticket X is holding up.
+9. As a TicGit user, I want `ti list --blocks X` to show only open blockers by default, so that I see only what is still actually blocking X (consistent with `ti next`).
+10. As a TicGit user, I want `ti list --blocks X --all` to include closed blockers, so that I can review the full history of X's dependencies.
+11. As a TicGit user, I want `ti list --depends-on X --all` to include closed dependents, so that I can see everything that ever waited on X.
+12. As a TicGit user, I want the relationship filters to return only direct relations, so that results match the stored relation and `ti next`'s notion of "unblocked".
+13. As a TicGit user, I want to pass X as a full id or a unique prefix, so that I can type short references like other commands allow.
+14. As a TicGit user, I want a clear error when X does not resolve to a ticket (unknown or ambiguous prefix), so that I don't get a silently empty list.
+15. As a TicGit user, I want `--depends-on` and `--blocks` to require a value, so that `ti list --blocks <view-name>` is never misread.
+16. As a TicGit user, I want `--depends-on` and `--blocks` to combine with other filters (tag, assignee, state, search, order) using AND semantics, so that I can narrow results, e.g. "open bugs blocking X".
+17. As a TicGit user, I want to combine `--depends-on X` and `--blocks Y` in one query, so that I can find tickets sitting between two others in a chain.
+18. As a TicGit user who used the old flags, I want `--depends` and `--blocked-by` to fail with an "unexpected argument" error, so that I notice the rename instead of getting silently different results.
+19. As a TicGit user, I want `ti list --help` to describe each relationship flag in terms of Depends on / Blocks, so that the help text is unambiguous.
+20. As a TicGit user, I want to save a view that includes `--blocks X` or `--depends-on X`, so that I can re-run a relationship query by name.
+21. As a TicGit user, I want a saved view to pin the ticket by its full id, so that the view keeps pointing at the same ticket even after new tickets make my typed prefix ambiguous.
+22. As a TicGit user, I want `ti views list` to describe relationship filters using the new flag names, so that the description matches what I would type.
+23. As a TicGit user, I want `--json` and `--markdown` output to work unchanged with the new filters, so that scripts and agents can consume results.
+24. As an AI agent using TicGit, I want unambiguous relationship flags, so that I can reliably determine which tickets block the one I'm working on before starting.
+25. As a maintainer, I want the CLI test suite to pass, so that the broken `ti blocked-by` test no longer masks regressions.
+26. As a maintainer, I want test fixtures named after their role (blocker, dependent), so that tests document the relation direction correctly.
+
+## Implementation Decisions
+
+- **Vocabulary**: Follow CONTEXT.md. A **Dependency** is one directed relation read two ways: "A depends on B" ≡ "B blocks A". "Blocked by" is an avoided term and must not appear in flags, fields or help text.
+- **CLI (`ti list`)**: Replace the `--depends` flag with `--depends-on <TICKET>` and the `--blocked-by` flag with `--blocks <TICKET>`. Both take a required value (id or unique prefix), resolved through the store's existing id resolution. No aliases for the old names; clap's default "unexpected argument" error is the migration signal.
+- **Filter struct (query module)**: Rename the fields `depends` → `depends_on` and `blocked_by` → `blocks` (both `Option<Uuid>`). Semantics unchanged: `depends_on: Some(X)` keeps tickets whose depends-on set contains X; `blocks: Some(X)` keeps tickets whose blocks set contains X. Direct relations only — no transitive walk.
+- **Sub-issue bypass**: In the filter application, when `depends_on` or `blocks` is set, the hide-sub-issues rule is not applied. The status/state defaults (open-only unless `--all`, `--status` or `--state`) are unchanged and still apply.
+- **Saved views / last filters**: Rename the saved-view fields `depends` → `depends_on` and `blocked_by` → `blocks`. Store the ticket's full UUID (resolved at `ti list` time, before the last filters are recorded) instead of the raw string the user typed. Old keys (`depends`, `blocked_by`) are not migrated; they are ignored on load. Loading a saved view resolves the stored full id as usual.
+- **View description**: The saved-view description shows `--depends-on <id>` / `--blocks <id>`. It may shorten the UUID for display.
+- **TUI**: Only mechanical updates for the renamed fields (the TUI keeps passing "none" for both). No new TUI capability.
+- **Help text**: `--depends-on`: "Show tickets that depend on this ticket." `--blocks`: "Show tickets that block this ticket."
+- **Rename only**: No change to how Dependencies are stored or created (`ti depends`), and no change to `ti show` rendering.
+
+## Testing Decisions
+
+- Good tests assert externally observable behaviour: which ticket ids come back from `ti list --json` for a given set of Dependencies and flags. They do not inspect state files or internal structs beyond the public `Filter` / `apply` interface.
+- **Primary seam — CLI integration tests** (existing `TestRepo` harness, prior art: the existing `list_depends_filters_dependent_tickets` and saved-view tests in the CLI test suite). Cover:
+  - `--depends-on B` returns A; `--blocks A` returns B; the reversed queries return nothing.
+  - A sub-issue blocker is returned by `--blocks X` without `--subissues`; likewise for `--depends-on`.
+  - A closed blocker is hidden by default and shown with `--all`.
+  - `--depends` and `--blocked-by` fail with a non-zero exit.
+  - Unknown ticket reference fails with a non-zero exit.
+  - Save/replay: `ti list --blocks <prefix>` → `ti views save v` → `ti list v` returns the same tickets; `ti views list` shows `--blocks` with the full id.
+  - Replace the broken `list_blocked_by_filters_blocked_tickets` test (which calls a non-existent `ti blocked-by` subcommand) with a correct `--blocks` test that creates the Dependency via `ti depends`.
+- **Secondary seam — `query::apply` unit tests** (prior art: existing filter tests in the query module, e.g. `filter_by_dependency`). Cover the literal field lookup for both filters and the sub-issue bypass. Rename the misleading fixture: the ticket inserted with a `blocks` entry is the **blocker**, not "blocked".
+- No new seams introduced.
+
+## Out of Scope
+
+- Transitive / recursive dependency queries (e.g. "everything upstream of X"). Better served by a future tree or graph view; to be filed as a separate ticket.
+- A CLI-wide "current ticket" sentinel (e.g. `--blocks .`) or defaulting the value to the checked-out ticket. To be filed as a separate ticket.
+- Exposing relationship filters in the TUI.
+- Backward-compatibility aliases or migration of old saved-view keys.
+- Changes to how Dependencies are created, stored, or rendered.
+- Repeatable flags (`--blocks X --blocks Y`).
+
+## Further Notes
+
+- The original commits (a35c101, 84c2d7c) are on master but in no tagged release, which is why the old flags are removed without deprecation.
+- The existing filter logic is already correct for the new names: current `--depends` logic becomes `--depends-on`; current `--blocked-by` logic becomes `--blocks`.
+- Domain terms are recorded in CONTEXT.md (Dependency, Depends on, Blocks).
