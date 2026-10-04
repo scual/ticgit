@@ -3026,6 +3026,6 @@ fn migrate_dry_run_reports_current_tickets_as_json() {
     assert_eq!(json["applied"], false);
     assert_eq!(json["total"], 1);
     assert_eq!(json["changed"], 0);
-    assert_eq!(json["current_format"], 1);
+    assert_eq!(json["current_format"], 2);
     assert!(json["tickets"].as_array().unwrap().len() == 1);
 }
