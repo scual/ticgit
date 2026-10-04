@@ -83,8 +83,12 @@ One immutable change in the log — create, set a field, or clear a field — wi
 _Avoid_: Edit record, patch, event (reserve "event" for unrelated uses)
 
 **Signing**:
-Attaching an SSH signature (git-signing style, via `ssh-keygen -Y`) to an operation so authorship is verifiable across clones. Unsigned operations are trusted by default and flagged by `ti verify`.
+Attaching an SSH signature (git-signing style, via `ssh-keygen -Y`) to an operation so authorship is verifiable across clones, using the author's key from the Identity chain. Unsigned operations are trusted by default and flagged by `ti verify`.
 _Avoid_: GPG (TicGit signs with SSH keys), authentication
+
+**Identity chain**:
+The shared record mapping each author (by email) to the public key that signs their operations, published into the repository so any clone can check a Signature. An operation signed by an author with no published key fails Verify.
+_Avoid_: Keyring, user table, trust store
 
 **Verify**:
 `ti verify` — the consistency oracle. Replays each ticket's log, recomputes operation ids, checks signatures, and confirms the log projects to a valid ticket. A failure is a hard error (non-zero exit); an unsigned op is a warning.
