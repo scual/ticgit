@@ -27,16 +27,13 @@ time         = { workspace = true }
 uuid         = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
+tempfile     = { workspace = true }
 
 [features]
 default = []
 # Re-export the `test_support` module so downstream crates (the CLI's
 # integration tests) can spin up isolated stores.
-test-support = ["dep:tempfile"]
-
-[dependencies.tempfile]
-workspace = true
-optional = true
+test-support = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

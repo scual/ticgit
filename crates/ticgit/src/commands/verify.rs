@@ -28,6 +28,7 @@ pub fn run(args: Args) -> Result<()> {
                     "short_id": o.short_id,
                     "ok": o.ok,
                     "issues": o.issues,
+                    "warnings": o.warnings,
                 })
             })
             .collect();
@@ -41,9 +42,11 @@ pub fn run(args: Args) -> Result<()> {
             })
         );
     } else if args.markdown {
+        let unsigned: usize = report.iter().map(|o| o.warnings.len()).sum();
         println!("# Verify\n");
         println!("- Tickets checked: {}", report.len());
-        println!("- Failed: {}\n", failed.len());
+        println!("- Failed: {}", failed.len());
+        println!("- Unsigned op warnings: {unsigned}\n");
         if failed.is_empty() {
             println!("All tickets consistent.");
         } else {
@@ -55,7 +58,15 @@ pub fn run(args: Args) -> Result<()> {
             }
         }
     } else if failed.is_empty() {
-        println!("All {} ticket(s) consistent.", report.len());
+        let unsigned: usize = report.iter().map(|o| o.warnings.len()).sum();
+        if unsigned > 0 {
+            println!(
+                "All {} ticket(s) consistent ({unsigned} unsigned op(s) trusted by default).",
+                report.len()
+            );
+        } else {
+            println!("All {} ticket(s) consistent.", report.len());
+        }
     } else {
         eprintln!(
             "{} of {} ticket(s) failed verification:",

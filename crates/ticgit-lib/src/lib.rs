@@ -54,6 +54,7 @@ pub mod error;
 pub mod keys;
 pub mod oplog;
 pub mod query;
+pub mod signing;
 pub mod store;
 pub mod ticket;
 pub mod writeup;

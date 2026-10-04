@@ -52,6 +52,9 @@ pub enum Error {
 
     #[error("time formatting error: {0}")]
     Time(String),
+
+    #[error("signing error: {0}")]
+    Signing(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

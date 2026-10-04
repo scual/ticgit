@@ -75,6 +75,8 @@ pub struct VerifyOutcome {
     pub short_id: String,
     pub ok: bool,
     pub issues: Vec<String>,
+    /// Non-fatal notes, e.g. unsigned ops (trusted by default, step 5).
+    pub warnings: Vec<String>,
 }
 
 /// Read a ticket's declared format version from its raw fields, enforcing the
@@ -102,9 +104,18 @@ fn read_format_version(id: Uuid, fields: &[(String, MetaValue)]) -> Result<u32> 
     Ok(CURRENT_TICKET_FORMAT)
 }
 
+/// SSH private key path used to sign ops, from `TICGIT_SIGNING_KEY`. Absent =
+/// unsigned ops (trusted by default; `ti verify` flags them).
+fn signing_key_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("TICGIT_SIGNING_KEY")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
+    signing_key: Option<std::path::PathBuf>,
 }
 
 impl TicketStore {
@@ -113,7 +124,10 @@ impl TicketStore {
     pub fn discover() -> Result<Self> {
         let session = Session::discover()?;
         Self::ensure_schema(&session)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            signing_key: signing_key_from_env(),
+        })
     }
 
     /// Open a store for an already-loaded `gix::Repository` (used in tests
@@ -121,14 +135,27 @@ impl TicketStore {
     pub fn open(repo: gix::Repository) -> Result<Self> {
         let session = Session::open(repo.path())?;
         Self::ensure_schema(&session)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            signing_key: signing_key_from_env(),
+        })
     }
 
     /// Open a store from an already-built session (lets callers preconfigure
     /// e.g. `with_timestamp` for deterministic tests).
     pub fn from_session(session: Session) -> Result<Self> {
         Self::ensure_schema(&session)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            signing_key: signing_key_from_env(),
+        })
+    }
+
+    /// Set (or clear) the SSH key used to sign ops. Primarily for tests and
+    /// hosts that resolve the key themselves; otherwise `TICGIT_SIGNING_KEY`
+    /// is read at construction.
+    pub fn set_signing_key(&mut self, key: Option<std::path::PathBuf>) {
+        self.signing_key = key;
     }
 
     /// Borrow the underlying git-meta session.
@@ -1306,8 +1333,19 @@ impl TicketStore {
     pub fn append_op(&self, id: &Uuid, kind: OpKind) -> Result<Op> {
         let lamport = self.next_lamport(id)?;
         let author = self.session.email().to_string();
-        let op = Op::new(lamport, &author, OffsetDateTime::now_utc(), kind)?;
+        let mut op = Op::new(lamport, &author, OffsetDateTime::now_utc(), kind)?;
         let p = self.session.target(&Target::project());
+
+        // Sign the op's content id if a signing key is configured, and publish
+        // the public key into the identity chain so other clones can verify.
+        if let Some(ref key) = self.signing_key {
+            let signature = crate::signing::sign(op.id.as_bytes(), key)?;
+            let pubkey = crate::signing::public_key(key)?;
+            p.set(&keys::identity(&author), pubkey.as_str())?;
+            op.signature = Some(signature);
+            op.signer = Some(author);
+        }
+
         p.set(
             &keys::ticket_op(id, op.lamport, &op.id),
             serde_json::to_string(&op)?.as_str(),
@@ -1349,6 +1387,7 @@ impl TicketStore {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let mut issues = Vec::new();
+            let mut warnings = Vec::new();
             let ops_with_hash = ops_by_id.remove(&id).unwrap_or_default();
             let fields = fields_by_id.remove(&id).unwrap_or_default();
 
@@ -1368,6 +1407,31 @@ impl TicketStore {
                     )),
                     Err(e) => issues.push(format!("op {} failed to hash: {e}", op.id)),
                 }
+
+                // Signature check (step 5). Unsigned ops are trusted by default
+                // but flagged; a present-but-invalid signature is a hard issue.
+                match (&op.signature, &op.signer) {
+                    (Some(sig), Some(signer)) => match p.get_value(&keys::identity(signer))? {
+                        Some(MetaValue::String(pubkey)) => {
+                            match crate::signing::verify(op.id.as_bytes(), sig, signer, &pubkey) {
+                                Ok(true) => {}
+                                Ok(false) => issues.push(format!(
+                                    "op {} has an invalid signature from {signer}",
+                                    op.id
+                                )),
+                                Err(e) => issues.push(format!(
+                                    "op {} signature could not be checked: {e}",
+                                    op.id
+                                )),
+                            }
+                        }
+                        _ => issues.push(format!(
+                            "op {} is signed by {signer} but that identity has no published key",
+                            op.id
+                        )),
+                    },
+                    _ => warnings.push(format!("op {} is unsigned", op.id)),
+                }
                 ops.push(op);
             }
 
@@ -1381,6 +1445,7 @@ impl TicketStore {
                 short_id: id.to_string().chars().take(6).collect(),
                 ok: issues.is_empty(),
                 issues,
+                warnings,
             });
         }
         Ok(out)
@@ -1862,6 +1927,59 @@ mod tests {
         assert_eq!(store.next_lamport(&t.id).unwrap(), 2);
         let op1 = store.append_op(&t.id, one_field("b", "2")).unwrap();
         assert_eq!(op1.lamport, 2);
+    }
+
+    #[test]
+    fn signed_ops_verify_clean_with_published_identity() {
+        let (mut store, _td) = test_store();
+        let keydir = tempfile::tempdir().unwrap();
+        let key = keydir.path().join("id_ed25519");
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-C", "signer", "-q", "-f"])
+            .arg(&key)
+            .status()
+            .expect("ssh-keygen");
+        assert!(status.success());
+        store.set_signing_key(Some(key));
+
+        let t = store.create("signed", NewTicketOpts::default()).unwrap();
+        store.set_priority(&t.id, Some(1)).unwrap();
+
+        // Every op is signed.
+        let ops = store.load_ops(&t.id).unwrap();
+        assert!(ops
+            .iter()
+            .all(|o| o.signature.is_some() && o.signer.is_some()));
+
+        // The identity key was published.
+        let p = store.session().target(&Target::project());
+        assert!(p
+            .get_value(&keys::identity(store.email()))
+            .unwrap()
+            .is_some());
+
+        // verify is clean: valid signatures, no unsigned warnings.
+        let report = store.verify().unwrap();
+        let outcome = report.iter().find(|o| o.id == t.id).unwrap();
+        assert!(outcome.ok, "signed ops must verify: {:?}", outcome.issues);
+        assert!(
+            outcome.warnings.is_empty(),
+            "no unsigned warnings expected: {:?}",
+            outcome.warnings
+        );
+    }
+
+    #[test]
+    fn unsigned_ops_verify_ok_but_warn() {
+        let (store, _td) = test_store();
+        let t = store.create("unsigned", NewTicketOpts::default()).unwrap();
+        let report = store.verify().unwrap();
+        let outcome = report.iter().find(|o| o.id == t.id).unwrap();
+        assert!(outcome.ok, "unsigned ops are trusted by default");
+        assert!(
+            !outcome.warnings.is_empty(),
+            "unsigned ops should be flagged as warnings"
+        );
     }
 
     #[test]

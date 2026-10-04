@@ -92,6 +92,15 @@ pub struct Op {
     pub format_version: u32,
     pub kind: String,
     pub payload: Value,
+    /// Armored SSH signature over `id` (step 5). `None` for unsigned ops
+    /// (legacy, or clients without a configured signing key). Excluded from the
+    /// content hash — the signature signs the id, it cannot be part of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Identity (email) that produced `signature`; its public key lives in the
+    /// synced identity chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 /// Typed view of a known operation. Unknown kinds have no `OpKind` and are
@@ -189,6 +198,8 @@ impl Op {
             format_version: CURRENT_OP_FORMAT,
             kind: kind_str,
             payload,
+            signature: None,
+            signer: None,
         })
     }
 
@@ -323,6 +334,8 @@ mod tests {
             format_version: 1,
             kind: "future-op-kind".to_string(),
             payload: json!({ "whatever": true }),
+            signature: None,
+            signer: None,
         };
         let state = replay(&[known, unknown]);
         assert_eq!(state.get("title").map(String::as_str), Some("kept"));

@@ -120,6 +120,13 @@ pub fn parse_ticket_op(key: &str) -> Option<(Uuid, u64, &str)> {
     Some((uuid, lamport, hash))
 }
 
+/// Identity key mapping an email to its published SSH public key, e.g.
+/// `ticgit:identities:a@b.c`. Lets other clones verify op signatures (step 5).
+#[must_use]
+pub fn identity(email: &str) -> String {
+    format!("{NS}:identities:{email}")
+}
+
 /// A bare project-level system key, e.g. `ticgit:owners`.
 #[must_use]
 pub fn system_key(name: &str) -> String {
