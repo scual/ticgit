@@ -234,6 +234,9 @@ pub enum Command {
     /// Configure git-meta remote from `.git-meta` file (idempotent).
     Setup,
 
+    /// Roll tickets forward to the current on-disk format version.
+    Migrate(commands::migrate::Args),
+
     /// Update ti to the latest release.
     Update(commands::update::Args),
 }
@@ -243,6 +246,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         None => commands::list::run(commands::list::Args::default()),
         Some(Command::Init) => commands::init::run(),
         Some(Command::Setup) => commands::setup::run(),
+        Some(Command::Migrate(args)) => commands::migrate::run(args),
         Some(Command::New(args)) => commands::new::run(args),
         Some(Command::List(args)) => commands::list::run(args),
         Some(Command::Show(args)) => commands::show::run(args),

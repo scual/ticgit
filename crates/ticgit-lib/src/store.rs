@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use git_meta_lib::{ListEntry, MetaValue, Session, Target};
+use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -45,6 +46,50 @@ fn format_ticket_refs(tickets: &[Ticket]) -> String {
         .map(|t| format!("{} \"{}\"", t.short_id(), t.title))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Highest per-ticket format version this binary understands. A ticket whose
+/// `format-version` field exceeds this is refused with [`Error::FormatTooNew`];
+/// absent or lower versions are migrated forward (lazily on read, persisted by
+/// `ti migrate`).
+pub const CURRENT_TICKET_FORMAT: u32 = 1;
+
+/// Per-ticket outcome of a [`TicketStore::migrate`] run.
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationOutcome {
+    pub id: Uuid,
+    pub short_id: String,
+    /// The version marker found, or `None` for an unversioned (legacy) ticket.
+    pub from: Option<u32>,
+    /// The version the ticket is (or would be) migrated to.
+    pub to: u32,
+    /// Whether this ticket needs (dry-run) or received (write) a change.
+    pub changed: bool,
+}
+
+/// Read a ticket's declared format version from its raw fields, enforcing the
+/// [`Error::FormatTooNew`] guard. Absent marker = current baseline (legacy
+/// tickets stay readable); a malformed marker is [`Error::InvalidFormatVersion`].
+fn read_format_version(id: Uuid, fields: &[(String, MetaValue)]) -> Result<u32> {
+    for (field, value) in fields {
+        if field == keys::FORMAT_VERSION_FIELD {
+            if let MetaValue::String(s) = value {
+                let ver: u32 = s
+                    .trim()
+                    .parse()
+                    .map_err(|_| Error::InvalidFormatVersion(s.clone()))?;
+                if ver > CURRENT_TICKET_FORMAT {
+                    return Err(Error::FormatTooNew {
+                        id,
+                        version: ver,
+                        supported: CURRENT_TICKET_FORMAT,
+                    });
+                }
+                return Ok(ver);
+            }
+        }
+    }
+    Ok(CURRENT_TICKET_FORMAT)
 }
 
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
@@ -132,6 +177,10 @@ impl TicketStore {
         p.set(&keys::ticket_field(&id, "state"), TicketState::New.as_str())?;
         p.set(&keys::ticket_field(&id, "created-at"), now_rfc.as_str())?;
         p.set(&keys::ticket_field(&id, "created-by"), self.session.email())?;
+        p.set(
+            &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+            CURRENT_TICKET_FORMAT.to_string().as_str(),
+        )?;
 
         if let Some(ref a) = opts.assigned {
             if !a.is_empty() {
@@ -182,6 +231,7 @@ impl TicketStore {
 
         let mut out = Vec::with_capacity(by_id.len());
         for (id, fields) in by_id {
+            read_format_version(id, &fields)?;
             if let Some(t) = build_ticket(id, fields) {
                 out.push(t);
             }
@@ -201,6 +251,7 @@ impl TicketStore {
                 }
             }
         }
+        read_format_version(*id, &fields)?;
         build_ticket(*id, fields).ok_or(Error::NotFound(*id))
     }
 
@@ -1117,6 +1168,56 @@ impl TicketStore {
         }
     }
 
+    /// Roll every ticket forward to [`CURRENT_TICKET_FORMAT`], returning a
+    /// per-ticket plan. With `write == false` this is a dry run (reports what
+    /// would change, mutates nothing); with `write == true` it stamps the
+    /// `format-version` marker on tickets that lack the current one. Idempotent:
+    /// re-running over already-current tickets reports `changed == false`.
+    /// A ticket whose version exceeds this binary's support surfaces
+    /// [`Error::FormatTooNew`] (you cannot migrate downward).
+    pub fn migrate(&self, write: bool) -> Result<Vec<MigrationOutcome>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                by_id
+                    .entry(id)
+                    .or_default()
+                    .push((field.to_string(), value));
+            }
+        }
+
+        let mut out = Vec::with_capacity(by_id.len());
+        for (id, fields) in by_id {
+            // Enforce the too-new / malformed guards before touching anything.
+            read_format_version(id, &fields)?;
+            let present = fields.iter().find_map(|(field, value)| {
+                if field == keys::FORMAT_VERSION_FIELD {
+                    if let MetaValue::String(s) = value {
+                        return s.trim().parse::<u32>().ok();
+                    }
+                }
+                None
+            });
+            let changed = present != Some(CURRENT_TICKET_FORMAT);
+            if changed && write {
+                p.set(
+                    &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+                    CURRENT_TICKET_FORMAT.to_string().as_str(),
+                )?;
+            }
+            out.push(MigrationOutcome {
+                id,
+                short_id: id.to_string().chars().take(6).collect(),
+                from: present,
+                to: CURRENT_TICKET_FORMAT,
+                changed,
+            });
+        }
+        Ok(out)
+    }
+
     // -------------------------------------------------------------------
     // Sync porcelain
     // -------------------------------------------------------------------
@@ -1455,6 +1556,74 @@ mod tests {
     }
 
     #[test]
+    fn create_stamps_current_format_version() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        let p = store.session().target(&Target::project());
+        match p
+            .get_value(&keys::ticket_field(&t.id, keys::FORMAT_VERSION_FIELD))
+            .unwrap()
+        {
+            Some(MetaValue::String(s)) => assert_eq!(s, "1"),
+            other => panic!("expected format-version string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_future_format_version() {
+        let (store, _td) = test_store();
+        let id = Uuid::new_v4();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&id, "title"), "future").unwrap();
+        p.set(&keys::ticket_field(&id, "status"), "open").unwrap();
+        p.set(&keys::ticket_field(&id, "state"), "new").unwrap();
+        p.set(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD), "999")
+            .unwrap();
+        let err = store.load(&id).unwrap_err();
+        assert!(
+            matches!(err, Error::FormatTooNew { .. }),
+            "expected FormatTooNew, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn migrate_stamps_unversioned_tickets_and_is_idempotent() {
+        let (store, _td) = test_store();
+        // A legacy ticket written WITHOUT a format-version marker.
+        let id = Uuid::new_v4();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&id, "title"), "legacy").unwrap();
+        p.set(&keys::ticket_field(&id, "status"), "open").unwrap();
+        p.set(&keys::ticket_field(&id, "state"), "new").unwrap();
+
+        // Dry-run reports the needed change but writes nothing.
+        let plan = store.migrate(false).unwrap();
+        let outcome = plan.iter().find(|o| o.id == id).expect("ticket in plan");
+        assert_eq!(outcome.from, None);
+        assert_eq!(outcome.to, 1);
+        assert!(outcome.changed);
+        assert!(p
+            .get_value(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD))
+            .unwrap()
+            .is_none());
+
+        // Write stamps the marker.
+        let plan = store.migrate(true).unwrap();
+        assert!(plan.iter().find(|o| o.id == id).unwrap().changed);
+        match p
+            .get_value(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD))
+            .unwrap()
+        {
+            Some(MetaValue::String(s)) => assert_eq!(s, "1"),
+            other => panic!("expected stamped version, got {other:?}"),
+        }
+
+        // Idempotent: a second write reports no change.
+        let plan = store.migrate(true).unwrap();
+        assert!(!plan.iter().find(|o| o.id == id).unwrap().changed);
+    }
+
+    #[test]
     fn state_change_persists() {
         let (store, _td) = test_store();
         let t = store.create("x", NewTicketOpts::default()).unwrap();
@@ -1586,7 +1755,10 @@ mod tests {
         store
             .set_lifecycle(&blocker.id, TicketStatus::Closed, TicketState::Resolved)
             .unwrap();
-        assert_eq!(store.load(&blocker.id).unwrap().status, TicketStatus::Closed);
+        assert_eq!(
+            store.load(&blocker.id).unwrap().status,
+            TicketStatus::Closed
+        );
     }
 
     #[test]
@@ -1603,7 +1775,10 @@ mod tests {
         store
             .set_lifecycle_forced(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
             .unwrap();
-        assert_eq!(store.load(&dependent.id).unwrap().status, TicketStatus::Closed);
+        assert_eq!(
+            store.load(&dependent.id).unwrap().status,
+            TicketStatus::Closed
+        );
 
         // Reopen, resolve the blocker, then a plain close succeeds.
         store
@@ -1613,7 +1788,10 @@ mod tests {
         store
             .set_lifecycle(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
             .unwrap();
-        assert_eq!(store.load(&dependent.id).unwrap().status, TicketStatus::Closed);
+        assert_eq!(
+            store.load(&dependent.id).unwrap().status,
+            TicketStatus::Closed
+        );
     }
 
     #[test]

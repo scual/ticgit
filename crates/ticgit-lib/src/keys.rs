@@ -27,6 +27,13 @@ pub const SCHEMA_VERSION_KEY: &str = "ticgit:schema-version";
 /// Current schema version written by this implementation.
 pub const SCHEMA_VERSION: &str = "1";
 
+/// Per-ticket format-version field name, e.g.
+/// `ticgit:tickets:<uuid>:format-version`. Absent means a pre-versioning
+/// (legacy) ticket; [`crate::store`] treats that as the current baseline for
+/// reads and `ti migrate` stamps it explicitly. Distinct from the project-wide
+/// [`SCHEMA_VERSION_KEY`] so a large repo can migrate incrementally.
+pub const FORMAT_VERSION_FIELD: &str = "format-version";
+
 /// Prefix for the per-ticket field keyspace; pass to
 /// `SessionTargetHandle::get_all_values` for project-wide ticket scans.
 #[must_use]

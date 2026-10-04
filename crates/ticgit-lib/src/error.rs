@@ -26,6 +26,18 @@ pub enum Error {
     #[error("invalid value: {0}")]
     InvalidValue(String),
 
+    #[error("invalid format version `{0}`")]
+    InvalidFormatVersion(String),
+
+    #[error(
+        "ticket {id} uses format version {version}, but this ti supports up to {supported}; upgrade ti"
+    )]
+    FormatTooNew {
+        id: Uuid,
+        version: u32,
+        supported: u32,
+    },
+
     #[error("cannot close: ticket has {0}")]
     OpenSubissues(String),
 

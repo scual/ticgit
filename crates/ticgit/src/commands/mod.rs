@@ -16,6 +16,7 @@ pub mod import;
 pub mod init;
 pub mod list;
 pub mod meta;
+pub mod migrate;
 pub mod milestone;
 pub mod new;
 pub mod next;

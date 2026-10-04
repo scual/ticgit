@@ -3006,3 +3006,26 @@ fn assign_resolves_user_nick_to_email() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["assigned"], "scott@example.com");
 }
+
+#[test]
+fn migrate_dry_run_reports_current_tickets_as_json() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "a ticket");
+
+    let output = repo
+        .ti()
+        .args(["migrate", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    // A freshly-created ticket is already stamped at the current format, so a
+    // dry run finds nothing to change.
+    assert_eq!(json["applied"], false);
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["changed"], 0);
+    assert_eq!(json["current_format"], 1);
+    assert!(json["tickets"].as_array().unwrap().len() == 1);
+}
