@@ -1,5 +1,0 @@
-Low-risk de-risking step 1/6 of the op-log roadmap (parent 0e7b1245).
-
-Derive ids from SHA-256 of operation content (git-bug precedent) so ids need no
-central coordination and dedupe automatically: two clones computing the same
-content derive the same id. Prerequisite for the op-log flagship.

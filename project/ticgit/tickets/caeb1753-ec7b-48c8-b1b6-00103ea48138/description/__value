@@ -1,5 +1,0 @@
-Low-risk de-risking step 2/6 of the op-log roadmap (parent 0e7b1245).
-
-Add a format-version key per ticket plus a `ti migrate` command so incompatible
-format changes are survivable for existing repos. Must land before the op-log
-format break so the flagship migration has a vehicle.

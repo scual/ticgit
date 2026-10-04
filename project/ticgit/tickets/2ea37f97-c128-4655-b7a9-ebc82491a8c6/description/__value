@@ -1,5 +1,0 @@
-Step 5/6 of the op-log roadmap (parent 0e7b1245).
-
-Per-entity identity chain with a public key (linear version chain, fast-forward
-merge). Sign operations for verified authorship across clones. Builds on the
-op-log flagship.

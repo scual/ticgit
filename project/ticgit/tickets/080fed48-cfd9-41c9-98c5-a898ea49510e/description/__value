@@ -1,1 +1,0 @@
-Add a --json flag to `ti sync` and `ti push` that emits a single structured result object (remote, ref, url, web_url, pushed_total; sync also lists pulled tickets), suppressing the human-readable lines. update/writeup/agent are split into a follow-up.

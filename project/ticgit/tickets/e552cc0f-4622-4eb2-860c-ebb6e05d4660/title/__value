@@ -1,1 +1,0 @@
-Refactor tui.rs/render.rs to clear remaining structural clippy warnings
