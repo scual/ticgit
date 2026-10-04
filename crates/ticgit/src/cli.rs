@@ -66,6 +66,10 @@ use crate::commands;
   setup      Configure git-meta remote from .git-meta
   update     Update ti to the latest release
 
+\x1b[1;36mMaintenance:\x1b[0m
+  migrate    Roll tickets forward to the current on-disk format
+  verify     Check op-log integrity and operation signatures
+
 \x1b[1;36mAgents:\x1b[0m
   agent      Markdown guide for AI agents
   list --markdown          Markdown ticket list
@@ -238,6 +242,12 @@ pub enum Command {
     /// Configure git-meta remote from `.git-meta` file (idempotent).
     Setup,
 
+    /// Roll tickets forward to the current on-disk format version.
+    Migrate(commands::migrate::Args),
+
+    /// Verify op-log integrity: every ticket replays to a valid state.
+    Verify(commands::verify::Args),
+
     /// Update ti to the latest release.
     Update(commands::update::Args),
 }
@@ -248,6 +258,8 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Init) => commands::init::run(),
         Some(Command::Hook(args)) => commands::hook::run(args),
         Some(Command::Setup) => commands::setup::run(),
+        Some(Command::Migrate(args)) => commands::migrate::run(args),
+        Some(Command::Verify(args)) => commands::verify::run(args),
         Some(Command::New(args)) => commands::new::run(args),
         Some(Command::List(args)) => commands::list::run(args),
         Some(Command::Show(args)) => commands::show::run(args),

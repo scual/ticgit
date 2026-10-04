@@ -17,6 +17,7 @@ pub mod import;
 pub mod init;
 pub mod list;
 pub mod meta;
+pub mod migrate;
 pub mod milestone;
 pub mod new;
 pub mod next;
@@ -37,6 +38,7 @@ pub mod tag;
 pub mod tui;
 pub mod update;
 pub mod users;
+pub mod verify;
 pub mod view;
 pub mod writeup;
 

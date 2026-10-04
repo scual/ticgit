@@ -8,27 +8,22 @@
 //! `state` (open: `new`, `assigned`, `in-progress`, `blocked`, `review`;
 //! closed: `resolved`, `wontfix`, `duplicate`, `invalid`).
 //!
+//! Scalar fields (title, description, status/state, assigned, closed-by,
+//! priority, points, milestone, code, spec, parent, created-at/by) are the
+//! projection of an append-only **operation log** — the conflict-free source
+//! of truth, see [`oplog`]. Sets, comments, and `meta:*` keep their own keys
+//! (they already merge). On-disk layout:
+//!
 //! ```text
-//! ticgit:tickets:<uuid>:title          # string
-//! ticgit:tickets:<uuid>:description    # string (optional)
-//! ticgit:tickets:<uuid>:status         # string ("open" | "closed")
-//! ticgit:tickets:<uuid>:state          # string (see lifecycle above)
-//! ticgit:tickets:<uuid>:assigned       # string, email (optional)
-//! ticgit:tickets:<uuid>:closed-by      # string, email (set while closed)
-//! ticgit:tickets:<uuid>:priority       # string (optional integer, lower = higher)
-//! ticgit:tickets:<uuid>:points         # string (optional integer)
-//! ticgit:tickets:<uuid>:milestone      # string (optional)
-//! ticgit:tickets:<uuid>:code           # string, code URI (optional)
-//! ticgit:tickets:<uuid>:spec           # string, markdown (optional)
+//! ticgit:tickets:<uuid>:ops:<lamport>:<hash>   # one immutable operation (scalar fields)
+//! ticgit:tickets:<uuid>:format-version         # string (on-disk format; current "2")
 //! ticgit:tickets:<uuid>:tags           # set
 //! ticgit:tickets:<uuid>:meta:<key>     # string (arbitrary custom fields)
 //! ticgit:tickets:<uuid>:comments       # list of JSON-encoded {author, body}
-//! ticgit:tickets:<uuid>:parent         # UUID (this ticket's parent, if a sub-issue)
 //! ticgit:tickets:<uuid>:children       # set of child UUIDs (denormalized)
 //! ticgit:tickets:<uuid>:depends_on     # set of UUIDs this ticket depends on
 //! ticgit:tickets:<uuid>:blocks         # set of UUIDs this ticket blocks (reverse)
-//! ticgit:tickets:<uuid>:created-at     # RFC3339 string
-//! ticgit:tickets:<uuid>:created-by     # string (email)
+//! ticgit:identities:<email>            # SSH public key (op-signature verification)
 //! ticgit:writeups:<uuid>:title         # string
 //! ticgit:writeups:<uuid>:status        # string ("open" | "closed")
 //! ticgit:writeups:<uuid>:priority      # string (optional integer)
@@ -52,7 +47,9 @@
 
 pub mod error;
 pub mod keys;
+pub mod oplog;
 pub mod query;
+pub mod signing;
 pub mod store;
 pub mod ticket;
 pub mod writeup;
@@ -61,10 +58,11 @@ pub mod writeup;
 pub mod test_support;
 
 pub use error::{Error, Result};
+pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
 pub use query::{
     next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
-pub use store::TicketStore;
+pub use store::{MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
     validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
 };

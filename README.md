@@ -1,39 +1,86 @@
-# ticgit
+<p align="center">
+  <img src="assets/logo.svg" width="96" height="96" alt="TicGit logo">
+</p>
 
-Ticgit is a Git-native issue tracker. Tickets live in the repository as
-structured [git-meta](https://crates.io/crates/git-meta-lib) metadata.
+<h1 align="center">TicGit</h1>
 
-The `ti` cli can create, read, update and sync ticket data.
+<p align="center"><strong>Your issue tracker lives in your Git repo — no server, no SaaS, no lock-in.</strong></p>
 
-<img width="2362" height="1712" alt="CleanShot 2026-05-13 at 09 47 31@2x" src="https://github.com/user-attachments/assets/f5ff1a77-644d-47ba-80eb-77e7b7ee66cb" />
+<p align="center">
+  Tickets are stored as <a href="https://crates.io/crates/git-meta-lib">git-meta</a> metadata and travel with your
+  history. Every change is a signed, conflict-free operation, so two people can edit the
+  same ticket offline and both edits survive the merge.
+</p>
 
-Also ships with `ti tui` for a cool TUI version.
+<p align="center">
+  <a href="https://crates.io/crates/ticgit"><img src="https://img.shields.io/crates/v/ticgit.svg?logo=rust" alt="crates.io"></a>
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license">
+  <img src="https://img.shields.io/badge/rust-2021-orange.svg?logo=rust" alt="Rust 2021">
+  <img src="https://img.shields.io/badge/output-json%20%7C%20markdown-8A2BE2.svg" alt="JSON + Markdown output">
+</p>
 
-<img width="2590" height="1730" alt="CleanShot 2026-05-13 at 09 45 20@2x" src="https://github.com/user-attachments/assets/8c648b6a-0c13-4234-a11b-963fff4a7a2f" />
+<p align="center">
+  <img width="900" alt="ti on the command line" src="https://github.com/user-attachments/assets/f5ff1a77-644d-47ba-80eb-77e7b7ee66cb">
+</p>
 
-<img width="2590" height="1730" alt="CleanShot 2026-05-13 at 09 45 43@2x" src="https://github.com/user-attachments/assets/391b0f79-c487-4146-b7b8-a39fad2cde93" />
+---
 
-Everything has `--json` output for scripting and `--markdown` output for agentic use. You can also train your agent to use it by asking it to run `ti agent`.
+## Why TicGit
 
-You can also do specs and writeups and lots of fun stuff.
+Issue trackers usually live somewhere else — a web app, a database, a vendor. TicGit
+puts them where the code is: **inside the Git repository itself**, as metadata under
+`refs/meta/*`. That means:
+
+- **Offline-first & distributed.** Clone, fork, and work on a plane. Sync over any Git remote.
+- **No separate database in your tree.** Tickets don't clutter your working directory.
+- **It merges.** Ticket state is an append-only **operation log** (CRDT) — concurrent edits to
+  different fields never clobber each other under last-write-wins.
+- **Auditable & signable.** Every operation has a content-derived id and can be signed with
+  your existing SSH key, exactly like Git commit signing.
+- **Built for humans _and_ agents.** Rich terminal UI, plus stable `--json` and `--markdown`
+  output for scripting and AI workflows.
+
+The binary is called **`ti`**.
+
+## Highlights
+
+|                          |                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| 🧩 **Git-native**        | Tickets ride `refs/meta/*`; nothing extra in your working tree.                                         |
+| 🔀 **Conflict-free**     | Scalar fields are an op-log; merges union operations and replay deterministically.                      |
+| 🔐 **Signed history**    | SSH-signed operations (`ssh-keygen -Y`), verified by `ti verify`.                                       |
+| 🔎 **`ti verify`**       | Consistency oracle: recomputes every op's content id and checks signatures.                             |
+| 🪜 **Versioned storage** | Per-ticket format versioning + `ti migrate` for safe, forward-only upgrades.                            |
+| 🤖 **Agent-ready**       | `--json` (stable schema) and `--markdown` with next-step hints on every command.                        |
+| 🖥️ **TUI**               | `ti tui` for an interactive terminal browser.                                                           |
+| 🧠 **Specs & writeups**  | Attach implementation specs; promote rough notes into tickets.                                          |
+| 🧰 **IDE plugin**        | A [JetBrains UI plugin](https://plugins.jetbrains.com/plugin/34640-ticgit-ui) drives the same `ti` CLI. |
+
+<p align="center">
+  <img width="900" alt="ti tui" src="https://github.com/user-attachments/assets/8c648b6a-0c13-4234-a11b-963fff4a7a2f">
+</p>
 
 ## Install
 
-Download a pre-built binary:
+Pre-built binary:
 
 ```sh
 curl -fsSL https://ticgit.dev/install | sh
 ```
 
-Or install from source via Cargo:
+From crates.io:
 
 ```sh
 cargo install ticgit
 ```
 
-The binary is named `ti`.
+From source:
 
-## Quick Start
+```sh
+cargo install --path crates/ticgit --locked
+```
+
+## Quick start
 
 ```sh
 git init
@@ -43,209 +90,122 @@ git config user.name "Your Name"
 ti init
 ti new --title "fix the parser" --tags bug,parser --comment "fails on empty input"
 ti list
-ti show <ticket-id-or-prefix>
+ti show <id>          # full UUID or any unique prefix
 ```
 
-Most commands accept a full UUID or any unique UUID prefix.
-
-## Common Commands
-
-Create tickets:
+Pick something to work on, make it current, and leave a note:
 
 ```sh
-ti new --title "add docs"
-ti new --title "fix crash" --tags bug,cli --assigned you@example.com
-ti new --title "investigate flaky test" --comment "seen on CI twice"
-```
-
-List and filter:
-
-```sh
-ti list
-ti list --status open
-ti list --state blocked
-ti list --tag bug
-ti list --assigned you@example.com
-ti list --order title.desc
-ti list --json
-ti list --markdown
-```
-
-Show details:
-
-```sh
-ti show <id>
-ti show <id> --json
-ti show <id> --markdown
-```
-
-Commands that support `--json` also support `--markdown`, which renders the same
-ticket data as Markdown and includes suggested next commands for agent workflows.
-
-## Machine Output
-
-TicGit publishes a stable JSON schema for agent and automation workflows at
-[`docs/schema/v1.json`](docs/schema/v1.json). On the website, the same schema is
-available at [`https://ticgit.dev/schema/v1.json`](https://ticgit.dev/schema/v1.json).
-
-`--json` is the stable machine interface:
-
-- successful JSON commands write parseable JSON to stdout only
-- diagnostic and error text goes to stderr
-- JSON output does not include ANSI color escapes
-- non-zero exit status means the command failed
-- ticket ids may be full UUIDs or unique UUID prefixes
-- ambiguous or missing prefixes fail with a non-zero exit status and stderr diagnostic
-
-`ti show <id> --json` and JSON mutation commands emit a ticket object.
-`ti list --json` emits an array of ticket objects. Ticket metadata appears under
-`.meta` as an object whose values are strings.
-
-`ti next --json` emits a ticket object when a workable ticket is found, or the
-sentinel `{ "next": null }` when nothing matches — check that key before parsing
-a ticket.
-
-`--porcelain` and `--format json` are not supported compatibility aliases today;
-use `--json` for schema-stable output.
-
-Agents can run `ti help --agent` for a Markdown guide, or read the website's
-Markdown version at [`docs/index.md`](docs/index.md).
-
-Select a current ticket:
-
-```sh
+ti next               # best next ticket (skips blocked / dependency-gated)
 ti checkout <id>
-ti show
-ti comment "follow-up note"
-ti checkout --clear
+ti comment "on it"
+ti state in-progress
+ti close <id>
 ```
 
-Mutate tickets:
+## Command reference
 
-```sh
-ti state blocked --ticket <id>
-ti state closed --ticket <id>
-ti state closed:wontfix --ticket <id>
-ti status review --ticket <id>
-ti assign you@example.com --ticket <id>
-ti assign --clear --ticket <id>
-ti points 3 --ticket <id>
-ti milestone v1.0 --ticket <id>
-ti tag --ticket <id> bug ui
-ti tag --ticket <id> --remove ui
-ti edit <id>
-ti comment --ticket <id> "fixed in the latest patch"
-```
+| Area                | Commands                                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Create & browse** | `new` · `list`/`ls` · `show` · `recent` · `mine` · `history` · `tui`                                       |
+| **Work on tickets** | `checkout`/`co` · `next` · `edit` · `comment` · `state`/`status` · `close` · `delete`                      |
+| **Ticket fields**   | `tag` · `assign` · `priority` · `points` · `milestone` · `subissue` · `code` · `depends` · `spec` · `meta` |
+| **Views & import**  | `views` · `writeup` · `review` · `stats` · `import gh\|linear`                                             |
+| **Team**            | `users`                                                                                                    |
+| **Sync & setup**    | `sync` · `pull` · `push` · `init` · `setup` · `update`                                                     |
+| **Maintenance**     | `migrate` · `verify`                                                                                       |
+| **Agents**          | `agent` · any command with `--markdown`                                                                    |
 
-Lifecycle values are split into a broad `status` and a specific `state`.
-Open tickets use `new`, `assigned`, `in-progress`, `blocked`, or `review`.
-Closed tickets use `resolved`, `wontfix`, `duplicate`, or `invalid`.
-New tickets start as `open:new`; `ti state closed` defaults to
-`closed:resolved`.
+Run `ti` with no arguments for the grouped help menu, or `ti <command> --help` for flags.
+Every command that supports `--json` also supports `--markdown`.
 
-Closing a ticket is rejected while it still has an open sub-issue or an
-unresolved dependency (an open ticket in its `depends_on`), so a "done" ticket
-never hides unfinished work. Closing a ticket that only _blocks_ others is
-allowed — that is the normal "finished the blocker" case. A sub-issue or
-dependency counts as handled once it reaches any closed state (`resolved`,
-`wontfix`, `duplicate`, or `invalid`). For the same reason, you cannot add a
-sub-issue to an already-closed ticket without reopening it first. Pass `--force`
-to `ti close` or `ti state` to override the close check:
+Lifecycle is a broad **status** (`open` / `closed`) plus a specific **state** — open:
+`new`, `assigned`, `in-progress`, `blocked`, `review`; closed: `resolved`, `wontfix`,
+`duplicate`, `invalid`. Closing is blocked while a ticket still has an open sub-issue or an
+unresolved dependency, so "done" never hides unfinished work (`--force` overrides).
 
-```sh
-ti close <id> --force
-ti state closed:wontfix --ticket <id> --force
-```
+## The operation log
 
-Recent tickets:
-
-```sh
-ti recent
-ti recent --limit 20
-```
-
-Import open GitHub issues:
-
-```sh
-ti import gh
-ti import gh --repo owner/repo
-```
-
-Saved views are named snapshots of ticket UUIDs:
-
-```sh
-ti save-view bugs --tag bug
-ti views
-ti views bugs
-ti list --view bugs
-```
-
-## Sync
-
-TicGit delegates storage and transfer to `git-meta-lib`.
-
-```sh
-ti pull
-ti push
-ti sync
-```
-
-`ti sync` performs a pull followed by a push. If you pass `--remote <name>`, the
-named git-meta remote is used; otherwise git-meta resolves the default metadata
-remote from Git config.
-
-### Sync on push
-
-Install a Sync hook so tickets travel with your code:
-
-```sh
-ti hook install            # detects Husky (.husky/) or falls back to the git hooks directory
-ti hook install --target husky|git
-ti hook check              # exits non-zero if missing or out of date
-ti hook uninstall
-```
-
-The hook is a small marked block appended to `pre-push`, so existing steps are
-kept. It syncs only when a branch is pushed to the remote tickets sync with,
-prints one status line, and never blocks the push: a failed sync is a warning.
-See `docs/adr/0001-sync-hook-logic-lives-in-binary.md`.
-
-## What It Stores
-
-All TicGit data is written on the git-meta `project` target under the
-`ticgit:` namespace:
+TicGit's storage is an **operation-based CRDT**, inspired by
+[git-bug](https://github.com/git-bug/git-bug). A ticket's scalar fields (title, state,
+priority, assignee, …) are not stored as mutable values — they're the result of replaying an
+append-only log of operations:
 
 ```text
-ticgit:schema-version                    string
-ticgit:owners                            set
-ticgit:views:<name>                      set of ticket UUIDs
-ticgit:tickets:<uuid>:title              string
-ticgit:tickets:<uuid>:description        string (optional)
-ticgit:tickets:<uuid>:status             string
-ticgit:tickets:<uuid>:state              string
-ticgit:tickets:<uuid>:assigned           string
-ticgit:tickets:<uuid>:points             string
-ticgit:tickets:<uuid>:milestone          string
-ticgit:tickets:<uuid>:tags               set
-ticgit:tickets:<uuid>:comments           list
-ticgit:tickets:<uuid>:created-at         string
-ticgit:tickets:<uuid>:created-by         string
+ticgit:tickets:<uuid>:ops:<lamport>:<hash>   # one immutable operation
 ```
 
-Ticket existence is implied by the presence of fields under
-`ticgit:tickets:<uuid>:*`; there is no separate ticket index.
+- **Content-derived ids.** Each operation's id is the SHA-256 of its content, so identical
+  operations dedupe and equal logical clocks tie-break deterministically.
+- **Lamport ordering.** Operations replay in `(lamport, id)` order — identically on every clone.
+- **Conflict-free merge.** Divergent clones union their operation sets; no three-way field
+  merge, no last-write-wins clobber. Edits to _different_ fields both survive; edits to the
+  _same_ field resolve deterministically and the loser stays recoverable in history.
+- **Signed authorship.** Set `TICGIT_SIGNING_KEY` to an SSH private key and operations are
+  signed with `ssh-keygen -Y` (git-signing style); the public key is published to a synced
+  identity chain. Unsigned operations are trusted by default and flagged by `ti verify`.
 
-The local query database is git-meta's `.git/git-meta.sqlite`. Exchange with
-other clones happens through `refs/meta/*` using normal Git transfer.
+Two maintenance commands back this up:
+
+```sh
+ti verify            # replay + integrity check: content ids, signatures, projectability
+ti migrate           # dry-run plan to roll tickets to the current on-disk format
+ti migrate --write   # apply it (idempotent)
+```
+
+Sets (`tags`, sub-issues, dependencies), comments, and arbitrary `meta:*` fields keep their
+own git-meta keys — they already merge cleanly — so the op-log carries exactly what needs it.
+
+## Machine output (agents & scripts)
+
+`--json` is a **stable interface** with a published schema at
+[`docs/schema/v1.json`](docs/schema/v1.json) (also at
+[`https://ticgit.dev/schema/v1.json`](https://ticgit.dev/schema/v1.json)):
+
+- successful JSON goes to **stdout only**; diagnostics and errors go to **stderr**
+- JSON output carries **no ANSI color**
+- non-zero exit status means failure; ambiguous/missing id prefixes fail non-zero
+- ids may be full UUIDs or any unique prefix
+- `ti show --json` / mutations emit a ticket object; `ti list --json` emits an array
+- `ti next --json` emits a ticket object, or `{ "next": null }` when nothing is workable
+
+Point an agent at the full workflow guide with `ti agent`.
+
+## IDE integration
+
+A JetBrains IDE plugin — **[TicGit UI](https://plugins.jetbrains.com/plugin/34640-ticgit-ui)** —
+browses, creates, and manages tickets in a tool window and drives this same `ti` CLI, so the
+command line and the IDE share one source of truth.
+
+## What it stores
+
+All data lives on the git-meta `project` target under the `ticgit:` namespace:
+
+```text
+ticgit:schema-version                        string
+ticgit:owners                                set of emails
+ticgit:identities:<email>                    SSH public key (op signing)
+ticgit:views:<name>                          set of ticket UUIDs
+ticgit:tickets:<uuid>:ops:<lamport>:<hash>   operation (scalar fields, source of truth)
+ticgit:tickets:<uuid>:format-version         string (on-disk format)
+ticgit:tickets:<uuid>:tags                   set
+ticgit:tickets:<uuid>:children               set of child UUIDs
+ticgit:tickets:<uuid>:depends_on             set of UUIDs
+ticgit:tickets:<uuid>:blocks                 set of UUIDs
+ticgit:tickets:<uuid>:comments               list of JSON {author, body}
+ticgit:tickets:<uuid>:meta:<key>             string (custom fields)
+```
+
+There is no separate ticket index — a ticket exists because its keys do. Exchange with other
+clones happens through `refs/meta/*` over normal Git transfer; the local query database is
+`.git/git-meta.sqlite`.
 
 ## Rust API
 
 The workspace has two crates:
 
-- `ticgit-lib`: domain model and git-meta-backed `TicketStore`.
-- `ticgit`: the `ti` command-line application.
-
-Example:
+- **`ticgit-lib`** — the domain model and the git-meta-backed `TicketStore`.
+- **`ticgit`** — the `ti` command-line application and TUI.
 
 ```rust
 use ticgit_lib::{NewTicketOpts, TicketStore};
@@ -258,48 +218,15 @@ Ok::<(), ticgit_lib::Error>(())
 
 ## Development
 
-Run the full test suite:
-
 ```sh
-cargo test
+cargo build                          # debug build of the workspace
+cargo test                           # all tests
+cargo test -p ticgit --test cli      # CLI integration suite
+cargo clippy --all-targets           # lint
+cargo fmt                            # format
+cargo install --path crates/ticgit --locked   # install `ti`
 ```
 
-Run just the library tests:
+## License
 
-```sh
-cargo test -p ticgit-lib
-```
-
-Run the CLI integration tests:
-
-```sh
-cargo test -p ticgit --test cli
-```
-
-Build the CLI:
-
-```sh
-cargo build -p ticgit
-```
-
-Package the crates before publishing:
-
-```sh
-cargo package -p ticgit-lib
-cargo publish -p ticgit-lib
-
-# After ticgit-lib 0.1.0 is available in the crates.io index:
-cargo package -p ticgit
-cargo publish -p ticgit
-```
-
-The CLI crate depends on `ticgit-lib` by both local `path` and published
-`version`, so publish `ticgit-lib` first.
-
-## Install locally
-
-To install locally, from project folder:
-
-```sh
-cargo install --path crates/ticgit --force --locked
-```
+MIT © the TicGit authors. See [`LICENSE`](LICENSE).

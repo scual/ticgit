@@ -77,3 +77,29 @@ _Avoid_: Using Blocked to mean deferred, or a large Priority number to shelve wo
 
 **Next queue**:
 The ordering `ti next` uses to pick one ticket to work on. It excludes Closed tickets, Sub-issues, tickets with an unfinished Dependency, and Deferred tickets, then orders the rest by Priority (unprioritised last), then State (Blocked last), then oldest-created first.
+
+### Storage and integrity
+
+**Operation log**:
+The append-only record of operations that produce a ticket's scalar fields (title, state, priority, …). It is the conflict-free source of truth: clones merge by unioning operations and replaying them in order, so concurrent edits to different fields both survive rather than one clobbering the other.
+_Avoid_: Mutable field, last-write-wins, overwrite
+
+**Operation (op)**:
+One immutable change in the log — create, set a field, or clear a field — with a content-derived id (SHA-256), a Lamport clock, and an optional SSH signature. Older clients skip operation kinds they don't understand.
+_Avoid_: Edit record, patch, event (reserve "event" for unrelated uses)
+
+**Signing**:
+Attaching an SSH signature (git-signing style, via `ssh-keygen -Y`) to an operation so authorship is verifiable across clones, using the author's key from the Identity chain. Unsigned operations are trusted by default and flagged by `ti verify`.
+_Avoid_: GPG (TicGit signs with SSH keys), authentication
+
+**Identity chain**:
+The shared record mapping each author (by email) to the public key that signs their operations, published into the repository so any clone can check a Signature. An operation signed by an author with no published key fails Verify.
+_Avoid_: Keyring, user table, trust store
+
+**Verify**:
+`ti verify` — the consistency oracle. Replays each ticket's log, recomputes operation ids, checks signatures, and confirms the log projects to a valid ticket. A failure is a hard error (non-zero exit); an unsigned op is a warning.
+_Avoid_: Validate, lint
+
+**Migrate**:
+`ti migrate` — rolls tickets forward to the current on-disk format version (a per-ticket `format-version`). Dry-run by default; `--write` applies and is idempotent. A ticket whose format is newer than the running `ti` is refused rather than misread.
+_Avoid_: Upgrade (reserve for the `ti` binary), convert
