@@ -1,0 +1,55 @@
+# Spec — Content-derived IDs (SHA-256 of op content)
+
+Roadmap step 1/6 (parent 0e7b12). Low-risk; prerequisite for the op-log flagship.
+
+## Goal
+
+Make operation identifiers derive deterministically from a SHA-256 hash of the
+operation's content, so two clones that independently record the same operation
+compute the same id — no central coordination, automatic dedupe, and a stable
+tiebreaker for equal Lamport values.
+
+Scope note: this step is about **operation** ids, not ticket ids. Ticket ids stay
+UUIDs (`Ticket.id: Uuid`, `Uuid::new_v4()` in `store.rs::create`); the short-id
+handle and `resolve_id` prefix matching are unchanged and must keep working.
+
+## Current state
+
+- `store.rs::create` mints ticket ids with `Uuid::new_v4()` (random, non-derived).
+- There is no operation concept yet; this step defines the hashing primitive the
+  op-log (step 4) will consume, landed early and in isolation so step 4 does not
+  also have to bake its own id scheme.
+
+## Design
+
+- Define a canonical byte serialization for an operation payload (see step 4 for
+  the op shape). Canonical = deterministic field order + stable encoding (serde
+  with `BTreeMap`/sorted keys; no `HashMap` iteration order).
+- `op_id = hex(sha256(canonical_bytes))`. Full 64-hex internally; a 12-hex short
+  form for display, mirroring the ticket short-id convention.
+- Content that feeds the hash MUST include everything that makes the op unique:
+  ticket id, op kind, field payload, author, Lamport value, and created-at. Two
+  genuinely distinct edits must not collide; an identical replayed op must.
+
+## Changes
+
+- New module `crates/ticgit-lib/src/oplog/hash.rs` (or `ops.rs`) exposing
+  `fn content_id(bytes: &[u8]) -> String` and a typed `OpId`.
+- Add `sha2` to `ticgit-lib` deps (check the `gix` stack for a compatible version;
+  `gix` already pulls a sha backend — prefer reusing it over a second impl).
+- `keys.rs`: no change yet (op key layout is owned by step 4), but reserve the
+  `ops:<lamport>:<hash>` shape in a doc comment so step 4 slots in cleanly.
+
+## Acceptance
+
+- Unit test: same payload → same id; one-byte change → different id.
+- Unit test: canonical encoding is stable across runs/process restarts (no map
+  ordering flakiness).
+- Short-id collisions are astronomically unlikely but display code must tolerate
+  them (fall back to longer prefix), mirroring `resolve_id`'s unique-prefix rule.
+
+## Risks
+
+- Hash-input drift: if step 4 later changes the op payload shape, ids change.
+  Mitigate by versioning the op payload (step 2) and freezing the canonical
+  encoding behind a documented function.

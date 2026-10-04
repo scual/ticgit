@@ -1,0 +1,116 @@
+# Spec — Op-log CRDT + derived cache (flagship)
+
+Roadmap step 4/6 (parent 0e7b12). Depends on steps 1 (content-ids), 2 (versioning),
+3 (forward-compat). This is the central change; see the parent ticket's spec for
+the architecture-level rationale.
+
+## Goal
+
+Replace last-write-wins on scalar ticket fields with an append-only operation log
+as the conflict-free source of truth, and turn the current field keys into a
+rebuildable derived cache with staleness detection. Unlock free history and
+point-in-time queries; `ti verify` as a consistency oracle.
+
+## Current state (what actually needs changing — narrower than it looks)
+
+git-meta already gives us conflict-free merge for TWO of the three write shapes:
+
+| Write today | git-meta primitive | Merge behavior | Needs op-log? |
+|-------------|--------------------|----------------|---------------|
+| scalars (title, status, state, priority, assigned, milestone, points, code, parent, description, spec, created-*) | `p.set(key, val)` | **LWW clobber** | **YES** |
+| sets (tags, children, depends_on, blocks) | `p.set_add(key, val)` | union (already CRDT) | no |
+| comments | `p.list_push(key, json)` | append-only list | no |
+
+So the flagship's real job is: **route scalar field mutations through ops**;
+set/list writes can stay as-is initially (they already converge). This sharply
+reduces scope and risk.
+
+## Operation log layout (`keys.rs`)
+
+    ticgit:tickets:<uuid>:ops:<lamport>:<hash>
+
+- `<lamport>` zero-padded fixed-width (e.g. 20 digits) so lexical prefix-scan
+  order == numeric order (consistent with the no-index, scan-everything model).
+- `<hash>` = content-id from step 1; tiebreaks equal Lamport values
+  deterministically.
+- Value = JSON op envelope (step 3 shape): `{id, kind, lamport, author,
+  created_at, format_version, payload}`.
+- Op kinds (initial): `create`, `set-field` (compound: `field → value` map),
+  `set-lifecycle`, `clear-field`. One op per user command (resolved decision #1
+  in parent spec), carrying all fields that command touched.
+
+Add `keys.rs` helpers: `ticket_ops_prefix(id)`, `ticket_op(id, lamport, hash)`,
+`parse_ticket_op(key) -> Option<(Uuid, u64, &str)>`, plus `cache:head`.
+
+## Lamport clock (resolved decision #2)
+
+- No separate counter key. On append, the next Lamport = `max(seen) + 1` where
+  `max(seen)` is read from the op-key `<lamport>` components during the same scan
+  that builds the cache. `cache:head` memoizes the last-seen max so steady-state
+  appends don't rescan the whole op-space.
+- Concurrent equal-Lamport ops order by `<hash>`.
+
+## Derived cache + staleness
+
+- Cache = today's scalar field keys (`ticgit:tickets:<uuid>:<field>`), repurposed
+  as a disposable projection of the op-log, PLUS a `cache:head` recording the
+  (lamport, hash) of the last op folded in.
+- Read path (`load`/`list`): compare `cache:head` against the real op-log head:
+  - equal → use cache directly (zero replay).
+  - head ahead → replay only ops after `cache:head` (incremental fold), update cache.
+  - diverged (post-merge: an op exists with lamport ≤ head but unknown hash) →
+    rebuild that ticket's cache from scratch by full replay.
+- Replay = deterministic left-fold of ops in (lamport, hash) order into a
+  `Ticket` (reuse `build_ticket`'s folding as the projection target).
+
+## Cache placement — DECISION STILL OPEN
+
+Recommendation stands: cache is a LOCAL, gitignored build artifact; only the
+op-log syncs. Precedent: `session_state.rs` already stores local-only state.
+If instead the cache stays in synced git-meta (current keys), LWW clobber
+reappears on the cache keys — acceptable ONLY because the op-log remains the
+truth and `ti verify`/rebuild corrects any clobbered cache. **Needs partner
+sign-off before coding the write path.** (This is the one gating decision.)
+
+## `ti verify` (consistency oracle)
+
+`commands/verify.rs`: replay the full op-log into a fresh projection and diff
+against the stored cache. Report drift / corruption / bad-migration per ticket.
+`--json` structured; non-zero exit on any mismatch. Cheap once the two layers
+exist; doubles as the migration's correctness net.
+
+## Write path
+
+- `store.rs` scalar setters (`set_title`, `set_state`, `set_lifecycle`,
+  `set_priority`, …) and `create` stop calling `p.set` directly; instead they
+  append a `set-field`/`set-lifecycle` op and update the cache in the same
+  transaction. Keep the public `TicketStore` method signatures unchanged so the
+  CLI and tests don't churn.
+- Sets/comments: unchanged for v1 (already convergent). A later step may move
+  them into ops for uniform history, but not required here.
+
+## Migration (resolved decision #3)
+
+`ti migrate` (step 2) synthesizes ONE snapshot `create` op per existing ticket
+from its current scalar fields (lamport 0, synthetic migration author), then
+writes `cache:head`. No fabricated per-field history. Idempotent.
+
+## Acceptance
+
+- CLI test: two clones edit DIFFERENT scalar fields of the same ticket, sync,
+  and BOTH edits survive (today one clobbers the other) — the headline win.
+- CLI test: two clones edit the SAME field; result is deterministic by
+  (lamport, hash) on both clones, and the losing value is recoverable from
+  `ti history`.
+- CLI test: `ti verify` passes on a healthy repo; detect-and-report on a
+  deliberately corrupted cache key.
+- Perf: `ti list` with a warm cache does zero replay (assert via instrumentation
+  or a replay counter in tests).
+- All existing ~48 CLI integration tests stay green (signatures unchanged).
+
+## Risks
+
+- Biggest risk is the write path touching every setter; mitigate by keeping
+  method signatures stable and landing behind the step-2 version bump so rollback
+  is a documented migration, not a break.
+- Cache-placement decision must be made first (see above).

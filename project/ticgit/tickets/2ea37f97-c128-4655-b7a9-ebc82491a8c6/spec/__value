@@ -1,0 +1,54 @@
+# Spec — Identity + signed ops (verified authorship)
+
+Roadmap step 5/6 (parent 0e7b12). Depends on step 4 (op-log). Medium effort.
+
+## Goal
+
+Attach a verifiable identity to each operation so authorship survives across
+clones and cannot be spoofed, mirroring git-bug's identity subsystem.
+
+## Current state
+
+- Authorship today is just `self.session.email()` written into `created-by` /
+  comment `author` — a bare, unverifiable string.
+- Ops (step 4) already carry an `author` field; this step makes it trustworthy.
+
+## Design
+
+- Identity as a linear version chain (git-bug precedent): an append-only sequence
+  of identity ops under a dedicated namespace, each version carrying a public key;
+  fast-forward merge semantics (no branching identities).
+- Proposed key layout: `ticgit:identities:<identity-uuid>:versions:<n>` with the
+  current public key derivable by folding the chain. (Finalize alongside step 4's
+  key helpers in `keys.rs`.)
+- Sign each operation's content-id (step 1) with the author's private key; store
+  the signature in the op envelope. Verify on replay; an op with a bad/missing
+  signature is surfaced by `ti verify` and excluded from trusted state (but, per
+  step 3, retained in the log).
+- Key management: reuse the user's existing git/SSH or GPG key where possible to
+  avoid a bespoke keystore; private keys never enter git-meta.
+
+## Changes
+
+- `oplog` envelope gains `signature` + `identity` reference.
+- New `identity` module; `ti user` commands extended to create/show an identity
+  with a public key (today `ti users` is only a nick↔email mailmap — this is a
+  superset, keep the mailmap working).
+- `ti verify` extended to check signatures.
+
+## Acceptance
+
+- Unit/CLI test: an op signed by identity A verifies; a tampered op fails
+  verification and is reported by `ti verify`.
+- Backward-compat: unsigned legacy ops (pre-identity) still replay (trusted-by-
+  default or flagged, per partner decision).
+
+## Open questions
+
+- Keystore: reuse SSH/GPG vs ship our own — decide before coding.
+- Trust model for unsigned/legacy ops.
+
+## Risks
+
+- Key management UX is the hard part; crypto itself is straightforward. Deferred
+  behind the flagship deliberately so the distributed-tracker story ships first.

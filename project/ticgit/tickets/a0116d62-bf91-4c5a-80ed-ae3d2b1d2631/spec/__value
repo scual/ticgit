@@ -1,0 +1,48 @@
+# Spec — Bidirectional bridges (GitHub/GitLab)
+
+Roadmap step 6/6 (parent 0e7b12). Depends on step 4 (op-log). High effort, DEFERRED.
+
+## Goal
+
+Sync tickets bidirectionally with external trackers (GitHub Issues, GitLab, …),
+mirroring git-bug's bridge pattern, so teams straddling ticgit and a hosted
+tracker keep a single source of truth in git.
+
+## Current state
+
+- ticgit already has one-directional import: `ti import gh|linear` (see
+  `reference.md`). This step generalizes to continuous, bidirectional sync.
+- The op-log (step 4) is the enabler: external changes map to ops, so merges with
+  local edits are conflict-free and re-import is idempotent.
+
+## Design
+
+- Bridge config per remote tracker: target platform, URL, auth token, mapping
+  rules. Follow git-bug's `bridge new --target=<platform> --url=... --token=...`
+  shape for familiarity. Store config locally (tokens NEVER in synced git-meta).
+- Import direction: external issue/comment → ticgit op (reuse step 4 op kinds).
+  Keep a stable external-id ↔ ticket-uuid mapping (in `meta:` fields or a bridge
+  namespace) so repeated syncs dedupe instead of duplicating.
+- Export direction: local ops → external API calls, with a watermark (last-synced
+  op head) per bridge so only new ops are pushed.
+- Conflict handling: because the op-log is the truth, a round-trip is a merge of
+  op sets, not a destructive overwrite; field-level divergence resolves by the
+  same (lamport, hash) rule as local merges.
+
+## Changes
+
+- New `bridge` module + `ti bridge` command family (new/list/pull/push/configure).
+- Per-platform adapter trait; implement GitHub first, GitLab second.
+- Auth/token storage local-only; rate-limit + pagination handling per platform.
+
+## Acceptance (when undeferred)
+
+- Round-trip test against a recorded/mock GitHub API: external issue imports as a
+  ticket; local edit exports back; re-sync is idempotent (no duplicates, no
+  clobber).
+
+## Why deferred
+
+- Highest effort, external-API surface, and not required for the core distributed-
+  tracker story. Scheduled last; revisit after steps 1–5 land and the op-log has
+  proven stable in real use.
