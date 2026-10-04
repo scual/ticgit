@@ -115,7 +115,10 @@ identity). We do NOT fabricate a per-field op sequence: there is no real history
 to reconstruct and a fake one would assert false provenance. Real edits append
 normally from lamport 1 onward. Deterministic, offline, idempotent.
 
-## Still open (separate from the three above)
+### 4. Cache placement → local, gitignored build artifact (DECIDED 2026-10-04)
 
-- **Cache placement** — recommendation stands (local, gitignored build artifact;
-  only the op-log syncs). Final sign-off deferred; see the decision table above.
+The derived cache lives locally (e.g. `.git/ticgit/cache`), gitignored; only the
+op-log syncs between clones. Chosen over synced-in-git-meta because the cache can
+then never conflict and push/pull stay lean. Accepts breaking the pure
+all-in-git-meta story — `session_state.rs` is already a local-state precedent.
+This unblocks the flagship (step 4) write path.

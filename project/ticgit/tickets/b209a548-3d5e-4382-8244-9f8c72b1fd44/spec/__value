@@ -63,14 +63,14 @@ Add `keys.rs` helpers: `ticket_ops_prefix(id)`, `ticket_op(id, lamport, hash)`,
 - Replay = deterministic left-fold of ops in (lamport, hash) order into a
   `Ticket` (reuse `build_ticket`'s folding as the projection target).
 
-## Cache placement — DECISION STILL OPEN
+## Cache placement — DECIDED 2026-10-04: local, gitignored
 
-Recommendation stands: cache is a LOCAL, gitignored build artifact; only the
-op-log syncs. Precedent: `session_state.rs` already stores local-only state.
-If instead the cache stays in synced git-meta (current keys), LWW clobber
-reappears on the cache keys — acceptable ONLY because the op-log remains the
-truth and `ti verify`/rebuild corrects any clobbered cache. **Needs partner
-sign-off before coding the write path.** (This is the one gating decision.)
+The cache is a LOCAL, gitignored build artifact (e.g. `.git/ticgit/cache`); only
+the op-log syncs. Precedent: `session_state.rs` already stores local-only state.
+Consequence: the current `ticgit:tickets:<uuid>:<field>` scalar keys STOP being
+synced truth — they become (or are mirrored by) the local cache projection, and
+the op-log under `ops:` is the only synced scalar authority. The cache can never
+conflict, and push/pull shrink. This unblocks the write path below.
 
 ## `ti verify` (consistency oracle)
 
