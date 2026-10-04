@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Added CLI tests: set-then-clear round-trips for priority, milestone, spec; code set/clear plus rejection of a non-http(s) URI."}

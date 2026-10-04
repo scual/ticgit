@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"depends/subissue --json now emit a wrapper {ticket, dependency} / {ticket, parent} so agents see the resolved counterpart, not just the modified ticket. CLI tests added."}

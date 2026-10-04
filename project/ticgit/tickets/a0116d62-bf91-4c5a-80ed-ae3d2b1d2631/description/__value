@@ -1,0 +1,5 @@
+Step 6/6 of the op-log roadmap (parent 0e7b1245), deferred.
+
+High-effort bidirectional bridge sync to external trackers (GitHub, GitLab, …),
+mirroring git-bug's bridge pattern. Non-critical to the distributed-tracker story;
+scheduled last.

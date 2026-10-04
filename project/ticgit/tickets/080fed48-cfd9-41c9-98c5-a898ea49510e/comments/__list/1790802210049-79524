@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Scoping: splitting this 5-command ticket. sync+push share one result shape and are the highest-value/most-testable, so keeping this ticket for those two. update (network self-update), writeup (6 subcommands), and agent (skill installer, JSON marginal) move to a follow-up ticket."}

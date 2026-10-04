@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Added CLI tests for ti next: skips tickets with unresolved (open) dependencies and picks them once resolved; prefers lower priority number; skips sub-issues; emits {\"next\": null} when nothing is workable."}

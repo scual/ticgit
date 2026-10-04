@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Split out of the sync/push --json work. writeup read paths (show/list) can mirror ticket JSON; update can emit {current,latest,updated}; agent --json is low-value (it prints a markdown guide) - decide whether to skip it."}

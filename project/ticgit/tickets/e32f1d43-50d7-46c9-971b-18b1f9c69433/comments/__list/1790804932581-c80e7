@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Rewrote the lib.rs namespace doc to match what is actually stored: added closed-by, priority, code, spec, parent, children, depends_on, blocks on tickets; priority + created-at/by on writeups; the ticgit:users mailmap; the split status/state lifecycle; versions as JSON {author,at,body}; and no ticket-side writeup reverse index."}

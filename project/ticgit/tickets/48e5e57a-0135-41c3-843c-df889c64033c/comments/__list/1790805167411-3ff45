@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Added a pull round-trip test: repo A pushes a ticket to a bare remote, repo B pulls from the same URL and the ticket lands (verified via list --all --json)."}

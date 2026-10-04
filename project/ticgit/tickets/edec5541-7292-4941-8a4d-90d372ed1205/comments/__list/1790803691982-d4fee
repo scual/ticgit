@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Added CLI tests for the users/mailmap surface: users add (multiple emails), --json list, rm one email, rm whole user; plus assign resolving a nick to its email via resolve_user."}

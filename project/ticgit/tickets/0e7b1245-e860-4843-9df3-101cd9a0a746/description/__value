@@ -1,0 +1,22 @@
+Architectural decision ticket arising from the git-bug competitive teardown
+(session 2026-10-02). Today ticgit stores the *current state* of each ticket
+directly under `ticgit:tickets:<uuid>:<field>` and syncs those keys, so two
+clones editing the same ticket concurrently collide at merge with last-write-wins
+(LWW) clobber.
+
+Proposal: make an **append-only operation log** the conflict-free source of truth
+— the only thing that syncs and merges — and repurpose the current state keys as
+a **disposable, rebuildable derived cache** so `ti list` / `ti show` stay fast
+without replaying the log on every command.
+
+This mirrors git-bug's own design (operation DAG as truth + separate rebuildable
+cache). It unlocks free history/blame/point-in-time queries and removes LWW
+clobber, at the cost of a replay+cache layer and a format migration.
+
+Scope of THIS ticket = make the architectural decision concrete and durable
+(spec attached). Implementation is sequenced in sub-issues/follow-ups per the
+teardown roadmap; this is not a single-PR change.
+
+Reference artifact: "git-bug teardown — ideas for ticgit"
+(claude.ai artifact c79a18d1-ced9-4d97-977a-70bfe0eec67b).
+Supporting analysis: memory obs 34312, 34313, 34314, 34330.

@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Implemented --json for sync and push: single result object {remote, ref, url, web_url, pushed_total} (sync also lists pulled tickets). Human lines suppressed under --json. Verified end-to-end against a local bare remote; added push_json_emits_result_object and sync_json_emits_result_object CLI tests. Full suite green (209)."}

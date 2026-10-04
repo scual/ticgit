@@ -1,0 +1,95 @@
+# Op-log + derived cache — architecture spec
+
+## Problem
+
+ticgit stores the current state of each ticket directly as synced git-meta keys
+(`ticgit:tickets:<uuid>:<field>`). Concurrent edits in two clones merge with
+last-write-wins: one side's change silently clobbers the other. There is also no
+native history/blame — the keys only hold the latest value.
+
+## Decision
+
+Split the model into two layers:
+
+1. **Operation log — the source of truth.** Append-only, conflict-free, the only
+   thing that syncs and merges between clones.
+2. **Derived cache — a disposable build artifact.** Rebuildable from the log;
+   keeps `ti list` / `ti show` fast without replaying the log per command.
+
+This is git-bug's architecture (op DAG as truth + separate rebuildable cache)
+adapted to ticgit's git-meta storage.
+
+## Operation log layout
+
+Operations live under a per-ticket op namespace, ordered by a Lamport clock with
+the content hash as tiebreaker (git-bug precedent):
+
+    ticgit:tickets:<uuid>:ops:<lamport>:<hash>
+
+Each op is an immutable record of a single mutation (create, set-field,
+comment, state-change, …). Replaying the ops in (lamport, hash) order on any
+clone yields identical state — no semantic three-way merge needed.
+
+**Merge = union of op sets.** When two clones diverge, concurrent ops are simply
+unioned and replayed in clock order. No clobber: both edits survive as distinct
+ops; conflicting field-sets resolve deterministically by clock order, and the
+losing value is still recoverable from history.
+
+## Derived cache + staleness detection
+
+Each ticket's cache records the op-log head it was built from:
+
+    ticgit:tickets:<uuid>:cache:head
+
+On every read, compare cached head vs real op-log head — three tiers:
+
+| Condition            | Head relation            | Action                        |
+|----------------------|--------------------------|-------------------------------|
+| Fresh                | heads equal              | use cache directly, zero replay |
+| Behind               | head moved forward       | replay only ops after cached head (incremental) |
+| Diverged             | heads diverge (merge)    | rebuild that ticket's cache from scratch |
+
+## Cache placement — DECISION NEEDED (recommendation: local)
+
+| Option                          | Pros                                             | Cons                                                |
+|---------------------------------|--------------------------------------------------|-----------------------------------------------------|
+| **Local, gitignored** (git-bug: `.git/git-bug/cache`) | smaller push/pull; cache can never conflict; clean sync | breaks the pure all-in-git-meta story |
+| **Synced in git-meta**          | preserves all-in-git-meta purity                 | redundant data on the wire; re-introduces LWW clobber on cache keys |
+
+Recommendation: **cache is a local build artifact; only the op-log syncs.**
+Precedent already exists — `session_state.rs` keeps local-only state outside the
+repo, so the all-in-git-meta invariant is already not absolute.
+
+## Consistency oracle — `ti verify`
+
+Free payoff: a `ti verify` command replays the full op-log into a fresh state and
+diffs it against the cache. Any mismatch flags cache drift, op-log corruption, or
+a bad migration. Cheap to build once the two layers exist; a strong correctness
+net for the migration itself.
+
+## Sequencing (from the teardown roadmap)
+
+De-risk the format break by landing low-risk wins first, then the flagship:
+
+1. Content-derived IDs (SHA-256 of op content)  — low risk
+2. Format versioning per ticket + `ti migrate`  — low risk, survivable breaks
+3. Forward-compatible ops (older clients skip unknown op types) — low risk
+4. **Op-log CRDT + derived cache** (this ticket's flagship)
+5. Identity + signed ops (verified authorship across clones)
+6. Bidirectional bridges (GitHub/GitLab) — deferred, high effort
+
+Steps 1–3 make step 4's migration survivable for existing repos.
+
+## Modules touched
+
+- `keys.rs` — add the `ops:` and `cache:head` key layouts (single source of truth).
+- `store.rs` — op append + replay; cache read-through with staleness check; no index still.
+- `ticket.rs` — model ops / replay folding into the `Ticket` state.
+- new `ti verify` command in `commands/`.
+
+## Open questions
+
+- Op granularity: one op per field-set vs batched edits per `ti edit`.
+- Lamport clock storage/advance across the prefix-scan model (no index today).
+- Migration path for existing repos: synthesize a single create-op from current
+  state, or a per-field op sequence.

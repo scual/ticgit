@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Added --depends-on <id> to ti new: resolves the target up front (fails before creating on a bad ref), then add_dependency after create so both depends_on and the reverse blocks side are set. CLI tests for the happy path and the fail-fast path."}
