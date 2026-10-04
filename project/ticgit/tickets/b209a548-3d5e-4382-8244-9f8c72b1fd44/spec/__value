@@ -114,3 +114,16 @@ writes `cache:head`. No fabricated per-field history. Idempotent.
   method signatures stable and landing behind the step-2 version bump so rollback
   is a documented migration, not a break.
 - Cache-placement decision must be made first (see above).
+
+## Decisions locked 2026-10-04 (cutover)
+
+CLEAN CUTOVER. On migration the on-disk ticket format bumps to **2**:
+- `ti migrate` v1→v2 converts each ticket's current scalar keys into a single
+  snapshot `create` op (lamport 0, synthetic migration author) and REMOVES the
+  legacy synced scalar keys.
+- The writer thereafter syncs ONLY ops for scalar fields (+ the local cache);
+  it no longer writes synced scalar keys. Sets/comments unchanged (already
+  convergent).
+- Old binaries that predate the op-log stop cleanly on the `FormatTooNew`
+  guard (step 2) rather than misreading. This is the intended, documented break.
+- No dual-write window: no residual LWW on legacy scalar keys.

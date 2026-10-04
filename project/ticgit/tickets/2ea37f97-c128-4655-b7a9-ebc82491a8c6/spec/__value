@@ -52,3 +52,13 @@ clones and cannot be spoofed, mirroring git-bug's identity subsystem.
 
 - Key management UX is the hard part; crypto itself is straightforward. Deferred
   behind the flagship deliberately so the distributed-tracker story ships first.
+
+## Decisions locked 2026-10-04
+
+- KEYSTORE: reuse the user's existing SSH key (ed25519), git-signing style. No
+  bespoke keystore; private key never leaves ~/.ssh / the agent. The public key
+  lives in the synced identity chain for cross-clone verification.
+- TRUST MODEL: unsigned ops (legacy, or from clients without an identity) are
+  TRUSTED BY DEFAULT and contribute to state; `ti verify` flags them as
+  `unsigned` (warning, not error). Soft transition — existing repos keep working
+  and signing is adopted gradually.
