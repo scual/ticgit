@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Read-side forward-compat locked by characterization test load_ignores_unknown_fields (build_ticket already tolerant). Op-envelope forward-compat (unknown op kinds) ships with flagship b209a5 where Op type is born."}
