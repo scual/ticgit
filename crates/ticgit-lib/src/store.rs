@@ -8,12 +8,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use git_meta_lib::{ListEntry, MetaValue, Session, Target};
+use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::keys;
+use crate::oplog::{Op, OpKind};
 use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
 use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 
@@ -47,9 +49,73 @@ fn format_ticket_refs(tickets: &[Ticket]) -> String {
         .join(", ")
 }
 
+/// Highest per-ticket format version this binary understands. A ticket whose
+/// `format-version` field exceeds this is refused with [`Error::FormatTooNew`];
+/// absent or lower versions are migrated forward (lazily on read, persisted by
+/// `ti migrate`).
+pub const CURRENT_TICKET_FORMAT: u32 = 2;
+
+/// Per-ticket outcome of a [`TicketStore::migrate`] run.
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationOutcome {
+    pub id: Uuid,
+    pub short_id: String,
+    /// The version marker found, or `None` for an unversioned (legacy) ticket.
+    pub from: Option<u32>,
+    /// The version the ticket is (or would be) migrated to.
+    pub to: u32,
+    /// Whether this ticket needs (dry-run) or received (write) a change.
+    pub changed: bool,
+}
+
+/// Per-ticket outcome of a [`TicketStore::verify`] run.
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyOutcome {
+    pub id: Uuid,
+    pub short_id: String,
+    pub ok: bool,
+    pub issues: Vec<String>,
+    /// Non-fatal notes, e.g. unsigned ops (trusted by default, step 5).
+    pub warnings: Vec<String>,
+}
+
+/// Read a ticket's declared format version from its raw fields, enforcing the
+/// [`Error::FormatTooNew`] guard. Absent marker = current baseline (legacy
+/// tickets stay readable); a malformed marker is [`Error::InvalidFormatVersion`].
+fn read_format_version(id: Uuid, fields: &[(String, MetaValue)]) -> Result<u32> {
+    for (field, value) in fields {
+        if field == keys::FORMAT_VERSION_FIELD {
+            if let MetaValue::String(s) = value {
+                let ver: u32 = s
+                    .trim()
+                    .parse()
+                    .map_err(|_| Error::InvalidFormatVersion(s.clone()))?;
+                if ver > CURRENT_TICKET_FORMAT {
+                    return Err(Error::FormatTooNew {
+                        id,
+                        version: ver,
+                        supported: CURRENT_TICKET_FORMAT,
+                    });
+                }
+                return Ok(ver);
+            }
+        }
+    }
+    Ok(CURRENT_TICKET_FORMAT)
+}
+
+/// SSH private key path used to sign ops, from `TICGIT_SIGNING_KEY`. Absent =
+/// unsigned ops (trusted by default; `ti verify` flags them).
+fn signing_key_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("TICGIT_SIGNING_KEY")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
+    signing_key: Option<std::path::PathBuf>,
 }
 
 impl TicketStore {
@@ -58,7 +124,10 @@ impl TicketStore {
     pub fn discover() -> Result<Self> {
         let session = Session::discover()?;
         Self::ensure_schema(&session)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            signing_key: signing_key_from_env(),
+        })
     }
 
     /// Open a store for an already-loaded `gix::Repository` (used in tests
@@ -66,14 +135,27 @@ impl TicketStore {
     pub fn open(repo: gix::Repository) -> Result<Self> {
         let session = Session::open(repo.path())?;
         Self::ensure_schema(&session)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            signing_key: signing_key_from_env(),
+        })
     }
 
     /// Open a store from an already-built session (lets callers preconfigure
     /// e.g. `with_timestamp` for deterministic tests).
     pub fn from_session(session: Session) -> Result<Self> {
         Self::ensure_schema(&session)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            signing_key: signing_key_from_env(),
+        })
+    }
+
+    /// Set (or clear) the SSH key used to sign ops. Primarily for tests and
+    /// hosts that resolve the key themselves; otherwise `TICGIT_SIGNING_KEY`
+    /// is read at construction.
+    pub fn set_signing_key(&mut self, key: Option<std::path::PathBuf>) {
+        self.signing_key = key;
     }
 
     /// Borrow the underlying git-meta session.
@@ -122,33 +204,43 @@ impl TicketStore {
             }
         }
 
-        // A ticket's existence is implied by its fields - no separate
-        // index to maintain.
-        p.set(&keys::ticket_field(&id, "title"), title)?;
+        // Scalar fields are born as a single `create` op — the synced source of
+        // truth. The format-version marker stays a plain key (same value on
+        // every clone, never a conflict) and gates old binaries off op-based
+        // tickets via the FormatTooNew guard.
         p.set(
-            &keys::ticket_field(&id, "status"),
-            TicketStatus::Open.as_str(),
+            &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+            CURRENT_TICKET_FORMAT.to_string().as_str(),
         )?;
-        p.set(&keys::ticket_field(&id, "state"), TicketState::New.as_str())?;
-        p.set(&keys::ticket_field(&id, "created-at"), now_rfc.as_str())?;
-        p.set(&keys::ticket_field(&id, "created-by"), self.session.email())?;
+
+        let mut fields = BTreeMap::new();
+        fields.insert("title".to_string(), title.to_string());
+        fields.insert(
+            "status".to_string(),
+            TicketStatus::Open.as_str().to_string(),
+        );
+        fields.insert("state".to_string(), TicketState::New.as_str().to_string());
+        fields.insert("created-at".to_string(), now_rfc.clone());
+        fields.insert("created-by".to_string(), self.session.email().to_string());
 
         if let Some(ref a) = opts.assigned {
             if !a.is_empty() {
                 let resolved = self.resolve_user(a)?;
                 validate_email(&resolved)?;
-                p.set(&keys::ticket_field(&id, "assigned"), resolved.as_str())?;
+                fields.insert("assigned".to_string(), resolved);
             }
         }
 
         if let Some(parent_id) = opts.parent {
-            // Validate parent exists
+            // Validate parent exists.
             self.load(&parent_id)?;
-            p.set(
-                &keys::ticket_field(&id, "parent"),
-                parent_id.to_string().as_str(),
-            )?;
-            // Denormalize: add child to parent's children set
+            fields.insert("parent".to_string(), parent_id.to_string());
+        }
+
+        self.append_op(&id, OpKind::Create { fields })?;
+
+        if let Some(parent_id) = opts.parent {
+            // Denormalize: add child to parent's children set (stays a set key).
             p.set_add(&keys::ticket_field(&parent_id, "children"), &id.to_string())?;
         }
 
@@ -170,19 +262,36 @@ impl TicketStore {
     pub fn list(&self) -> Result<Vec<Ticket>> {
         let p = self.session.target(&Target::project());
         let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
-        let mut by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        let mut ops_by_id: BTreeMap<Uuid, Vec<Op>> = BTreeMap::new();
         for (key, value) in pairs {
-            if let Some((id, field)) = keys::parse_ticket_field(&key) {
-                by_id
+            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    ops_by_id
+                        .entry(id)
+                        .or_default()
+                        .push(serde_json::from_str::<Op>(&s)?);
+                }
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                fields_by_id
                     .entry(id)
                     .or_default()
                     .push((field.to_string(), value));
             }
         }
 
-        let mut out = Vec::with_capacity(by_id.len());
-        for (id, fields) in by_id {
-            if let Some(t) = build_ticket(id, fields) {
+        let ids: BTreeSet<Uuid> = fields_by_id
+            .keys()
+            .chain(ops_by_id.keys())
+            .copied()
+            .collect();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let fields = fields_by_id.remove(&id).unwrap_or_default();
+            let ops = ops_by_id.remove(&id).unwrap_or_default();
+            read_format_version(id, &fields)?;
+            let projected = project_scalar_fields(fields, &ops);
+            if let Some(t) = build_ticket(id, projected) {
                 out.push(t);
             }
         }
@@ -193,15 +302,22 @@ impl TicketStore {
     pub fn load(&self, id: &Uuid) -> Result<Ticket> {
         let p = self.session.target(&Target::project());
         let pairs = p.get_all_values(Some(&keys::ticket_prefix(id)))?;
-        let mut fields = Vec::with_capacity(pairs.len());
+        let mut fields = Vec::new();
+        let mut ops = Vec::new();
         for (key, value) in pairs {
-            if let Some((parsed_id, field)) = keys::parse_ticket_field(&key) {
+            if keys::parse_ticket_op(&key).is_some() {
+                if let MetaValue::String(s) = value {
+                    ops.push(serde_json::from_str::<Op>(&s)?);
+                }
+            } else if let Some((parsed_id, field)) = keys::parse_ticket_field(&key) {
                 if parsed_id == *id {
                     fields.push((field.to_string(), value));
                 }
             }
         }
-        build_ticket(*id, fields).ok_or(Error::NotFound(*id))
+        read_format_version(*id, &fields)?;
+        let projected = project_scalar_fields(fields, &ops);
+        build_ticket(*id, projected).ok_or(Error::NotFound(*id))
     }
 
     /// Resolve a user-supplied ticket reference (full UUID or unique
@@ -241,38 +357,52 @@ impl TicketStore {
     // Field mutators
     // -------------------------------------------------------------------
 
-    pub fn set_title(&self, id: &Uuid, title: &str) -> Result<()> {
-        self.project_handle()
-            .set(&keys::ticket_field(id, "title"), title)?;
+    /// Persist scalar field mutations as operations — the synced, conflict-free
+    /// source of truth. A `set` becomes a compound `SetField` op and a `clear`
+    /// a `ClearField` op; the derived projection is rebuilt from the log on
+    /// read ([`project_scalar_fields`]). Scalar fields are never written as
+    /// synced git-meta keys anymore (clean cutover).
+    fn apply_scalars(
+        &self,
+        id: &Uuid,
+        set: BTreeMap<String, String>,
+        clear: Vec<String>,
+    ) -> Result<()> {
+        if !set.is_empty() {
+            self.append_op(id, OpKind::SetField { fields: set })?;
+        }
+        if !clear.is_empty() {
+            self.append_op(id, OpKind::ClearField { fields: clear })?;
+        }
         Ok(())
+    }
+
+    pub fn set_title(&self, id: &Uuid, title: &str) -> Result<()> {
+        let mut set = BTreeMap::new();
+        set.insert("title".to_string(), title.to_string());
+        self.apply_scalars(id, set, Vec::new())
     }
 
     pub fn set_description(&self, id: &Uuid, description: Option<&str>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "description");
         match description {
             Some(d) if !d.is_empty() => {
-                p.set(&key, d)?;
+                let mut set = BTreeMap::new();
+                set.insert("description".to_string(), d.to_string());
+                self.apply_scalars(id, set, Vec::new())
             }
-            _ => {
-                p.remove(&key)?;
-            }
+            _ => self.apply_scalars(id, BTreeMap::new(), vec!["description".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_spec(&self, id: &Uuid, spec: Option<&str>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "spec");
         match spec {
             Some(s) if !s.is_empty() => {
-                p.set(&key, s)?;
+                let mut set = BTreeMap::new();
+                set.insert("spec".to_string(), s.to_string());
+                self.apply_scalars(id, set, Vec::new())
             }
-            _ => {
-                p.remove(&key)?;
-            }
+            _ => self.apply_scalars(id, BTreeMap::new(), vec!["spec".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_state(&self, id: &Uuid, state: TicketState) -> Result<()> {
@@ -366,104 +496,86 @@ impl TicketStore {
                 state.as_str()
             )));
         }
-        let p = self.project_handle();
-        p.set(&keys::ticket_field(id, "status"), status.as_str())?;
-        p.set(&keys::ticket_field(id, "state"), state.as_str())?;
+        let mut set = BTreeMap::new();
+        set.insert("status".to_string(), status.as_str().to_string());
+        set.insert("state".to_string(), state.as_str().to_string());
         if status == TicketStatus::Closed {
-            p.set(&keys::ticket_field(id, "closed-by"), self.session.email())?;
+            set.insert("closed-by".to_string(), self.session.email().to_string());
+            self.apply_scalars(id, set, Vec::new())
         } else {
-            p.remove(&keys::ticket_field(id, "closed-by"))?;
+            self.apply_scalars(id, set, vec!["closed-by".to_string()])
         }
-        Ok(())
     }
 
     pub fn set_closed_by(&self, id: &Uuid, who: Option<&str>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "closed-by");
         match who {
             Some(w) if !w.is_empty() => {
                 let resolved = self.resolve_user(w)?;
                 validate_email(&resolved)?;
-                p.set(&key, resolved.as_str())?;
+                let mut set = BTreeMap::new();
+                set.insert("closed-by".to_string(), resolved);
+                self.apply_scalars(id, set, Vec::new())
             }
-            _ => {
-                p.remove(&key)?;
-            }
+            _ => self.apply_scalars(id, BTreeMap::new(), vec!["closed-by".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_assigned(&self, id: &Uuid, who: Option<&str>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "assigned");
         match who {
             Some(w) if !w.is_empty() => {
                 let resolved = self.resolve_user(w)?;
                 validate_email(&resolved)?;
-                p.set(&key, resolved.as_str())?;
+                let mut set = BTreeMap::new();
+                set.insert("assigned".to_string(), resolved);
+                self.apply_scalars(id, set, Vec::new())
             }
-            _ => {
-                p.remove(&key)?;
-            }
+            _ => self.apply_scalars(id, BTreeMap::new(), vec!["assigned".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_priority(&self, id: &Uuid, priority: Option<i64>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "priority");
         match priority {
             Some(n) => {
-                p.set(&key, n.to_string().as_str())?;
+                let mut set = BTreeMap::new();
+                set.insert("priority".to_string(), n.to_string());
+                self.apply_scalars(id, set, Vec::new())
             }
-            None => {
-                p.remove(&key)?;
-            }
+            None => self.apply_scalars(id, BTreeMap::new(), vec!["priority".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_points(&self, id: &Uuid, points: Option<i64>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "points");
         match points {
             Some(n) => {
-                p.set(&key, n.to_string().as_str())?;
+                let mut set = BTreeMap::new();
+                set.insert("points".to_string(), n.to_string());
+                self.apply_scalars(id, set, Vec::new())
             }
-            None => {
-                p.remove(&key)?;
-            }
+            None => self.apply_scalars(id, BTreeMap::new(), vec!["points".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_milestone(&self, id: &Uuid, milestone: Option<&str>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "milestone");
         match milestone {
             Some(m) if !m.is_empty() => {
-                p.set(&key, m)?;
+                let mut set = BTreeMap::new();
+                set.insert("milestone".to_string(), m.to_string());
+                self.apply_scalars(id, set, Vec::new())
             }
-            _ => {
-                p.remove(&key)?;
-            }
+            _ => self.apply_scalars(id, BTreeMap::new(), vec!["milestone".to_string()]),
         }
-        Ok(())
     }
 
     pub fn set_code(&self, id: &Uuid, code: Option<&str>) -> Result<()> {
-        let p = self.project_handle();
-        let key = keys::ticket_field(id, "code");
         match code {
             Some(c) if !c.is_empty() => {
                 crate::ticket::validate_code_uri(c)?;
-                p.set(&key, c)?;
+                let mut set = BTreeMap::new();
+                set.insert("code".to_string(), c.to_string());
+                self.apply_scalars(id, set, Vec::new())
             }
-            _ => {
-                p.remove(&key)?;
-            }
+            _ => self.apply_scalars(id, BTreeMap::new(), vec!["code".to_string()]),
         }
-        Ok(())
     }
 
     /// Set the parent of a ticket. Validates that the parent exists and
@@ -516,13 +628,12 @@ impl TicketStore {
             )?;
         }
 
-        // Set the parent field on the child
-        p.set(
-            &keys::ticket_field(child_id, "parent"),
-            parent_id.to_string().as_str(),
-        )?;
+        // Set the parent field on the child (op-managed scalar).
+        let mut set = BTreeMap::new();
+        set.insert("parent".to_string(), parent_id.to_string());
+        self.apply_scalars(child_id, set, Vec::new())?;
 
-        // Add to new parent's children set
+        // Add to new parent's children set (denormalized; stays a set key).
         p.set_add(
             &keys::ticket_field(parent_id, "children"),
             &child_id.to_string(),
@@ -543,8 +654,7 @@ impl TicketStore {
             )?;
         }
 
-        p.remove(&keys::ticket_field(child_id, "parent"))?;
-        Ok(())
+        self.apply_scalars(child_id, BTreeMap::new(), vec!["parent".to_string()])
     }
 
     /// Delete a ticket and remove parent/child relationship references.
@@ -557,7 +667,9 @@ impl TicketStore {
         }
 
         for child_id in &ticket.children {
-            p.remove(&keys::ticket_field(child_id, "parent"))?;
+            // `parent` is op-managed, so orphan the child with a clear op
+            // (removing the scalar key would be a no-op on op-based tickets).
+            self.apply_scalars(child_id, BTreeMap::new(), vec!["parent".to_string()])?;
         }
 
         // Dependencies are denormalized on both sides, so clean up the reverse
@@ -1117,6 +1229,244 @@ impl TicketStore {
         }
     }
 
+    /// Roll every ticket forward to [`CURRENT_TICKET_FORMAT`] (the op-log
+    /// format), returning a per-ticket plan. With `write == false` this is a
+    /// dry run. With `write == true` each legacy (scalar-key, no-op) ticket is
+    /// converted: its current scalar fields are snapshotted into a single
+    /// `create` op at Lamport 0, the legacy synced scalar keys are removed, and
+    /// the `format-version` marker is stamped. Idempotent — a ticket that
+    /// already has ops is left untouched (`changed == false`). A ticket whose
+    /// version exceeds this binary surfaces [`Error::FormatTooNew`].
+    pub fn migrate(&self, write: bool) -> Result<Vec<MigrationOutcome>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        let mut has_ops: BTreeSet<Uuid> = BTreeSet::new();
+        for (key, value) in pairs {
+            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
+                has_ops.insert(id);
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                fields_by_id
+                    .entry(id)
+                    .or_default()
+                    .push((field.to_string(), value));
+            }
+        }
+
+        let mut out = Vec::with_capacity(fields_by_id.len());
+        for (id, fields) in fields_by_id {
+            // Enforce the too-new / malformed guards before touching anything.
+            read_format_version(id, &fields)?;
+            let present = fields.iter().find_map(|(field, value)| {
+                if field == keys::FORMAT_VERSION_FIELD {
+                    if let MetaValue::String(s) = value {
+                        return s.trim().parse::<u32>().ok();
+                    }
+                }
+                None
+            });
+
+            // A ticket is already migrated iff it has ops. Legacy tickets are
+            // scalar-key only and need conversion.
+            let changed = !has_ops.contains(&id);
+            if changed && write {
+                let ticket = build_ticket(id, fields.clone())
+                    .ok_or_else(|| Error::InvalidValue(format!("cannot migrate ticket {id}")))?;
+                let snapshot = snapshot_scalar_fields(&ticket);
+                let author = self.session.email().to_string();
+                let op = Op::new(
+                    0,
+                    &author,
+                    ticket.created_at,
+                    OpKind::Create { fields: snapshot },
+                )?;
+                p.set(
+                    &keys::ticket_op(&id, op.lamport, &op.id),
+                    serde_json::to_string(&op)?.as_str(),
+                )?;
+                // Remove the now-redundant legacy scalar keys (clean cutover).
+                for (field, _) in &fields {
+                    if is_op_managed_scalar(field) {
+                        p.remove(&keys::ticket_field(&id, field))?;
+                    }
+                }
+                p.set(
+                    &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+                    CURRENT_TICKET_FORMAT.to_string().as_str(),
+                )?;
+            }
+
+            out.push(MigrationOutcome {
+                id,
+                short_id: id.to_string().chars().take(6).collect(),
+                from: present,
+                to: CURRENT_TICKET_FORMAT,
+                changed,
+            });
+        }
+        Ok(out)
+    }
+
+    // -------------------------------------------------------------------
+    // Operation log (append-only, synced source of truth for scalars)
+    // -------------------------------------------------------------------
+
+    /// Next Lamport value for a ticket: one past the max found by scanning its
+    /// op keys (0 if none). No separate counter — the scan that reads the log
+    /// yields the max for free, consistent with the no-index model.
+    pub fn next_lamport(&self, id: &Uuid) -> Result<u64> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::ticket_ops_prefix(id)))?;
+        let mut max: Option<u64> = None;
+        for (key, _) in pairs {
+            if let Some((_, lamport, _)) = keys::parse_ticket_op(&key) {
+                max = Some(max.map_or(lamport, |m| m.max(lamport)));
+            }
+        }
+        Ok(max.map_or(0, |m| m + 1))
+    }
+
+    /// Append an operation to a ticket's log and return it. The op's Lamport is
+    /// assigned from [`Self::next_lamport`] and its content-derived id becomes
+    /// part of the key, so the write is to a fresh key (append-only, never an
+    /// overwrite).
+    pub fn append_op(&self, id: &Uuid, kind: OpKind) -> Result<Op> {
+        let lamport = self.next_lamport(id)?;
+        let author = self.session.email().to_string();
+        let mut op = Op::new(lamport, &author, OffsetDateTime::now_utc(), kind)?;
+        let p = self.session.target(&Target::project());
+
+        // Sign the op's content id if a signing key is configured, and publish
+        // the public key into the identity chain so other clones can verify.
+        if let Some(ref key) = self.signing_key {
+            let signature = crate::signing::sign(op.id.as_bytes(), key)?;
+            let pubkey = crate::signing::public_key(key)?;
+            p.set(&keys::identity(&author), pubkey.as_str())?;
+            op.signature = Some(signature);
+            op.signer = Some(author);
+        }
+
+        p.set(
+            &keys::ticket_op(id, op.lamport, &op.id),
+            serde_json::to_string(&op)?.as_str(),
+        )?;
+        Ok(op)
+    }
+
+    /// Consistency oracle: for every ticket, confirm each op's stored bytes
+    /// still hash to its key and envelope id (catching corruption or tampering)
+    /// and that the log projects to a valid ticket. Read-only; returns a
+    /// per-ticket report. Unknown op kinds are not errors (forward-compat).
+    pub fn verify(&self) -> Result<Vec<VerifyOutcome>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut ops_by_id: BTreeMap<Uuid, Vec<(String, Op)>> = BTreeMap::new();
+        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, _lamport, hash)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    let op = serde_json::from_str::<Op>(&s)?;
+                    ops_by_id
+                        .entry(id)
+                        .or_default()
+                        .push((hash.to_string(), op));
+                }
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                fields_by_id
+                    .entry(id)
+                    .or_default()
+                    .push((field.to_string(), value));
+            }
+        }
+
+        let ids: BTreeSet<Uuid> = fields_by_id
+            .keys()
+            .chain(ops_by_id.keys())
+            .copied()
+            .collect();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut issues = Vec::new();
+            let mut warnings = Vec::new();
+            let ops_with_hash = ops_by_id.remove(&id).unwrap_or_default();
+            let fields = fields_by_id.remove(&id).unwrap_or_default();
+
+            let mut ops = Vec::with_capacity(ops_with_hash.len());
+            for (key_hash, op) in ops_with_hash {
+                if op.id != key_hash {
+                    issues.push(format!(
+                        "op key hash {key_hash} does not match envelope id {}",
+                        op.id
+                    ));
+                }
+                match op.recompute_id() {
+                    Ok(rid) if rid == op.id => {}
+                    Ok(rid) => issues.push(format!(
+                        "op {} content-id mismatch (recomputed {rid}) — tampered or corrupt",
+                        op.id
+                    )),
+                    Err(e) => issues.push(format!("op {} failed to hash: {e}", op.id)),
+                }
+
+                // Signature check (step 5). Unsigned ops are trusted by default
+                // but flagged; a present-but-invalid signature is a hard issue.
+                match (&op.signature, &op.signer) {
+                    (Some(sig), Some(signer)) => match p.get_value(&keys::identity(signer))? {
+                        Some(MetaValue::String(pubkey)) => {
+                            match crate::signing::verify(op.id.as_bytes(), sig, signer, &pubkey) {
+                                Ok(true) => {}
+                                Ok(false) => issues.push(format!(
+                                    "op {} has an invalid signature from {signer}",
+                                    op.id
+                                )),
+                                Err(e) => issues.push(format!(
+                                    "op {} signature could not be checked: {e}",
+                                    op.id
+                                )),
+                            }
+                        }
+                        _ => issues.push(format!(
+                            "op {} is signed by {signer} but that identity has no published key",
+                            op.id
+                        )),
+                    },
+                    _ => warnings.push(format!("op {} is unsigned", op.id)),
+                }
+                ops.push(op);
+            }
+
+            let projected = project_scalar_fields(fields, &ops);
+            if build_ticket(id, projected).is_none() {
+                issues.push("does not project to a valid ticket state".to_string());
+            }
+
+            out.push(VerifyOutcome {
+                id,
+                short_id: id.to_string().chars().take(6).collect(),
+                ok: issues.is_empty(),
+                issues,
+                warnings,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Load every operation for a ticket (unordered; [`crate::oplog::replay`]
+    /// sorts and folds them).
+    pub fn load_ops(&self, id: &Uuid) -> Result<Vec<Op>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::ticket_ops_prefix(id)))?;
+        let mut ops = Vec::new();
+        for (key, value) in pairs {
+            if keys::parse_ticket_op(&key).is_some() {
+                if let MetaValue::String(s) = value {
+                    ops.push(serde_json::from_str::<Op>(&s)?);
+                }
+            }
+        }
+        Ok(ops)
+    }
+
     // -------------------------------------------------------------------
     // Sync porcelain
     // -------------------------------------------------------------------
@@ -1135,6 +1485,95 @@ impl TicketStore {
         let _ = self.session.push_once(remote)?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Op-log projection
+// ---------------------------------------------------------------------------
+
+/// Scalar singleton fields whose authority is the op-log once a ticket has any
+/// ops. Sets (`tags`, `children`, `depends_on`, `blocks`), `comments`, `meta:*`
+/// and `format-version` are NOT here — they keep their own git-meta keys (sets
+/// and comments already merge conflict-free; meta is low-conflict).
+fn is_op_managed_scalar(field: &str) -> bool {
+    matches!(
+        field,
+        "title"
+            | "description"
+            | "spec"
+            | "status"
+            | "state"
+            | "assigned"
+            | "closed-by"
+            | "priority"
+            | "points"
+            | "milestone"
+            | "code"
+            | "parent"
+            | "created-at"
+            | "created-by"
+    )
+}
+
+/// Resolve the scalar fields fed to [`build_ticket`]. With no ops, the raw
+/// scan is used unchanged (legacy / pre-migration tickets). With ops present,
+/// op-managed scalars come entirely from replaying the log (the conflict-free
+/// source of truth), while non-scalar keys (sets, comments, meta) pass through.
+fn project_scalar_fields(fields: Vec<(String, MetaValue)>, ops: &[Op]) -> Vec<(String, MetaValue)> {
+    if ops.is_empty() {
+        return fields;
+    }
+    let mut out: Vec<(String, MetaValue)> = fields
+        .into_iter()
+        .filter(|(field, _)| !is_op_managed_scalar(field))
+        .collect();
+    for (field, value) in crate::oplog::replay(ops) {
+        out.push((field, MetaValue::String(value)));
+    }
+    out
+}
+
+/// Snapshot a ticket's op-managed scalar fields into the `create`-op payload
+/// used by `ti migrate` v1→v2. Only present (non-`None`) fields are included;
+/// values are the canonical current forms (legacy state folding already applied
+/// by [`build_ticket`]).
+fn snapshot_scalar_fields(t: &Ticket) -> BTreeMap<String, String> {
+    let mut f = BTreeMap::new();
+    f.insert("title".to_string(), t.title.clone());
+    f.insert("status".to_string(), t.status.as_str().to_string());
+    f.insert("state".to_string(), t.state.as_str().to_string());
+    if let Ok(s) = t.created_at.format(&Rfc3339) {
+        f.insert("created-at".to_string(), s);
+    }
+    f.insert("created-by".to_string(), t.created_by.clone());
+    if let Some(ref a) = t.assigned {
+        f.insert("assigned".to_string(), a.clone());
+    }
+    if let Some(ref c) = t.closed_by {
+        f.insert("closed-by".to_string(), c.clone());
+    }
+    if let Some(p) = t.priority {
+        f.insert("priority".to_string(), p.to_string());
+    }
+    if let Some(p) = t.points {
+        f.insert("points".to_string(), p.to_string());
+    }
+    if let Some(ref m) = t.milestone {
+        f.insert("milestone".to_string(), m.clone());
+    }
+    if let Some(ref c) = t.code {
+        f.insert("code".to_string(), c.clone());
+    }
+    if let Some(parent) = t.parent {
+        f.insert("parent".to_string(), parent.to_string());
+    }
+    if let Some(ref d) = t.description {
+        f.insert("description".to_string(), d.clone());
+    }
+    if let Some(ref s) = t.spec {
+        f.insert("spec".to_string(), s.clone());
+    }
+    f
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,6 +1893,230 @@ mod tests {
         assert!(store.list().unwrap().is_empty());
     }
 
+    fn one_field(field: &str, value: &str) -> OpKind {
+        let mut fields = BTreeMap::new();
+        fields.insert(field.to_string(), value.to_string());
+        OpKind::SetField { fields }
+    }
+
+    #[test]
+    fn append_and_load_ops_round_trips_and_replays() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        store
+            .append_op(&t.id, one_field("title", "renamed"))
+            .unwrap();
+        store.append_op(&t.id, one_field("priority", "2")).unwrap();
+
+        let ops = store.load_ops(&t.id).unwrap();
+        // create op (from `create`) + the two appended ops.
+        assert_eq!(ops.len(), 3);
+        let state = crate::oplog::replay(&ops);
+        assert_eq!(state.get("title").map(String::as_str), Some("renamed"));
+        assert_eq!(state.get("priority").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn append_op_increments_lamport_from_scan() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        // `create` already wrote a create op at lamport 0.
+        assert_eq!(store.next_lamport(&t.id).unwrap(), 1);
+        let op0 = store.append_op(&t.id, one_field("a", "1")).unwrap();
+        assert_eq!(op0.lamport, 1);
+        assert_eq!(store.next_lamport(&t.id).unwrap(), 2);
+        let op1 = store.append_op(&t.id, one_field("b", "2")).unwrap();
+        assert_eq!(op1.lamport, 2);
+    }
+
+    #[test]
+    fn signed_ops_verify_clean_with_published_identity() {
+        let (mut store, _td) = test_store();
+        let keydir = tempfile::tempdir().unwrap();
+        let key = keydir.path().join("id_ed25519");
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-C", "signer", "-q", "-f"])
+            .arg(&key)
+            .status()
+            .expect("ssh-keygen");
+        assert!(status.success());
+        store.set_signing_key(Some(key));
+
+        let t = store.create("signed", NewTicketOpts::default()).unwrap();
+        store.set_priority(&t.id, Some(1)).unwrap();
+
+        // Every op is signed.
+        let ops = store.load_ops(&t.id).unwrap();
+        assert!(ops
+            .iter()
+            .all(|o| o.signature.is_some() && o.signer.is_some()));
+
+        // The identity key was published.
+        let p = store.session().target(&Target::project());
+        assert!(p
+            .get_value(&keys::identity(store.email()))
+            .unwrap()
+            .is_some());
+
+        // verify is clean: valid signatures, no unsigned warnings.
+        let report = store.verify().unwrap();
+        let outcome = report.iter().find(|o| o.id == t.id).unwrap();
+        assert!(outcome.ok, "signed ops must verify: {:?}", outcome.issues);
+        assert!(
+            outcome.warnings.is_empty(),
+            "no unsigned warnings expected: {:?}",
+            outcome.warnings
+        );
+    }
+
+    #[test]
+    fn unsigned_ops_verify_ok_but_warn() {
+        let (store, _td) = test_store();
+        let t = store.create("unsigned", NewTicketOpts::default()).unwrap();
+        let report = store.verify().unwrap();
+        let outcome = report.iter().find(|o| o.id == t.id).unwrap();
+        assert!(outcome.ok, "unsigned ops are trusted by default");
+        assert!(
+            !outcome.warnings.is_empty(),
+            "unsigned ops should be flagged as warnings"
+        );
+    }
+
+    #[test]
+    fn verify_passes_healthy_and_flags_tampered_ops() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        store.set_priority(&t.id, Some(2)).unwrap();
+
+        let report = store.verify().unwrap();
+        assert!(
+            report.iter().all(|o| o.ok),
+            "healthy repo must verify clean: {report:?}"
+        );
+
+        // Tamper: overwrite an op key's value so its envelope id no longer
+        // matches the key hash nor its own recomputed content-id.
+        let p = store.session().target(&Target::project());
+        let pairs = p
+            .get_all_values(Some(&keys::ticket_ops_prefix(&t.id)))
+            .unwrap();
+        let (key, _) = pairs
+            .into_iter()
+            .find(|(k, _)| keys::parse_ticket_op(k).is_some())
+            .unwrap();
+        p.set(
+            &key,
+            "{\"id\":\"deadbeef\",\"lamport\":0,\"author\":\"x@y.z\",\
+             \"created_at\":\"1970-01-01T00:00:00Z\",\"format_version\":1,\
+             \"kind\":\"set-field\",\"payload\":{\"fields\":{\"title\":\"evil\"}}}",
+        )
+        .unwrap();
+
+        let report = store.verify().unwrap();
+        let outcome = report.iter().find(|o| o.id == t.id).unwrap();
+        assert!(!outcome.ok, "tampered op must be flagged");
+        assert!(!outcome.issues.is_empty());
+    }
+
+    #[test]
+    fn load_ignores_unknown_fields() {
+        // Forward-compat contract (roadmap step 3): a reader must tolerate
+        // fields a newer client added that it does not understand — it ignores
+        // them and keeps the known fields intact, never erroring. The op-log
+        // envelope extends this same guarantee to unknown op *kinds* in step 4.
+        let (store, _td) = test_store();
+        let t = store.create("keep me", NewTicketOpts::default()).unwrap();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&t.id, "future-widget"), "42")
+            .unwrap();
+        let loaded = store.load(&t.id).unwrap();
+        assert_eq!(loaded.title, "keep me");
+        assert_eq!(loaded.state, TicketState::New);
+    }
+
+    #[test]
+    fn create_stamps_current_format_version() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        let p = store.session().target(&Target::project());
+        match p
+            .get_value(&keys::ticket_field(&t.id, keys::FORMAT_VERSION_FIELD))
+            .unwrap()
+        {
+            Some(MetaValue::String(s)) => assert_eq!(s, "2"),
+            other => panic!("expected format-version string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_future_format_version() {
+        let (store, _td) = test_store();
+        let id = Uuid::new_v4();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&id, "title"), "future").unwrap();
+        p.set(&keys::ticket_field(&id, "status"), "open").unwrap();
+        p.set(&keys::ticket_field(&id, "state"), "new").unwrap();
+        p.set(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD), "999")
+            .unwrap();
+        let err = store.load(&id).unwrap_err();
+        assert!(
+            matches!(err, Error::FormatTooNew { .. }),
+            "expected FormatTooNew, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn migrate_converts_legacy_ticket_to_op_and_is_idempotent() {
+        let (store, _td) = test_store();
+        // A legacy ticket written as raw scalar keys, no ops, no version marker.
+        let id = Uuid::new_v4();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&id, "title"), "legacy").unwrap();
+        p.set(&keys::ticket_field(&id, "status"), "open").unwrap();
+        p.set(&keys::ticket_field(&id, "state"), "new").unwrap();
+        p.set(&keys::ticket_field(&id, "priority"), "3").unwrap();
+        p.set(&keys::ticket_field(&id, "created-by"), "old@example.com")
+            .unwrap();
+        p.set(
+            &keys::ticket_field(&id, "created-at"),
+            "2020-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+        // Dry-run reports the conversion but writes nothing.
+        let plan = store.migrate(false).unwrap();
+        let outcome = plan.iter().find(|o| o.id == id).expect("ticket in plan");
+        assert_eq!(outcome.from, None);
+        assert_eq!(outcome.to, 2);
+        assert!(outcome.changed);
+        assert!(store.load_ops(&id).unwrap().is_empty());
+
+        // Write converts: a create op appears, legacy scalar keys are gone,
+        // format-version is stamped, and the ticket still reads identically.
+        store.migrate(true).unwrap();
+        assert_eq!(store.load_ops(&id).unwrap().len(), 1);
+        assert!(p
+            .get_value(&keys::ticket_field(&id, "title"))
+            .unwrap()
+            .is_none());
+        let t = store.load(&id).unwrap();
+        assert_eq!(t.title, "legacy");
+        assert_eq!(t.priority, Some(3));
+        assert_eq!(t.created_by, "old@example.com");
+        match p
+            .get_value(&keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD))
+            .unwrap()
+        {
+            Some(MetaValue::String(s)) => assert_eq!(s, "2"),
+            other => panic!("expected stamped version, got {other:?}"),
+        }
+
+        // Idempotent: the ticket now has ops, so a second run is a no-op.
+        let plan = store.migrate(true).unwrap();
+        assert!(!plan.iter().find(|o| o.id == id).unwrap().changed);
+        assert_eq!(store.load_ops(&id).unwrap().len(), 1);
+    }
+
     #[test]
     fn state_change_persists() {
         let (store, _td) = test_store();
@@ -1586,7 +2249,10 @@ mod tests {
         store
             .set_lifecycle(&blocker.id, TicketStatus::Closed, TicketState::Resolved)
             .unwrap();
-        assert_eq!(store.load(&blocker.id).unwrap().status, TicketStatus::Closed);
+        assert_eq!(
+            store.load(&blocker.id).unwrap().status,
+            TicketStatus::Closed
+        );
     }
 
     #[test]
@@ -1603,7 +2269,10 @@ mod tests {
         store
             .set_lifecycle_forced(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
             .unwrap();
-        assert_eq!(store.load(&dependent.id).unwrap().status, TicketStatus::Closed);
+        assert_eq!(
+            store.load(&dependent.id).unwrap().status,
+            TicketStatus::Closed
+        );
 
         // Reopen, resolve the blocker, then a plain close succeeds.
         store
@@ -1613,7 +2282,10 @@ mod tests {
         store
             .set_lifecycle(&dependent.id, TicketStatus::Closed, TicketState::Resolved)
             .unwrap();
-        assert_eq!(store.load(&dependent.id).unwrap().status, TicketStatus::Closed);
+        assert_eq!(
+            store.load(&dependent.id).unwrap().status,
+            TicketStatus::Closed
+        );
     }
 
     #[test]

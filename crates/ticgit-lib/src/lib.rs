@@ -52,7 +52,9 @@
 
 pub mod error;
 pub mod keys;
+pub mod oplog;
 pub mod query;
+pub mod signing;
 pub mod store;
 pub mod ticket;
 pub mod writeup;
@@ -61,10 +63,11 @@ pub mod writeup;
 pub mod test_support;
 
 pub use error::{Error, Result};
+pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
 pub use query::{
     next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
-pub use store::TicketStore;
+pub use store::{MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
     validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
 };

@@ -27,6 +27,13 @@ pub const SCHEMA_VERSION_KEY: &str = "ticgit:schema-version";
 /// Current schema version written by this implementation.
 pub const SCHEMA_VERSION: &str = "1";
 
+/// Per-ticket format-version field name, e.g.
+/// `ticgit:tickets:<uuid>:format-version`. Absent means a pre-versioning
+/// (legacy) ticket; [`crate::store`] treats that as the current baseline for
+/// reads and `ti migrate` stamps it explicitly. Distinct from the project-wide
+/// [`SCHEMA_VERSION_KEY`] so a large repo can migrate incrementally.
+pub const FORMAT_VERSION_FIELD: &str = "format-version";
+
 /// Prefix for the per-ticket field keyspace; pass to
 /// `SessionTargetHandle::get_all_values` for project-wide ticket scans.
 #[must_use]
@@ -71,6 +78,53 @@ pub fn writeup_field(id: &Uuid, field: &str) -> String {
 #[must_use]
 pub fn ticket_meta_field(id: &Uuid, field: &str) -> String {
     ticket_field(id, &format!("meta:{field}"))
+}
+
+/// Zero-pad width for the Lamport component of an op key, so lexical
+/// prefix-scan order matches numeric Lamport order (no separate index).
+pub const OP_LAMPORT_WIDTH: usize = 20;
+
+/// Prefix for a single ticket's operation log, e.g.
+/// `ticgit:tickets:<uuid>:ops`. Pass to `get_all_values` to scan one ticket's
+/// ops.
+#[must_use]
+pub fn ticket_ops_prefix(id: &Uuid) -> String {
+    format!("{NS}:tickets:{id}:ops")
+}
+
+/// A single operation key: `ticgit:tickets:<uuid>:ops:<lamport>:<hash>`. The
+/// Lamport value is zero-padded to [`OP_LAMPORT_WIDTH`]; `hash` is the op's
+/// content-derived id, which tiebreaks equal Lamport values.
+#[must_use]
+pub fn ticket_op(id: &Uuid, lamport: u64, hash: &str) -> String {
+    format!(
+        "{NS}:tickets:{id}:ops:{lamport:0width$}:{hash}",
+        width = OP_LAMPORT_WIDTH
+    )
+}
+
+/// If `key` is an operation key, returns `(ticket_uuid, lamport, hash)`.
+/// Returns `None` for scalar fields, system keys, or anything malformed.
+#[must_use]
+pub fn parse_ticket_op(key: &str) -> Option<(Uuid, u64, &str)> {
+    let prefix = format!("{NS}:tickets:");
+    let rest = key.strip_prefix(&prefix)?;
+    let (uuid_part, rest) = rest.split_once(':')?;
+    let uuid = Uuid::parse_str(uuid_part).ok()?;
+    let rest = rest.strip_prefix("ops:")?;
+    let (lamport_part, hash) = rest.split_once(':')?;
+    if hash.is_empty() {
+        return None;
+    }
+    let lamport: u64 = lamport_part.parse().ok()?;
+    Some((uuid, lamport, hash))
+}
+
+/// Identity key mapping an email to its published SSH public key, e.g.
+/// `ticgit:identities:a@b.c`. Lets other clones verify op signatures (step 5).
+#[must_use]
+pub fn identity(email: &str) -> String {
+    format!("{NS}:identities:{email}")
 }
 
 /// A bare project-level system key, e.g. `ticgit:owners`.
@@ -254,6 +308,26 @@ mod tests {
         assert!(parse_writeup_field("ticgit:writeups").is_none());
         assert!(parse_writeup_field("ticgit:writeups:not-a-uuid:title").is_none());
         assert!(parse_writeup_field("foo:bar:baz").is_none());
+    }
+
+    #[test]
+    fn ticket_op_key_round_trips_and_sorts_numerically() {
+        let id = fixed_uuid();
+        let key = ticket_op(&id, 7, "abc123");
+        assert!(key.starts_with("ticgit:tickets:00000000-0000-0000-0000-000000000001:ops:"));
+        assert!(key.ends_with(":abc123"));
+
+        let (got_id, lamport, hash) = parse_ticket_op(&key).expect("should parse");
+        assert_eq!(got_id, id);
+        assert_eq!(lamport, 7);
+        assert_eq!(hash, "abc123");
+
+        // Zero-padding makes lexical key order match numeric Lamport order.
+        assert!(ticket_op(&id, 2, "h") < ticket_op(&id, 10, "h"));
+
+        // A scalar field key is not an op key.
+        assert!(parse_ticket_op(&ticket_field(&id, "title")).is_none());
+        assert!(parse_ticket_op("ticgit:tickets:not-a-uuid:ops:0:h").is_none());
     }
 
     #[test]
