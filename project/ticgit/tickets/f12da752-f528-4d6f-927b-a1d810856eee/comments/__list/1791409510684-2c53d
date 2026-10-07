@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Fixed in ffabd81, shipped v0.3.2 (dc24720, pushed to origin/master). Verified: fixed binary migrates plain-field tickets to v2 before first op; field incident c5e6d7 repaired and verify clean 39/39."}
