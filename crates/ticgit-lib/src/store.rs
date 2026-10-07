@@ -1270,30 +1270,7 @@ impl TicketStore {
             // scalar-key only and need conversion.
             let changed = !has_ops.contains(&id);
             if changed && write {
-                let ticket = build_ticket(id, fields.clone())
-                    .ok_or_else(|| Error::InvalidValue(format!("cannot migrate ticket {id}")))?;
-                let snapshot = snapshot_scalar_fields(&ticket);
-                let author = self.session.email().to_string();
-                let op = Op::new(
-                    0,
-                    &author,
-                    ticket.created_at,
-                    OpKind::Create { fields: snapshot },
-                )?;
-                p.set(
-                    &keys::ticket_op(&id, op.lamport, &op.id),
-                    serde_json::to_string(&op)?.as_str(),
-                )?;
-                // Remove the now-redundant legacy scalar keys (clean cutover).
-                for (field, _) in &fields {
-                    if is_op_managed_scalar(field) {
-                        p.remove(&keys::ticket_field(&id, field))?;
-                    }
-                }
-                p.set(
-                    &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
-                    CURRENT_TICKET_FORMAT.to_string().as_str(),
-                )?;
+                self.convert_legacy(&p, id, &fields)?;
             }
 
             out.push(MigrationOutcome {
@@ -1305,6 +1282,42 @@ impl TicketStore {
             });
         }
         Ok(out)
+    }
+
+    /// Convert one legacy (scalar-key, no-op) ticket: snapshot its scalar
+    /// fields into a `create` op at Lamport 0, drop the legacy scalar keys and
+    /// stamp the format-version marker.
+    fn convert_legacy(
+        &self,
+        p: &git_meta_lib::SessionTargetHandle<'_>,
+        id: Uuid,
+        fields: &[(String, MetaValue)],
+    ) -> Result<()> {
+        let ticket = build_ticket(id, fields.to_vec())
+            .ok_or_else(|| Error::InvalidValue(format!("cannot migrate ticket {id}")))?;
+        let snapshot = snapshot_scalar_fields(&ticket);
+        let author = self.session.email().to_string();
+        let op = Op::new(
+            0,
+            &author,
+            ticket.created_at,
+            OpKind::Create { fields: snapshot },
+        )?;
+        p.set(
+            &keys::ticket_op(&id, op.lamport, &op.id),
+            serde_json::to_string(&op)?.as_str(),
+        )?;
+        // Remove the now-redundant legacy scalar keys (clean cutover).
+        for (field, _) in fields {
+            if is_op_managed_scalar(field) {
+                p.remove(&keys::ticket_field(&id, field))?;
+            }
+        }
+        p.set(
+            &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+            CURRENT_TICKET_FORMAT.to_string().as_str(),
+        )?;
+        Ok(())
     }
 
     // -------------------------------------------------------------------
@@ -1331,7 +1344,25 @@ impl TicketStore {
     /// part of the key, so the write is to a fresh key (append-only, never an
     /// overwrite).
     pub fn append_op(&self, id: &Uuid, kind: OpKind) -> Result<Op> {
-        let lamport = self.next_lamport(id)?;
+        let mut lamport = self.next_lamport(id)?;
+        // A ticket with plain fields but no ops (legacy / never migrated) must
+        // get its `create` op first, or this op would land at Lamport 0 and the
+        // projection would discard the plain fields.
+        if lamport == 0 && !matches!(kind, OpKind::Create { .. }) {
+            let p = self.session.target(&Target::project());
+            let prefix = keys::ticket_prefix(id);
+            let fields: Vec<(String, MetaValue)> = p
+                .get_all_values(Some(&prefix))?
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    keys::parse_ticket_field(&k).map(|(_, f)| (f.to_string(), v))
+                })
+                .collect();
+            if !fields.is_empty() {
+                self.convert_legacy(&p, *id, &fields)?;
+                lamport = self.next_lamport(id)?;
+            }
+        }
         let author = self.session.email().to_string();
         let mut op = Op::new(lamport, &author, OffsetDateTime::now_utc(), kind)?;
         let p = self.session.target(&Target::project());
@@ -1927,6 +1958,29 @@ mod tests {
         assert_eq!(store.next_lamport(&t.id).unwrap(), 2);
         let op1 = store.append_op(&t.id, one_field("b", "2")).unwrap();
         assert_eq!(op1.lamport, 2);
+    }
+
+    #[test]
+    fn append_op_migrates_plain_field_ticket_first() {
+        let (store, _td) = test_store();
+        let id = Uuid::new_v4();
+        let p = store.session().target(&Target::project());
+        p.set(&keys::ticket_field(&id, "title"), "plain").unwrap();
+        p.set(&keys::ticket_field(&id, "status"), "open").unwrap();
+        p.set(&keys::ticket_field(&id, "state"), "new").unwrap();
+        p.set(&keys::ticket_field(&id, "created-by"), "old@example.com")
+            .unwrap();
+        p.set(
+            &keys::ticket_field(&id, "created-at"),
+            "2020-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+        let op = store.append_op(&id, one_field("priority", "2")).unwrap();
+        assert_eq!(op.lamport, 1);
+        let t = store.load(&id).unwrap();
+        assert_eq!(t.title, "plain");
+        assert_eq!(t.priority, Some(2));
     }
 
     #[test]
