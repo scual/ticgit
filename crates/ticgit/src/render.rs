@@ -1262,6 +1262,9 @@ fn highlight(cell: &str, needles: &[String], base: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0;
     for (start, end) in merged {
+        if !cell.is_char_boundary(start) || !cell.is_char_boundary(end) {
+            continue; // defensive: never slice mid-char
+        }
         out.push_str(&cell[cursor..start]);
         out.push_str(ANSI_BOLD);
         out.push_str(ANSI_YELLOW);
@@ -1484,11 +1487,11 @@ mod tests {
             "fix login timeout",
             TicketState::New,
         );
-        let refs = open_ticket_ref_lengths(&[ticket.clone()]);
+        let refs = open_ticket_ref_lengths(std::slice::from_ref(&ticket));
         let needles = vec!["login".to_string()];
 
         let colored = tickets_table_with_width(
-            &[ticket.clone()],
+            std::slice::from_ref(&ticket),
             None,
             &refs,
             100,
@@ -1503,7 +1506,7 @@ mod tests {
 
         // No needles => no highlight escape injected.
         let plain = tickets_table_with_width(
-            &[ticket],
+            std::slice::from_ref(&ticket),
             None,
             &refs,
             100,
