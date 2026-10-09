@@ -37,53 +37,111 @@
 
 - [ ] **Step 1: Write failing library tests**
 
-Add to the `#[cfg(test)] mod tests` block in `crates/ticgit-lib/src/query.rs`. These sit alongside the existing `search_matches_title_description_and_comments` test (which must keep passing unchanged).
+Add to the `#[cfg(test)] mod tests` block in `crates/ticgit-lib/src/query.rs`. These sit alongside the existing `search_matches_title_description_and_comments` test (which must keep passing unchanged) and reuse its `t(...)` fixture helper (signature: `t(title, status, state, tag, assigned, ts) -> Ticket`) and the module's `apply(tickets, &Filter)` entry point. Build `Filter` with `..Default::default()` exactly as that test does. `TicketStatus`, `TicketState`, `Comment`, and `OffsetDateTime` are already in scope in the test module.
 
 ```rust
 #[test]
 fn search_multi_term_is_and() {
-    let f = SearchFilter::parse("login timeout").unwrap();
-    let mut both = Ticket::new("fix login timeout on retry".into(), None);
-    let only_one = Ticket::new("login screen".into(), None);
-    assert!(f.matches(&both));
-    assert!(!f.matches(&only_one));
-    both.title = "LOGIN during TIMEOUT".into();
-    assert!(f.matches(&both)); // case-insensitive, order-independent
+    let both = t(
+        "fix LOGIN during TIMEOUT",
+        TicketStatus::Open,
+        TicketState::New,
+        None,
+        None,
+        1,
+    );
+    let only_one = t(
+        "login screen",
+        TicketStatus::Open,
+        TicketState::New,
+        None,
+        None,
+        2,
+    );
+    let out = apply(
+        vec![both.clone(), only_one],
+        &Filter {
+            search: Some(SearchFilter::parse("login timeout").unwrap()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].title, both.title); // AND, case-insensitive, order-independent
 }
 
 #[test]
 fn search_quoted_phrase_is_contiguous() {
-    let f = SearchFilter::parse("\"login timeout\"").unwrap();
-    let phrase = Ticket::new("fix login timeout bug".into(), None);
-    let apart = Ticket::new("login on the timeout screen".into(), None);
-    assert!(f.matches(&phrase));
-    assert!(!f.matches(&apart));
+    let phrase = t(
+        "fix login timeout bug",
+        TicketStatus::Open,
+        TicketState::New,
+        None,
+        None,
+        1,
+    );
+    let apart = t(
+        "login on the timeout screen",
+        TicketStatus::Open,
+        TicketState::New,
+        None,
+        None,
+        2,
+    );
+    let out = apply(
+        vec![phrase.clone(), apart],
+        &Filter {
+            search: Some(SearchFilter::parse("\"login timeout\"").unwrap()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].title, phrase.title);
 }
 
 #[test]
 fn search_per_term_scope() {
-    let f = SearchFilter::parse("title:login description:timeout").unwrap();
-    let hit = Ticket::new("login page".into(), Some("timeout after 30s".into()));
-    let miss_desc = Ticket::new("login page".into(), Some("no issue".into()));
-    let miss_title = Ticket::new("home page".into(), Some("timeout after 30s".into()));
-    assert!(f.matches(&hit));
-    assert!(!f.matches(&miss_desc));
-    assert!(!f.matches(&miss_title));
+    let mut hit = t("login page", TicketStatus::Open, TicketState::New, None, None, 1);
+    hit.description = Some("timeout after 30s".into());
+    let mut miss_desc = t("login page", TicketStatus::Open, TicketState::New, None, None, 2);
+    miss_desc.description = Some("no issue".into());
+    let mut miss_title = t("home page", TicketStatus::Open, TicketState::New, None, None, 3);
+    miss_title.description = Some("timeout after 30s".into());
+
+    let out = apply(
+        vec![hit.clone(), miss_desc, miss_title],
+        &Filter {
+            search: Some(SearchFilter::parse("title:login description:timeout").unwrap()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].title, hit.title);
 }
 
 #[test]
 fn search_is_unicode_case_insensitive() {
-    let f = SearchFilter::parse("CITTÀ").unwrap();
-    let t = Ticket::new("gestione città".into(), None);
-    assert!(f.matches(&t));
+    let ticket = t(
+        "gestione città",
+        TicketStatus::Open,
+        TicketState::New,
+        None,
+        None,
+        1,
+    );
+    let out = apply(
+        vec![ticket],
+        &Filter {
+            search: Some(SearchFilter::parse("CITTÀ").unwrap()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.len(), 1);
 }
 
 #[test]
 fn search_unknown_prefix_is_literal_needle() {
     // `foo:` is not a known scope, so the whole token is the needle (back-compat).
     let f = SearchFilter::parse("foo:bar").unwrap();
-    let t = Ticket::new("see foo:bar reference".into(), None);
-    assert!(f.matches(&t));
     assert_eq!(f.terms.len(), 1);
     assert_eq!(f.terms[0].scope, SearchScope::Any);
     assert_eq!(f.terms[0].needle, "foo:bar");
@@ -93,11 +151,17 @@ fn search_unknown_prefix_is_literal_needle() {
 fn search_empty_matches_everything() {
     let f = SearchFilter::parse("   ").unwrap();
     assert!(f.terms.is_empty());
-    assert!(f.matches(&Ticket::new("anything".into(), None)));
+    let ticket = t("anything", TicketStatus::Open, TicketState::New, None, None, 1);
+    let out = apply(
+        vec![ticket],
+        &Filter {
+            search: Some(f),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.len(), 1);
 }
 ```
-
-> Note on `Ticket::new`: confirm the constructor's exact signature in `crates/ticgit-lib/src/ticket.rs` before running. If it is not `Ticket::new(title, description)`, adapt these test fixtures to however tickets are built in the existing `query.rs` tests (mirror the existing `search_matches_title_description_and_comments` test's construction).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -273,10 +337,16 @@ git commit -m "feat(search): multi-term AND, quoted phrases, per-term scope, Uni
 
 Add to `crates/ticgit/src/render.rs`'s `#[cfg(test)] mod tests`. `strip_ansi` already exists in that module (line ~1592).
 
+The render test module already has a `ticket(id, title, state) -> Ticket` fixture helper (around line 1465) — use it. `id` must be a valid UUID string; reuse whatever UUID literal the neighboring tests pass to `ticket(...)`.
+
 ```rust
 #[test]
 fn list_highlights_search_term_in_title() {
-    let ticket = make_ticket("abc", "fix login timeout", TicketState::New);
+    let ticket = ticket(
+        "00000000-0000-0000-0000-000000000001",
+        "fix login timeout",
+        TicketState::New,
+    );
     let refs = open_ticket_ref_lengths(&[ticket.clone()]);
     let needles = vec!["login".to_string()];
 
@@ -308,7 +378,7 @@ fn list_highlights_search_term_in_title() {
 }
 ```
 
-> `make_ticket` is the existing helper used by the other render tests (it builds a `Ticket` with an id prefix, title, and state). Confirm its exact name/signature at the top of the render `mod tests` and match it; if the existing tests use a different constructor, mirror that.
+> If `00000000-0000-0000-0000-000000000001` collides with a UUID used by a neighboring test in the same module, pick any other valid UUID literal — the value is arbitrary for this test.
 
 - [ ] **Step 2: Run it to verify it fails**
 
