@@ -2114,6 +2114,124 @@ fn list_search_filters_title_description_and_comments() {
 }
 
 #[test]
+fn list_search_multi_term_and() {
+    let repo = TestRepo::new();
+    let both = create_ticket(&repo, "fix login timeout on retry");
+    let _one = create_ticket(&repo, "login screen polish");
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "login timeout", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], both);
+}
+
+#[test]
+fn list_search_quoted_phrase() {
+    let repo = TestRepo::new();
+    let phrase = create_ticket(&repo, "fix login timeout bug");
+    let _apart = create_ticket(&repo, "login on the timeout screen");
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "\"login timeout\"", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], phrase);
+}
+
+#[test]
+fn list_search_is_unicode_case_insensitive() {
+    let repo = TestRepo::new();
+    let hit = create_ticket(&repo, "gestione città");
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "CITTÀ", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], hit);
+}
+
+#[test]
+fn list_search_highlights_in_text_output_but_not_json() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "fix login timeout");
+
+    // Human table output carries the bold+yellow highlight escape.
+    let text = repo
+        .ti()
+        .args(["list", "--search", "login"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("\u{1b}[1m\u{1b}[33m"));
+
+    // JSON output is ANSI-free.
+    let json = repo
+        .ti()
+        .args(["list", "--search", "login", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json = String::from_utf8(json).unwrap();
+    assert!(!json.contains('\u{1b}'));
+}
+
+#[test]
+fn show_search_highlights_detail() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "fix login timeout");
+
+    let text = repo
+        .ti()
+        .args(["show", &id, "--search", "login"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("\u{1b}[1m\u{1b}[33m"));
+
+    // show --json stays ANSI-free even with --search.
+    let json = repo
+        .ti()
+        .args(["show", &id, "--search", "login", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json = String::from_utf8(json).unwrap();
+    assert!(!json.contains('\u{1b}'));
+}
+
+#[test]
 fn list_all_includes_non_open_tickets() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "closed ticket");
