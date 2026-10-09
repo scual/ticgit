@@ -34,6 +34,11 @@ pub struct Filter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchFilter {
+    pub terms: Vec<SearchTerm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchTerm {
     pub scope: SearchScope,
     pub needle: String,
 }
@@ -92,35 +97,42 @@ impl SortOrder {
 }
 
 impl SearchFilter {
+    /// Parse a search spec into AND-combined terms.
+    ///
+    /// Tokens split on whitespace, except a `"..."` run is one phrase token.
+    /// A token may carry a leading `scope:` prefix (`title:`,
+    /// `description:`/`desc:`, `comments:`/`comment:`); an unknown prefix is
+    /// left as part of the needle. Needles are lowercased (full Unicode).
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let spec = spec.trim();
-        if spec.is_empty() {
-            return Ok(SearchFilter {
-                scope: SearchScope::Any,
-                needle: String::new(),
-            });
-        }
-
-        if let Some((scope, needle)) = spec.split_once(':') {
-            if let Some(scope) = SearchScope::parse(scope) {
-                return Ok(SearchFilter {
-                    scope,
-                    needle: needle.to_ascii_lowercase(),
-                });
+        let mut terms = Vec::new();
+        for token in tokenize(spec) {
+            let (scope, needle) = match token.split_once(':') {
+                Some((prefix, rest)) => match SearchScope::parse(prefix) {
+                    Some(scope) => (scope, rest.to_string()),
+                    None => (SearchScope::Any, token.clone()),
+                },
+                None => (SearchScope::Any, token.clone()),
+            };
+            let needle = needle.to_lowercase();
+            if !needle.is_empty() {
+                terms.push(SearchTerm { scope, needle });
             }
         }
+        Ok(SearchFilter { terms })
+    }
 
-        Ok(SearchFilter {
-            scope: SearchScope::Any,
-            needle: spec.to_ascii_lowercase(),
-        })
+    /// Lowercased needles, for match highlighting in the renderers.
+    pub fn needles(&self) -> Vec<String> {
+        self.terms.iter().map(|term| term.needle.clone()).collect()
     }
 
     fn matches(&self, ticket: &Ticket) -> bool {
-        if self.needle.is_empty() {
-            return true;
-        }
+        self.terms.iter().all(|term| term.matches(ticket))
+    }
+}
 
+impl SearchTerm {
+    fn matches(&self, ticket: &Ticket) -> bool {
         match self.scope {
             SearchScope::Any => {
                 contains(&ticket.title, &self.needle)
@@ -155,6 +167,34 @@ impl SearchScope {
             _ => None,
         }
     }
+}
+
+/// Split a search spec into tokens: whitespace separates, `"..."` groups a
+/// phrase (quote chars are dropped, inner whitespace preserved). An unclosed
+/// quote runs to end of input.
+fn tokenize(spec: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut has_token = false;
+    for ch in spec.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            has_token = true;
+        } else if ch.is_whitespace() && !in_quotes {
+            if has_token {
+                tokens.push(std::mem::take(&mut cur));
+                has_token = false;
+            }
+        } else {
+            cur.push(ch);
+            has_token = true;
+        }
+    }
+    if has_token {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 /// Filter and sort `tickets` according to `filter`. Returns a new vec.
@@ -349,7 +389,7 @@ fn filter_tags(filter: &Filter) -> Vec<&String> {
 }
 
 fn contains(haystack: &str, needle: &str) -> bool {
-    haystack.to_ascii_lowercase().contains(needle)
+    haystack.to_lowercase().contains(needle)
 }
 
 fn state_rank(s: TicketState) -> u8 {
@@ -923,6 +963,156 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, comment.title);
+    }
+
+    #[test]
+    fn search_multi_term_is_and() {
+        let both = t(
+            "fix LOGIN during TIMEOUT",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        let only_one = t(
+            "login screen",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        );
+        let out = apply(
+            vec![both.clone(), only_one],
+            &Filter {
+                search: Some(SearchFilter::parse("login timeout").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, both.title); // AND, case-insensitive, order-independent
+    }
+
+    #[test]
+    fn search_quoted_phrase_is_contiguous() {
+        let phrase = t(
+            "fix login timeout bug",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        let apart = t(
+            "login on the timeout screen",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        );
+        let out = apply(
+            vec![phrase.clone(), apart],
+            &Filter {
+                search: Some(SearchFilter::parse("\"login timeout\"").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, phrase.title);
+    }
+
+    #[test]
+    fn search_per_term_scope() {
+        let mut hit = t(
+            "login page",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        hit.description = Some("timeout after 30s".into());
+        let mut miss_desc = t(
+            "login page",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        );
+        miss_desc.description = Some("no issue".into());
+        let mut miss_title = t(
+            "home page",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            3,
+        );
+        miss_title.description = Some("timeout after 30s".into());
+
+        let out = apply(
+            vec![hit.clone(), miss_desc, miss_title],
+            &Filter {
+                search: Some(SearchFilter::parse("title:login description:timeout").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, hit.title);
+    }
+
+    #[test]
+    fn search_is_unicode_case_insensitive() {
+        let ticket = t(
+            "gestione città",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        let out = apply(
+            vec![ticket],
+            &Filter {
+                search: Some(SearchFilter::parse("CITTÀ").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn search_unknown_prefix_is_literal_needle() {
+        // `foo:` is not a known scope, so the whole token is the needle (back-compat).
+        let f = SearchFilter::parse("foo:bar").unwrap();
+        assert_eq!(f.terms.len(), 1);
+        assert_eq!(f.terms[0].scope, SearchScope::Any);
+        assert_eq!(f.terms[0].needle, "foo:bar");
+    }
+
+    #[test]
+    fn search_empty_matches_everything() {
+        let f = SearchFilter::parse("   ").unwrap();
+        assert!(f.terms.is_empty());
+        let ticket = t(
+            "anything",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        let out = apply(
+            vec![ticket],
+            &Filter {
+                search: Some(f),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
     }
 
     // --- `ti next` queue (next_queue) ---------------------------------------
