@@ -266,6 +266,7 @@ pub fn run(args: Args) -> Result<()> {
         current.as_ref(),
         &open_ref_lengths,
         Some(&nicks),
+        &[],
     );
     if omitted > 0 {
         table.push_str(&format!("... and {omitted} more open issues\n"));

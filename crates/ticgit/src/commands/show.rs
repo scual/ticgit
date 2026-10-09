@@ -63,7 +63,7 @@ pub fn run(args: Args) -> Result<()> {
         let rels = render::build_rel_lookup(&all);
         print!(
             "{}",
-            render::ticket_detail(&ticket, Some(&nicks), Some(&rels))
+            render::ticket_detail(&ticket, Some(&nicks), Some(&rels), &[])
         );
         let by_id = render::by_id_map(&all);
         let tree = render::build_subissue_tree(&ticket, &by_id);
