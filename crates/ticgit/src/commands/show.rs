@@ -21,12 +21,23 @@ pub struct Args {
     /// Output only one JSON field, using a small jq-like path (e.g. `.title` or `.comments[0].body`).
     #[arg(long = "filter", num_args = 0..=1)]
     pub filter: Option<Option<String>>,
+
+    /// Highlight matches for this search spec (same syntax as `ti list --search`).
+    #[arg(long = "search")]
+    pub search: Option<String>,
 }
 
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let id = resolve_ticket(&store, args.ticket.as_deref())?;
     let ticket = store.load(&id)?;
+
+    let needles = match args.search.as_deref() {
+        Some(spec) => ticgit_lib::SearchFilter::parse(spec)
+            .map_err(|e| anyhow::anyhow!(e))?
+            .needles(),
+        None => Vec::new(),
+    };
 
     if matches!(args.filter, Some(None)) {
         print_filter_help();
@@ -63,7 +74,7 @@ pub fn run(args: Args) -> Result<()> {
         let rels = render::build_rel_lookup(&all);
         print!(
             "{}",
-            render::ticket_detail(&ticket, Some(&nicks), Some(&rels), &[])
+            render::ticket_detail(&ticket, Some(&nicks), Some(&rels), &needles)
         );
         let by_id = render::by_id_map(&all);
         let tree = render::build_subissue_tree(&ticket, &by_id);
