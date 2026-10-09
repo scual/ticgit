@@ -161,8 +161,11 @@
         <div class="terminal dark">
           <div class="term-header"><span>SEARCH</span></div>
           <div class="term-body">
-            <div class="line"><span class="prompt">$</span> ti list --search "parser"</div>
-            <div class="line dim">Searches title, description, and comments.</div>
+            <div class="line"><span class="prompt">$</span> ti list --search "parser recovery"</div>
+            <div class="line dim">Searches title, description, and comments. All terms must match (AND).</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti list --search "&quot;exact phrase&quot;"</div>
+            <div class="line dim">Quote to match a phrase; matches are highlighted in the results.</div>
             <div class="line">&nbsp;</div>
             <div class="line"><span class="prompt">$</span> ti list --search "title:parser"</div>
             <div class="line"><span class="prompt">$</span> ti list --search "comments:workaround"</div>

@@ -42,7 +42,9 @@ pub struct Args {
     #[arg(short = 'T', long = "only-tagged")]
     pub only_tagged: bool,
 
-    /// Search title, description, and comments. Use `title:term`, `description:term`, or `comments:term` to scope.
+    /// Search title, description, and comments. Space-separated terms must all
+    /// match (AND); quote a "phrase" to match it whole. Prefix a term with
+    /// `title:`, `description:`, or `comments:` to scope just that term.
     #[arg(long = "search")]
     pub search: Option<String>,
 
@@ -163,6 +165,10 @@ pub fn run(args: Args) -> Result<()> {
         Some(spec) => Some(SearchFilter::parse(spec).map_err(|e| anyhow::anyhow!(e))?),
         None => None,
     };
+    let search_needles = search
+        .as_ref()
+        .map(|filter| filter.needles())
+        .unwrap_or_default();
     let tag_match_all = match args.tag_mode.as_str() {
         "all" => true,
         "any" | "either" => false,
@@ -266,6 +272,7 @@ pub fn run(args: Args) -> Result<()> {
         current.as_ref(),
         &open_ref_lengths,
         Some(&nicks),
+        &search_needles,
     );
     if omitted > 0 {
         table.push_str(&format!("... and {omitted} more open issues\n"));

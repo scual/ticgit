@@ -214,6 +214,7 @@ fn display_assigned_short(assigned: Option<&str>, nicks: Option<&NickMap>) -> St
 }
 
 pub(crate) const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_GREEN: &str = "\x1b[32m";
@@ -224,7 +225,7 @@ const ANSI_CYAN: &str = "\x1b[36m";
 /// Render a list of tickets as a compact table. `current` (if any) gets a `*`.
 pub fn tickets_table(tickets: &[Ticket], current: Option<&uuid::Uuid>) -> String {
     let ref_lengths = open_ticket_ref_lengths(tickets);
-    tickets_table_with_refs(tickets, current, &ref_lengths, None)
+    tickets_table_with_refs(tickets, current, &ref_lengths, None, &[])
 }
 
 /// Render a list with caller-provided open-ticket short reference lengths.
@@ -233,6 +234,7 @@ pub fn tickets_table_with_refs(
     current: Option<&uuid::Uuid>,
     ref_lengths: &BTreeMap<uuid::Uuid, usize>,
     nicks: Option<&NickMap>,
+    needles: &[String],
 ) -> String {
     let width = crossterm::terminal::size()
         .map(|(columns, _)| columns as usize)
@@ -245,6 +247,7 @@ pub fn tickets_table_with_refs(
         width,
         OffsetDateTime::now_utc(),
         nicks,
+        needles,
     )
 }
 
@@ -390,6 +393,7 @@ fn tickets_table_with_width(
     width: usize,
     now: OffsetDateTime,
     nicks: Option<&NickMap>,
+    needles: &[String],
 ) -> String {
     let width = width.saturating_sub(1).max(1);
     let id_width = ref_lengths.values().copied().max().unwrap_or(6).max(6);
@@ -460,14 +464,13 @@ fn tickets_table_with_width(
             out.push(' ');
         }
         if t.children.is_empty() {
-            out.push_str(&ansi(
-                ANSI_BLUE,
-                &fit(&flatten(&t.title), layout.title_width),
-            ));
+            let cell = fit(&flatten(&t.title), layout.title_width);
+            out.push_str(&ansi(ANSI_BLUE, &highlight(&cell, needles, ANSI_BLUE)));
         } else {
             let suffix = format!(" [+{}]", t.children.len());
             let avail = layout.title_width.saturating_sub(suffix.len());
-            out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), avail)));
+            let cell = fit(&flatten(&t.title), avail);
+            out.push_str(&ansi(ANSI_BLUE, &highlight(&cell, needles, ANSI_BLUE)));
             out.push_str(&ansi(ANSI_DIM, &fit(&suffix, suffix.len())));
         }
         out.push(' ');
@@ -584,12 +587,20 @@ impl TableLayout {
 }
 
 /// Render a single ticket and its comments, resolving emails to nicks.
-pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>, rels: Option<&RelLookup>) -> String {
+pub fn ticket_detail(
+    t: &Ticket,
+    nicks: Option<&NickMap>,
+    rels: Option<&RelLookup>,
+    needles: &[String],
+) -> String {
     let mut out = String::new();
     let title_bar = "-".repeat(t.title.chars().count().max(20));
     out.push_str(&ansi(ANSI_DIM, &title_bar));
     out.push('\n');
-    out.push_str(&detail_field("Title", &ansi(ANSI_BLUE, &t.title)));
+    out.push_str(&detail_field(
+        "Title",
+        &ansi(ANSI_BLUE, &highlight(&t.title, needles, ANSI_BLUE)),
+    ));
     out.push_str(&detail_field("Id", &ansi(ANSI_CYAN, &t.id.to_string())));
     out.push_str(&detail_field(
         "Created",
@@ -666,7 +677,8 @@ pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>, rels: Option<&RelLooku
     match t.description.as_deref().filter(|d| !d.trim().is_empty()) {
         Some(description) => {
             out.push('\n');
-            out.push_str(&format!("  {}\n", description.replace('\n', "\n  ")));
+            let body = description.replace('\n', "\n  ");
+            out.push_str(&format!("  {}\n", highlight(&body, needles, "")));
         }
         None => {
             out.push_str("  ");
@@ -682,12 +694,13 @@ pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>, rels: Option<&RelLooku
         out.push('\n');
     } else {
         for c in &t.comments {
+            let body = c.body.replace('\n', "\n  ");
             out.push_str(&format!(
                 "\n{} {} {}\n  {}\n",
                 ansi(ANSI_CYAN, &display_name(&c.author, nicks)),
                 ansi(ANSI_DIM, "-"),
                 ansi(ANSI_DIM, &c.at.format(&Rfc3339).unwrap_or_default()),
-                c.body.replace('\n', "\n  "),
+                highlight(&body, needles, ""),
             ));
         }
     }
@@ -1204,6 +1217,66 @@ fn ansi(color: &str, value: &str) -> String {
     format!("{color}{value}{ANSI_RESET}")
 }
 
+/// Wrap each case-insensitive occurrence of a needle in bold yellow, then
+/// re-open `base` so the surrounding column color survives the reset.
+///
+/// Highlighting is cosmetic: if lowercasing changes the byte length of `cell`
+/// (rare — e.g. `İ`), byte offsets from the lowercased copy can't be mapped
+/// back safely, so we skip highlighting and return the cell unchanged. Search
+/// matching itself (Task 1) is unaffected.
+fn highlight(cell: &str, needles: &[String], base: &str) -> String {
+    if needles.is_empty() {
+        return cell.to_string();
+    }
+    let lower = cell.to_lowercase();
+    if lower.len() != cell.len() {
+        return cell.to_string();
+    }
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for needle in needles {
+        if needle.is_empty() {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(pos) = lower[from..].find(needle.as_str()) {
+            let start = from + pos;
+            let end = start + needle.len();
+            ranges.push((start, end));
+            from = end;
+        }
+    }
+    if ranges.is_empty() {
+        return cell.to_string();
+    }
+
+    ranges.sort_by_key(|&(start, _)| start);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut out = String::new();
+    let mut cursor = 0;
+    for (start, end) in merged {
+        if !cell.is_char_boundary(start) || !cell.is_char_boundary(end) {
+            continue; // defensive: never slice mid-char
+        }
+        out.push_str(&cell[cursor..start]);
+        out.push_str(ANSI_BOLD);
+        out.push_str(ANSI_YELLOW);
+        out.push_str(&cell[start..end]);
+        out.push_str(ANSI_RESET);
+        out.push_str(base);
+        cursor = end;
+    }
+    out.push_str(&cell[cursor..]);
+    out
+}
+
 fn detail_field(label: &str, value: &str) -> String {
     format!(
         "{}{} {value}\n",
@@ -1332,6 +1405,7 @@ mod tests {
             100,
             OffsetDateTime::UNIX_EPOCH,
             None,
+            &[],
         ));
 
         assert!(!table.contains("Pri"));
@@ -1360,6 +1434,7 @@ mod tests {
             54,
             OffsetDateTime::UNIX_EPOCH,
             None,
+            &[],
         ));
         assert!(!medium.contains("Pri"));
         assert!(medium.contains("Dt  P  Title"));
@@ -1374,6 +1449,7 @@ mod tests {
             46,
             OffsetDateTime::UNIX_EPOCH,
             None,
+            &[],
         ));
         assert!(!narrow.contains(" 2 "));
         assert!(!narrow.contains("Assgn"));
@@ -1396,11 +1472,49 @@ mod tests {
             80,
             OffsetDateTime::UNIX_EPOCH,
             None,
+            &[],
         ));
         let lines = table.lines().collect::<Vec<_>>();
 
         assert!(lines[0].contains("TicId"));
         assert!(lines[1].starts_with("---"));
+    }
+
+    #[test]
+    fn list_highlights_search_term_in_title() {
+        let ticket = ticket(
+            "00000000-0000-0000-0000-000000000001",
+            "fix login timeout",
+            TicketState::New,
+        );
+        let refs = open_ticket_ref_lengths(std::slice::from_ref(&ticket));
+        let needles = vec!["login".to_string()];
+
+        let colored = tickets_table_with_width(
+            std::slice::from_ref(&ticket),
+            None,
+            &refs,
+            100,
+            OffsetDateTime::UNIX_EPOCH,
+            None,
+            &needles,
+        );
+        // Bold + yellow escape is present around the match...
+        assert!(colored.contains("\x1b[1m\x1b[33m"));
+        // ...and the plain text is still intact after stripping ANSI.
+        assert!(strip_ansi(&colored).contains("fix login timeout"));
+
+        // No needles => no highlight escape injected.
+        let plain = tickets_table_with_width(
+            std::slice::from_ref(&ticket),
+            None,
+            &refs,
+            100,
+            OffsetDateTime::UNIX_EPOCH,
+            None,
+            &[],
+        );
+        assert!(!plain.contains("\x1b[1m\x1b[33m"));
     }
 
     #[test]
