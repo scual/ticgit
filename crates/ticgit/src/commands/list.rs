@@ -44,7 +44,8 @@ pub struct Args {
 
     /// Search title, description, and comments. Space-separated terms must all
     /// match (AND); quote a "phrase" to match it whole. Prefix a term with
-    /// `title:`, `description:`, or `comments:` to scope just that term.
+    /// `title:`, `description:`, or `comments:` to scope just that term; quote
+    /// the whole term (`"title:x"`) to search for that literal text.
     #[arg(long = "search")]
     pub search: Option<String>,
 

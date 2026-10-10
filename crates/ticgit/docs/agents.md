@@ -45,6 +45,7 @@ ti list --tag bug --order priority --markdown
 ti list --search "parser recovery" --markdown      # all terms must match (AND)
 ti list --search "\"exact phrase\"" --markdown      # quote to match a phrase
 ti list --search "title:timeout comments:retry" --markdown   # per-term scope
+ti list --search "\"title:timeout\"" --markdown   # quoted prefix = literal text, no scope
 ti list --status closed --markdown
 ti list --all --markdown
 ti mine --markdown
