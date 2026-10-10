@@ -148,8 +148,17 @@ pub struct TicketStore {
 impl TicketStore {
     /// Open a store for the git repo discovered from the current working
     /// directory.
+    ///
+    /// The store is rooted at the repo's **common** git directory, not the
+    /// per-worktree git directory. git-meta keeps `git-meta.sqlite` inside the
+    /// git-dir it is handed, so opening the per-worktree git-dir (what plain
+    /// `gix::discover` yields inside a linked worktree) would give every
+    /// worktree its own isolated ticket store. Resolving the common dir keeps
+    /// all worktrees of a repo on one shared store.
     pub fn discover() -> Result<Self> {
-        let session = Session::discover()?;
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let session = Session::open(repo.common_dir().to_owned())?;
         Self::ensure_schema(&session)?;
         Ok(Self {
             session,
@@ -1706,6 +1715,60 @@ impl TicketStore {
     pub fn push(&self, remote: Option<&str>) -> Result<()> {
         let _ = self.session.push_once(remote)?;
         Ok(())
+    }
+
+    /// Rebuild the local store from the git-meta refs, returning the ticket
+    /// count afterwards.
+    ///
+    /// Recovers tickets that live in `refs/{ns}/*` but are missing from the
+    /// local `git-meta.sqlite` — e.g. ops that were serialized and pushed from
+    /// a since-removed worktree yet never materialized into this checkout's
+    /// store, or a store file that was lost entirely.
+    ///
+    /// It drops the local serialization ref (`refs/{ns}/local/main`) so
+    /// git-meta cannot treat the store as already up-to-date, then
+    /// materializes every remote tracking ref, which re-applies the full
+    /// remote tree into the store. This is non-destructive: existing rows are
+    /// re-applied and nothing local is deleted.
+    ///
+    /// Requires at least one fetched remote tracking ref
+    /// (`refs/{ns}/remotes/*`). If none exists it returns an error without
+    /// touching any ref, so the only serialized copy is never dropped when it
+    /// cannot be rebuilt — run a sync first in that case.
+    pub fn reindex(&self) -> Result<usize> {
+        let ns = self.session.namespace().to_string();
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+
+        // Guard: refuse to drop the local ref unless there is a tracking ref to
+        // rebuild from, otherwise we would strand the only serialized copy.
+        let tracking_prefix = format!("refs/{ns}/remotes/");
+        let has_tracking = repo
+            .references()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .all()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .any(|r| r.name().as_bstr().to_string().starts_with(&tracking_prefix));
+        if !has_tracking {
+            return Err(Error::InvalidValue(format!(
+                "reindex needs a fetched meta ref (refs/{ns}/remotes/*); run a sync first"
+            )));
+        }
+
+        // Drop the local serialization ref so materialize re-applies the remote
+        // tree from scratch instead of short-circuiting as up-to-date.
+        let local_ref = format!("refs/{ns}/local/main");
+        if let Ok(reference) = repo.find_reference(&local_ref) {
+            reference
+                .delete()
+                .map_err(|e| Error::InvalidValue(format!("dropping {local_ref}: {e}")))?;
+        }
+
+        // Re-project every remote tracking ref into the store.
+        let _ = self.session.materialize(None)?;
+
+        Ok(self.list()?.len())
     }
 }
 

@@ -285,12 +285,19 @@ ti verify                     # check op-log integrity + signatures (--json/--ma
 ti verify --json              # non-zero exit if any ticket fails
 ti migrate                    # dry-run plan to roll tickets to the current format
 ti migrate --write            # apply it (idempotent); needed after upgrading ti
+ti reindex                    # rebuild the local store from refs/meta/* (--json)
 ```
 
 `ti verify` recomputes every operation's content id, confirms it matches the
 stored id, validates any signatures, and checks the log still projects to a
 valid ticket. Unsigned operations are trusted by default and reported as
 warnings, not failures.
+
+`ti reindex` rebuilds the local `git-meta.sqlite` from the git-meta refs. Use it
+to recover tickets that exist in `refs/meta/*` (e.g. synced from a since-removed
+worktree) but are missing from this checkout's store, or if the store file is
+lost. It re-applies the remote tracking ref and is non-destructive; run a sync
+first so the ref is present.
 
 Operations can be **signed** with your existing SSH key (git-signing style): set
 `TICGIT_SIGNING_KEY` to a private key path and new operations are signed with

@@ -26,6 +26,7 @@ pub mod priority;
 pub mod pull;
 pub mod push;
 pub mod recent;
+pub mod reindex;
 pub mod review;
 pub mod setup;
 pub mod show;

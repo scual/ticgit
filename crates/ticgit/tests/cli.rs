@@ -28,8 +28,14 @@ impl TestRepo {
     }
 
     fn ti(&self) -> assert_cmd::Command {
+        self.ti_in(self.dir.path())
+    }
+
+    /// Like [`ti`], but runs the binary from an arbitrary directory (e.g. a
+    /// linked worktree) while sharing the same hermetic state file.
+    fn ti_in(&self, cwd: &Path) -> assert_cmd::Command {
         let mut cmd = assert_cmd::Command::cargo_bin("ti").expect("ti binary");
-        cmd.current_dir(self.dir.path());
+        cmd.current_dir(cwd);
         cmd.env(
             "TICGIT_STATE_FILE",
             self.state_file.path().join("state.json"),
@@ -3425,4 +3431,106 @@ fn concurrent_edits_to_different_fields_both_survive_across_clones() {
             "milestone edit must survive the merge"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Linked git worktrees must share a single ticket store (git-meta.sqlite lives
+// under the common git-dir, not the per-worktree git-dir), and `ti reindex`
+// must be able to re-project that store from refs/meta/*.
+// ---------------------------------------------------------------------------
+
+/// A linked worktree reads the same tickets as the main checkout.
+#[test]
+fn linked_worktree_sees_main_checkout_tickets() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "main-tkt");
+
+    let wt = tempfile::tempdir().expect("worktree tempdir");
+    let wt_path = wt.path().join("linked");
+    git(
+        repo.dir.path(),
+        &["worktree", "add", "-q", wt_path.to_str().unwrap(), "HEAD"],
+    );
+
+    repo.ti_in(&wt_path)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main-tkt"));
+}
+
+/// A ticket created inside a linked worktree is visible from the main checkout,
+/// even after the worktree is removed — because both share one store.
+#[test]
+fn ticket_created_in_worktree_is_visible_in_main_checkout() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "main-tkt");
+
+    let wt = tempfile::tempdir().expect("worktree tempdir");
+    let wt_path = wt.path().join("linked");
+    git(
+        repo.dir.path(),
+        &["worktree", "add", "-q", wt_path.to_str().unwrap(), "HEAD"],
+    );
+
+    let wt_output = repo
+        .ti_in(&wt_path)
+        .args(["new", "--title", "wt-tkt", "--id-only"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let wt_id = String::from_utf8(wt_output).unwrap().trim().to_string();
+
+    git(
+        repo.dir.path(),
+        &["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+    );
+
+    repo.ti()
+        .args(["show", &wt_id, "--json"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wt-tkt"));
+}
+
+/// `ti reindex` rebuilds the local SQLite store from the git-meta refs after the
+/// store file is lost, recovering tickets that still live in refs/meta/*.
+#[test]
+fn reindex_rebuilds_store_from_meta_refs() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "durable ticket");
+    // Push to create the remote ref, then sync so the tracking ref
+    // refs/meta/remotes/main exists locally.
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Lose the local projection, leaving only refs/meta/*.
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    repo.ti().arg("reindex").assert().success();
+
+    repo.ti()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("durable ticket"));
 }

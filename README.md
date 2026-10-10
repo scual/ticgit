@@ -113,7 +113,7 @@ ti close <id>
 | **Views & import**  | `views` · `writeup` · `review` · `stats` · `import gh\|linear`                                             |
 | **Team**            | `users`                                                                                                    |
 | **Sync & setup**    | `sync` · `pull` · `push` · `init` · `setup` · `update`                                                     |
-| **Maintenance**     | `migrate` · `verify`                                                                                       |
+| **Maintenance**     | `migrate` · `verify` · `reindex`                                                                           |
 | **Agents**          | `agent` · any command with `--markdown`                                                                    |
 
 Run `ti` with no arguments for the grouped help menu, or `ti <command> --help` for flags.
