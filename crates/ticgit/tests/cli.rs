@@ -333,7 +333,7 @@ fn agent_prints_markdown_guide() {
         .stdout(predicate::str::contains("ti new -F /tmp/ticket.md"))
         .stdout(predicate::str::contains("ti list --markdown"))
         .stdout(predicate::str::contains("Prefer `--markdown`"))
-        .stdout(predicate::str::contains("ti close -t <id>"))
+        .stdout(predicate::str::contains("ti close <id>"))
         // The guide steers agents to --markdown for reading, while still
         // documenting --json for machine parsing.
         .stdout(predicate::str::contains("--json"));
@@ -1269,6 +1269,31 @@ fn close_resolves_current_ticket_and_clears_checkout() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
+fn close_accepts_ticket_flag_like_state() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "close via flag");
+
+    for flag in ["-t", "--ticket"] {
+        let target = create_ticket(&repo, "flag target");
+        let output = repo
+            .ti()
+            .args(["close", flag, &target, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["id"], target);
+        assert_eq!(json["status"], "closed");
+        assert_eq!(json["state"], "resolved");
+    }
+
+    // The positional form and the flag are mutually exclusive.
+    repo.ti().args(["close", &id, "-t", &id]).assert().failure();
 }
 
 #[test]

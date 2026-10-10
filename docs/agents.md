@@ -117,10 +117,10 @@ Useful updates:
 ```sh
 ti state blocked -t <id>
 ti state review -t <id>
-ti close -t <id>
+ti close <id>
 ```
 
-`ti close` resolves the ticket and records the current user as `closed_by`.
+`ti close` resolves the ticket and records the current user as `closed_by`. The id can be positional or `-t <id>`.
 
 ## Planning Fields
 
