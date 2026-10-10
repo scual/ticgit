@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::Parser;
 use ticgit_lib::{TicketState, TicketStatus};
 
-use crate::commands::{open_store, resolve_ticket, SessionGitDir};
+use crate::commands::{apply_lifecycle, open_store, resolve_ticket, SessionGitDir};
 use crate::render;
 use crate::session_state::State;
 
@@ -40,13 +40,13 @@ pub fn run(args: Args) -> Result<()> {
         &store,
         args.ticket_flag.as_deref().or(args.ticket.as_deref()),
     )?;
-    if args.force {
-        store.set_lifecycle_forced(&id, TicketStatus::Closed, TicketState::Resolved)?;
-    } else {
-        store
-            .set_lifecycle(&id, TicketStatus::Closed, TicketState::Resolved)
-            .map_err(|e| anyhow!("{e} (use --force to override)"))?;
-    }
+    apply_lifecycle(
+        &store,
+        &id,
+        TicketStatus::Closed,
+        TicketState::Resolved,
+        args.force,
+    )?;
 
     let git_dir = store.session().repo_git_dir();
     let mut state = State::load().unwrap_or_default();

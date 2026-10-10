@@ -2872,6 +2872,63 @@ fn pull_transfers_tickets_between_repos() {
 }
 
 #[test]
+fn pull_applies_fork_parent_change_to_op_based_ticket() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let first = create_ticket(&a, "first parent");
+    let second = create_ticket(&a, "second parent");
+    let child = create_subissue(&a, &first, "child");
+    a.ti().arg("push").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().args(["pull", &remote_url]).assert().success();
+    // A local edit gives the imported ticket an operation log.
+    b.ti()
+        .args(["priority", "2", "-t", &child])
+        .assert()
+        .success();
+
+    // The fork re-parents the child and publishes.
+    a.ti()
+        .args(["subissue", &second, "-t", &child])
+        .assert()
+        .success();
+    a.ti().arg("push").assert().success();
+
+    b.ti().args(["pull", &remote_url]).assert().success();
+
+    let out = b
+        .ti()
+        .args(["show", &child, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let t: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(t["parent"], second);
+    assert_eq!(t["priority"], 2);
+
+    let out = b
+        .ti()
+        .args(["verify", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["ok"], true);
+}
+
+#[test]
 fn stats_history_recent_and_mine_run() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "a ticket");

@@ -62,7 +62,7 @@ pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, C
 pub use query::{
     next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
-pub use store::{MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
+pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
     validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
 };

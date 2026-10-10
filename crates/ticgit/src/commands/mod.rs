@@ -42,8 +42,8 @@ pub mod verify;
 pub mod view;
 pub mod writeup;
 
-use anyhow::{Context, Result};
-use ticgit_lib::TicketStore;
+use anyhow::{anyhow, Context, Result};
+use ticgit_lib::{TicketState, TicketStatus, TicketStore};
 use uuid::Uuid;
 
 use crate::session_state::State;
@@ -89,4 +89,24 @@ impl SessionGitDir for ticgit_lib::Session {
             .map(|r| r.git_dir().to_path_buf())
             .unwrap_or_else(|_| std::path::PathBuf::from(".git"))
     }
+}
+
+/// Change a ticket's lifecycle for `ti close` / `ti state`. Without `force`,
+/// closing is rejected while the ticket has open sub-issues or dependencies;
+/// `force` is the only place the CLI bypasses those guards.
+pub fn apply_lifecycle(
+    store: &TicketStore,
+    id: &Uuid,
+    status: TicketStatus,
+    state: TicketState,
+    force: bool,
+) -> Result<()> {
+    if force {
+        store.set_lifecycle_forced(id, status, state)?;
+    } else {
+        store
+            .set_lifecycle(id, status, state)
+            .map_err(|e| anyhow!("{e} (use --force to override)"))?;
+    }
+    Ok(())
 }

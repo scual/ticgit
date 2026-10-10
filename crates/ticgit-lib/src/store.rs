@@ -68,6 +68,33 @@ pub struct MigrationOutcome {
     pub changed: bool,
 }
 
+/// Result of folding one fork ticket into the local store with
+/// [`TicketStore::merge_fork_ticket`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkMerge {
+    /// The ticket was unknown locally and has been imported.
+    Imported,
+    /// The ticket existed locally and the fork changed it.
+    Updated,
+    /// The ticket existed locally and already matched the fork.
+    Unchanged,
+}
+
+/// Scalars a fork overrides when it differs from the local ticket. The local
+/// `created-at`/`created-by` and `priority` are deliberately not mirrored.
+const FORK_MERGED_SCALARS: [&str; 10] = [
+    "title",
+    "description",
+    "spec",
+    "status",
+    "state",
+    "assigned",
+    "closed-by",
+    "points",
+    "milestone",
+    "code",
+];
+
 /// Per-ticket outcome of a [`TicketStore::verify`] run.
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyOutcome {
@@ -475,8 +502,8 @@ impl TicketStore {
     }
 
     /// Change a ticket's lifecycle without the open sub-issue and open
-    /// dependency guards. Used by the `--force` CLI path and by sync (where
-    /// the remote is authoritative).
+    /// dependency guards. Used by the `--force` CLI path; fork merges bypass the
+    /// guards on their own in [`Self::merge_fork_ticket`].
     pub fn set_lifecycle_forced(
         &self,
         id: &Uuid,
@@ -824,13 +851,7 @@ impl TicketStore {
     ) -> Result<()> {
         let email = self.session.email().to_string();
         validate_email(&email)?;
-        let payload = CommentBody {
-            author: email,
-            body: body.to_string(),
-        };
-        let json = serde_json::to_string(&payload)?;
-        handle.list_push(&keys::ticket_field(id, "comments"), &json)?;
-        Ok(())
+        push_comment_as(handle, id, &email, body)
     }
 
     // -------------------------------------------------------------------
@@ -1321,6 +1342,131 @@ impl TicketStore {
     }
 
     // -------------------------------------------------------------------
+    // Fork merge (`ti pull`)
+    // -------------------------------------------------------------------
+
+    /// Fold a ticket read from a fork into this store. An unknown ticket is
+    /// imported under its original id as a `create` op carrying the fork's
+    /// scalars; a known one gets a single op for the scalars where the fork
+    /// differs (the fork wins, except that a missing parent never clears a
+    /// local one), plus the union of tags and children, the fork's `meta:*`
+    /// values, and any comments not already present.
+    ///
+    /// The fork is authoritative here, so the open sub-issue and open
+    /// dependency close guards are not applied: mirroring a close never fails.
+    pub fn merge_fork_ticket(&self, remote: &Ticket) -> Result<ForkMerge> {
+        match self.load(&remote.id) {
+            Ok(local) => self.merge_fork_into(&local, remote),
+            Err(Error::NotFound(_)) => {
+                self.import_fork_ticket(remote)?;
+                Ok(ForkMerge::Imported)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn import_fork_ticket(&self, remote: &Ticket) -> Result<()> {
+        let p = self.project_handle();
+        let id = remote.id;
+
+        p.set(
+            &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+            CURRENT_TICKET_FORMAT.to_string().as_str(),
+        )?;
+        self.append_op(
+            &id,
+            OpKind::Create {
+                fields: snapshot_scalar_fields(remote),
+            },
+        )?;
+
+        for tag in &remote.tags {
+            p.set_add(&keys::ticket_field(&id, "tags"), tag)?;
+        }
+        for child_id in &remote.children {
+            p.set_add(&keys::ticket_field(&id, "children"), &child_id.to_string())?;
+        }
+        for (key, value) in &remote.meta {
+            p.set(&keys::ticket_meta_field(&id, key), value.as_str())?;
+        }
+        for comment in &remote.comments {
+            push_comment_as(&p, &id, &comment.author, &comment.body)?;
+        }
+        Ok(())
+    }
+
+    fn merge_fork_into(&self, local: &Ticket, remote: &Ticket) -> Result<ForkMerge> {
+        let id = &local.id;
+        let p = self.project_handle();
+        let mut changed = false;
+
+        let want = snapshot_scalar_fields(remote);
+        let have = snapshot_scalar_fields(local);
+        let mut set = BTreeMap::new();
+        let mut clear = Vec::new();
+        for field in FORK_MERGED_SCALARS.iter().copied().chain(["parent"]) {
+            match (want.get(field), have.get(field)) {
+                (Some(w), h) if h != Some(w) => {
+                    set.insert(field.to_string(), w.clone());
+                }
+                (None, Some(_)) if field != "parent" => clear.push(field.to_string()),
+                _ => {}
+            }
+        }
+        let new_parent = set.get("parent").and_then(|v| Uuid::parse_str(v).ok());
+        if !set.is_empty() || !clear.is_empty() {
+            self.apply_scalars(id, set, clear)?;
+            changed = true;
+        }
+        if let Some(new_parent) = new_parent {
+            // Keep the denormalized children sets in step with the parent op.
+            if let Some(old_parent) = local.parent {
+                p.set_remove(
+                    &keys::ticket_field(&old_parent, "children"),
+                    &id.to_string(),
+                )?;
+            }
+            p.set_add(
+                &keys::ticket_field(&new_parent, "children"),
+                &id.to_string(),
+            )?;
+        }
+
+        for tag in remote.tags.difference(&local.tags) {
+            p.set_add(&keys::ticket_field(id, "tags"), tag)?;
+            changed = true;
+        }
+        for (key, value) in &remote.meta {
+            if local.meta.get(key) != Some(value) {
+                p.set(&keys::ticket_meta_field(id, key), value.as_str())?;
+                changed = true;
+            }
+        }
+        for child_id in remote.children.difference(&local.children) {
+            p.set_add(&keys::ticket_field(id, "children"), &child_id.to_string())?;
+            changed = true;
+        }
+
+        let known: BTreeSet<(&str, &str)> = local
+            .comments
+            .iter()
+            .map(|c| (c.author.as_str(), c.body.as_str()))
+            .collect();
+        for comment in &remote.comments {
+            if !known.contains(&(comment.author.as_str(), comment.body.as_str())) {
+                push_comment_as(&p, id, &comment.author, &comment.body)?;
+                changed = true;
+            }
+        }
+
+        Ok(if changed {
+            ForkMerge::Updated
+        } else {
+            ForkMerge::Unchanged
+        })
+    }
+
+    // -------------------------------------------------------------------
     // Operation log (append-only, synced source of truth for scalars)
     // -------------------------------------------------------------------
 
@@ -1521,6 +1667,25 @@ impl TicketStore {
 // ---------------------------------------------------------------------------
 // Op-log projection
 // ---------------------------------------------------------------------------
+
+/// Append a comment attributed to `author` (the session user for new
+/// comments, the original author for fork import/merge).
+fn push_comment_as(
+    handle: &git_meta_lib::SessionTargetHandle<'_>,
+    id: &Uuid,
+    author: &str,
+    body: &str,
+) -> Result<()> {
+    let payload = CommentBody {
+        author: author.to_string(),
+        body: body.to_string(),
+    };
+    handle.list_push(
+        &keys::ticket_field(id, "comments"),
+        &serde_json::to_string(&payload)?,
+    )?;
+    Ok(())
+}
 
 /// Scalar singleton fields whose authority is the op-log once a ticket has any
 /// ops. Sets (`tags`, `children`, `depends_on`, `blocks`), `comments`, `meta:*`
@@ -2865,5 +3030,160 @@ mod tests {
         store.remove_dependency(&a.id, &b.id).unwrap();
         assert!(store.load(&a.id).unwrap().depends_on.is_empty());
         assert!(store.load(&b.id).unwrap().blocks.is_empty());
+    }
+
+    fn assert_verifies(store: &TicketStore) {
+        for outcome in store.verify().unwrap() {
+            assert!(outcome.ok, "{}: {:?}", outcome.short_id, outcome.issues);
+        }
+    }
+
+    #[test]
+    fn fork_import_emits_a_create_op_and_verifies() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let parent = fork.create("parent", NewTicketOpts::default()).unwrap();
+        let child = fork
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    comment: Some("hello".into()),
+                    tags: vec!["bug".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        fork.set_meta(&child.id, "env", "prod").unwrap();
+        let child = fork.load(&child.id).unwrap();
+
+        let parent = fork.load(&parent.id).unwrap();
+        assert_eq!(
+            local.merge_fork_ticket(&parent).unwrap(),
+            ForkMerge::Imported
+        );
+        assert_eq!(
+            local.merge_fork_ticket(&child).unwrap(),
+            ForkMerge::Imported
+        );
+
+        let imported = local.load(&child.id).unwrap();
+        assert_eq!(imported.title, "child");
+        assert_eq!(imported.parent, Some(parent.id));
+        assert_eq!(imported.created_by, child.created_by);
+        assert_eq!(imported.created_at, child.created_at);
+        assert!(imported.tags.contains("bug"));
+        assert_eq!(imported.meta.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(imported.comments.len(), 1);
+        assert_eq!(imported.comments[0].author, child.comments[0].author);
+        assert_eq!(local.load_ops(&child.id).unwrap().len(), 1);
+        assert_eq!(local.load(&parent.id).unwrap().children, parent.children);
+        assert_verifies(&local);
+    }
+
+    #[test]
+    fn fork_merge_applies_parent_change_to_op_based_ticket() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let first = fork.create("first", NewTicketOpts::default()).unwrap();
+        let second = fork.create("second", NewTicketOpts::default()).unwrap();
+        let child = fork
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(first.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for t in [&first, &second, &child] {
+            local.merge_fork_ticket(&fork.load(&t.id).unwrap()).unwrap();
+        }
+        // A local edit so the ticket has ops of its own.
+        local.set_priority(&child.id, Some(3)).unwrap();
+
+        fork.set_parent(&child.id, &second.id).unwrap();
+        let merged = local
+            .merge_fork_ticket(&fork.load(&child.id).unwrap())
+            .unwrap();
+
+        assert_eq!(merged, ForkMerge::Updated);
+        let after = local.load(&child.id).unwrap();
+        assert_eq!(after.parent, Some(second.id));
+        assert_eq!(after.priority, Some(3));
+        assert!(!local.load(&first.id).unwrap().children.contains(&child.id));
+        assert!(local.load(&second.id).unwrap().children.contains(&child.id));
+        assert_verifies(&local);
+
+        // Merging the same fork state again is a no-op.
+        assert_eq!(
+            local
+                .merge_fork_ticket(&fork.load(&child.id).unwrap())
+                .unwrap(),
+            ForkMerge::Unchanged
+        );
+    }
+
+    #[test]
+    fn fork_merge_does_not_clear_a_local_parent() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let parent = fork.create("parent", NewTicketOpts::default()).unwrap();
+        let child = fork
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for t in [&parent, &child] {
+            local.merge_fork_ticket(&fork.load(&t.id).unwrap()).unwrap();
+        }
+        fork.clear_parent(&child.id).unwrap();
+        local
+            .merge_fork_ticket(&fork.load(&child.id).unwrap())
+            .unwrap();
+        assert_eq!(local.load(&child.id).unwrap().parent, Some(parent.id));
+    }
+
+    #[test]
+    fn fork_merge_mirrors_a_close_despite_open_subissue_and_unions_the_rest() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let parent = fork.create("parent", NewTicketOpts::default()).unwrap();
+        local.merge_fork_ticket(&parent).unwrap();
+        // Locally the parent has an open sub-issue the fork does not know about.
+        let child = local
+            .create(
+                "local child",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        local.add_tag(&parent.id, "local-tag").unwrap();
+
+        fork.set_lifecycle(&parent.id, TicketStatus::Closed, TicketState::Resolved)
+            .unwrap();
+        fork.add_tag(&parent.id, "fork-tag").unwrap();
+        fork.add_comment(&parent.id, "from the fork").unwrap();
+        assert_eq!(
+            local
+                .merge_fork_ticket(&fork.load(&parent.id).unwrap())
+                .unwrap(),
+            ForkMerge::Updated
+        );
+
+        let after = local.load(&parent.id).unwrap();
+        assert_eq!(after.status, TicketStatus::Closed);
+        assert_eq!(after.state, TicketState::Resolved);
+        assert_eq!(after.closed_by.as_deref(), Some(fork.email()));
+        assert!(after.tags.contains("local-tag") && after.tags.contains("fork-tag"));
+        assert_eq!(after.comments.len(), 1);
+        assert!(after.children.contains(&child.id));
+        assert_verifies(&local);
     }
 }

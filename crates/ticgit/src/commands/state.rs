@@ -1,12 +1,12 @@
 use std::io::{self, IsTerminal};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::Select;
 use ticgit_lib::{Ticket, TicketLifecycle, TicketState};
 
-use crate::commands::{open_store, resolve_ticket};
+use crate::commands::{apply_lifecycle, open_store, resolve_ticket};
 use crate::render;
 
 #[derive(Debug, Parser)]
@@ -91,13 +91,7 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     let lifecycle = TicketLifecycle::parse(&lifecycle_spec)?;
-    if args.force {
-        store.set_lifecycle_forced(&id, lifecycle.status, lifecycle.state)?;
-    } else {
-        store
-            .set_lifecycle(&id, lifecycle.status, lifecycle.state)
-            .map_err(|e| anyhow!("{e} (use --force to override)"))?;
-    }
+    apply_lifecycle(&store, &id, lifecycle.status, lifecycle.state, args.force)?;
     let ticket = store.load(&id)?;
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
