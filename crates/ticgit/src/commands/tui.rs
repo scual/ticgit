@@ -28,9 +28,9 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use ticgit_lib::{
-    keys, query, Comment, Filter, MetaValue, NewTicketOpts, NewWriteupOpts, SortKey, SortOrder,
-    Target, Ticket, TicketLifecycle, TicketState, TicketStatus, TicketStore, Writeup,
-    WriteupStatus,
+    keys, matches_tags, priority_rank, query, Comment, Filter, MetaValue, NewTicketOpts,
+    NewWriteupOpts, SearchFilter, SortKey, SortOrder, Target, Ticket, TicketState, TicketStats,
+    TicketStatus, TicketStore, Writeup, WriteupStatus,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -69,7 +69,7 @@ const DETAIL_WIDTH_PERCENT_MIN: u16 = 35;
 const DETAIL_WIDTH_PERCENT_MAX: u16 = 80;
 const DETAIL_WIDTH_PERCENT_STEP: u16 = 5;
 
-use crate::commands::{open_store, SessionGitDir};
+use crate::commands::{open_store, resolve_base_lifecycle, SessionGitDir};
 use crate::editor;
 use crate::session_state::{IssueFocusColor, SavedView, State};
 use crate::timefmt::relative_time;
@@ -2062,8 +2062,13 @@ impl App {
         let inner = block.inner(area);
         let width = usize::from(inner.width);
         let height = usize::from(inner.height);
-        let stats = DashboardStats::from_tickets(&self.all_tickets);
-        let lines = dashboard_lines(&stats, &self.closed_at, width, height);
+        let stats = TicketStats::compute(
+            &self.all_tickets,
+            &self.closed_at,
+            OffsetDateTime::now_utc(),
+            short_assignee,
+        );
+        let lines = dashboard_lines(&stats, width, height);
         let dashboard = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
@@ -5457,26 +5462,13 @@ impl App {
 
     fn apply_saved_view(&mut self, name: &str, view: &SavedView) -> Result<()> {
         self.active_view_name = Some(name.to_string());
-        self.base_status = if view.all || view.state.is_some() {
-            None
-        } else if let Some(status) = view.status.as_deref() {
-            Some(TicketStatus::parse(status)?)
-        } else {
-            Some(TicketStatus::Open)
-        };
-        self.base_state = None;
-        if let Some(state) = view.state.as_deref() {
-            let lifecycle = TicketLifecycle::parse(state)?;
-            self.base_status = Some(lifecycle.status);
-            if TicketStatus::parse(state).is_err() {
-                self.base_state = Some(lifecycle.state);
-            }
-        }
+        (self.base_status, self.base_state) =
+            resolve_base_lifecycle(view.status.as_deref(), view.state.as_deref(), view.all)?;
         self.assigned_filter = view.assigned.clone();
         self.only_tagged = view.only_tagged;
         self.hide_subissues = !view.subissues;
         self.filter = view.search.clone().unwrap_or_default();
-        self.tag_filter = saved_view_tags(view).into_iter().collect();
+        self.tag_filter = view.tag_list().into_iter().collect();
         self.tag_filter_match_all = view.tag_match_all;
         self.sort_closed_desc = matches!(view.order.as_deref(), Some("closed.desc" | "closed"));
         self.sort_order = match view.order.as_deref() {
@@ -6545,7 +6537,7 @@ impl App {
         let Some(writeup) = self.selected_writeup() else {
             return Vec::new();
         };
-        let needle = self.input.trim().to_ascii_lowercase();
+        let search = parse_search(&self.input);
         self.tickets
             .iter()
             .enumerate()
@@ -6553,7 +6545,7 @@ impl App {
                 if writeup.tickets.contains(&ticket.id) {
                     return None;
                 }
-                if needle.is_empty() || ticket_matches(ticket, &needle) {
+                if search.matches(ticket) {
                     Some(idx)
                 } else {
                     None
@@ -7053,7 +7045,7 @@ impl App {
     }
 
     fn apply_filter(&mut self) {
-        let needle = self.filter.to_ascii_lowercase();
+        let search = parse_search(&self.filter);
         let hide_review_tickets = self.hide_review_tickets_in_issue_list();
         self.visible = self
             .tickets
@@ -7063,12 +7055,8 @@ impl App {
                 if hide_review_tickets && ticket.state == TicketState::Review {
                     return None;
                 }
-                if (needle.is_empty() || ticket_matches(ticket, &needle))
-                    && ticket_matches_tag_filter(
-                        ticket,
-                        &self.tag_filter,
-                        self.tag_filter_match_all,
-                    )
+                if search.matches(ticket)
+                    && matches_tags(ticket, &self.tag_filter, self.tag_filter_match_all)
                 {
                     Some(idx)
                 } else {
@@ -7196,6 +7184,7 @@ impl App {
 
     fn review_ticket_indices(&self) -> Vec<usize> {
         let needle = self.filter.to_ascii_lowercase();
+        let search = parse_search(&self.filter);
         self.all_tickets
             .iter()
             .enumerate()
@@ -7203,13 +7192,9 @@ impl App {
                 let review = self.ticket_reviews.get(&ticket.id)?;
                 if (self.show_all_reviews || review_is_open(ticket, review))
                     && (needle.is_empty()
-                        || ticket_matches(ticket, &needle)
+                        || search.matches(ticket)
                         || review_matches(review, &needle))
-                    && ticket_matches_tag_filter(
-                        ticket,
-                        &self.tag_filter,
-                        self.tag_filter_match_all,
-                    )
+                    && matches_tags(ticket, &self.tag_filter, self.tag_filter_match_all)
                 {
                     Some(idx)
                 } else {
@@ -8855,15 +8840,15 @@ fn parse_optional_i64(raw: &str, label: &str) -> Result<Option<i64>> {
 }
 
 fn compare_tui_tickets(a: &Ticket, b: &Ticket) -> std::cmp::Ordering {
-    priority_sort_key(a.priority)
-        .cmp(&priority_sort_key(b.priority))
+    priority_rank(a.priority)
+        .cmp(&priority_rank(b.priority))
         .then_with(|| b.created_at.cmp(&a.created_at))
         .then_with(|| a.id.cmp(&b.id))
 }
 
 fn compare_tui_writeups(a: &Writeup, b: &Writeup) -> std::cmp::Ordering {
-    priority_sort_key(a.priority)
-        .cmp(&priority_sort_key(b.priority))
+    priority_rank(a.priority)
+        .cmp(&priority_rank(b.priority))
         .then_with(|| writeup_recent_at(b).cmp(&writeup_recent_at(a)))
         .then_with(|| a.id.cmp(&b.id))
 }
@@ -8876,13 +8861,6 @@ fn closed_at_for(
         .get(&ticket.id)
         .copied()
         .unwrap_or(ticket.created_at)
-}
-
-fn priority_sort_key(priority: Option<i64>) -> (u8, i64) {
-    match priority {
-        Some(value) => (0, value),
-        None => (1, 0),
-    }
 }
 
 fn run_ti_sync_command() -> Result<SyncResult> {
@@ -12404,119 +12382,13 @@ fn writeup_table_header(width: usize, compact: bool) -> Line<'static> {
     table_header_line(&columns, width)
 }
 
-struct DashboardStats {
-    total: usize,
-    open: usize,
-    closed: usize,
-    with_comments: usize,
-    created_7d: usize,
-    states: Vec<(String, usize)>,
-    tags: Vec<(String, usize)>,
-    assignees: Vec<(String, usize)>,
-    recently_opened: Vec<(uuid::Uuid, String)>,
-    closed_tickets: Vec<(uuid::Uuid, OffsetDateTime, String)>,
-}
-
-impl DashboardStats {
-    fn from_tickets(tickets: &[Ticket]) -> Self {
-        let now = OffsetDateTime::now_utc();
-        let week_ago = now - time::Duration::days(7);
-        let mut open = 0;
-        let mut closed = 0;
-        let mut with_comments = 0;
-        let mut created_7d = 0;
-        let mut states = BTreeMap::<String, usize>::new();
-        let mut tags = BTreeMap::<String, usize>::new();
-        let mut assignees = BTreeMap::<String, usize>::new();
-        let mut recently_opened = Vec::new();
-        let mut closed_tickets = Vec::new();
-
-        for ticket in tickets {
-            match ticket.status {
-                TicketStatus::Open => open += 1,
-                TicketStatus::Closed => {
-                    closed += 1;
-                    closed_tickets.push((ticket.id, ticket.created_at, ticket.title.clone()));
-                }
-            }
-            if !ticket.comments.is_empty() {
-                with_comments += 1;
-            }
-            if ticket.created_at >= week_ago {
-                created_7d += 1;
-            }
-            *states.entry(ticket.state.as_str().to_string()).or_default() += 1;
-            for tag in &ticket.tags {
-                *tags.entry(tag.clone()).or_default() += 1;
-            }
-            if let Some(assigned) = &ticket.assigned {
-                *assignees.entry(short_assignee(assigned)).or_default() += 1;
-            }
-            recently_opened.push((ticket.id, ticket.title.clone()));
-        }
-
-        let sort_counts = |map: BTreeMap<String, usize>| {
-            let mut values = map.into_iter().collect::<Vec<_>>();
-            values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            values
-        };
-        recently_opened.sort_by(|a, b| {
-            ticket_created_at(tickets, b.0)
-                .cmp(&ticket_created_at(tickets, a.0))
-                .then_with(|| a.0.cmp(&b.0))
-        });
-
-        Self {
-            total: tickets.len(),
-            open,
-            closed,
-            with_comments,
-            created_7d,
-            states: sort_counts(states),
-            tags: sort_counts(tags),
-            assignees: sort_counts(assignees),
-            recently_opened,
-            closed_tickets,
-        }
-    }
-}
-
-fn ticket_created_at(tickets: &[Ticket], id: uuid::Uuid) -> OffsetDateTime {
-    tickets
-        .iter()
-        .find(|ticket| ticket.id == id)
-        .map(|ticket| ticket.created_at)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
-}
-
-fn dashboard_lines(
-    stats: &DashboardStats,
-    closed_at: &HashMap<uuid::Uuid, OffsetDateTime>,
-    width: usize,
-    height: usize,
-) -> Vec<Line<'static>> {
+fn dashboard_lines(stats: &TicketStats, width: usize, height: usize) -> Vec<Line<'static>> {
     if stats.total == 0 {
         return vec![Line::from(Span::styled(
             "No tickets.",
             Style::default().fg(Color::DarkGray),
         ))];
     }
-
-    let now = OffsetDateTime::now_utc();
-    let week_ago = now - time::Duration::days(7);
-    let mut recently_closed = stats
-        .closed_tickets
-        .iter()
-        .map(|(id, fallback, title)| {
-            let closed = closed_at.get(id).copied().unwrap_or(*fallback);
-            (*id, closed, title.clone())
-        })
-        .collect::<Vec<_>>();
-    recently_closed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let closed_7d = recently_closed
-        .iter()
-        .filter(|(_, closed, _)| *closed >= week_ago)
-        .count();
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
@@ -12553,7 +12425,7 @@ fn dashboard_lines(
         ),
         Span::styled(" opened  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("-{closed_7d}"),
+            format!("-{}", stats.closed_7d),
             Style::default().fg(Color::LightRed),
         ),
         Span::styled(
@@ -12602,7 +12474,8 @@ fn dashboard_lines(
     push_ticket_section(
         &mut lines,
         "Recently Closed",
-        &recently_closed
+        &stats
+            .recently_closed
             .iter()
             .map(|(id, _, title)| (*id, title.clone()))
             .collect::<Vec<_>>(),
@@ -13050,14 +12923,9 @@ fn flatten_display(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn ticket_matches(ticket: &Ticket, needle: &str) -> bool {
-    ticket.title.to_ascii_lowercase().contains(needle)
-        || ticket
-            .description
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .contains(needle)
+/// Parse the TUI `/` filter text with the same grammar as `ti list --search`.
+fn parse_search(spec: &str) -> SearchFilter {
+    SearchFilter::parse(spec).unwrap_or(SearchFilter { terms: Vec::new() })
 }
 
 fn writeup_matches(writeup: &Writeup, needle: &str) -> bool {
@@ -13106,33 +12974,11 @@ fn first_spec_line(spec: &str) -> &str {
         .unwrap_or("")
 }
 
-fn ticket_matches_tag_filter(
-    ticket: &Ticket,
-    tags: &BTreeSet<String>,
-    tag_filter_match_all: bool,
-) -> bool {
-    if tags.is_empty() {
-        return true;
-    }
-    if tag_filter_match_all {
-        tags.iter().all(|tag| ticket.tags.contains(tag))
-    } else {
-        tags.iter().any(|tag| ticket.tags.contains(tag))
-    }
-}
-
 fn split_tags(raw: &str) -> Vec<String> {
     raw.split(|c: char| c == ',' || c.is_whitespace())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-fn saved_view_tags(view: &SavedView) -> Vec<String> {
-    if !view.tags.is_empty() {
-        return view.tags.clone();
-    }
-    view.tag.iter().cloned().collect()
 }
 
 fn should_hide_review_tickets_in_issue_list(
@@ -14971,9 +14817,11 @@ mod tests {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
         let grandchild = uuid::Uuid::from_u128(3);
-        let tickets = [test_ticket(root, None, &[child]),
+        let tickets = [
+            test_ticket(root, None, &[child]),
             test_ticket(child, Some(root), &[grandchild]),
-            test_ticket(grandchild, Some(child), &[])];
+            test_ticket(grandchild, Some(child), &[]),
+        ];
         let ticket_by_id = tickets
             .iter()
             .map(|ticket| (ticket.id, ticket))
@@ -14988,8 +14836,10 @@ mod tests {
     fn issue_title_prefix_marks_parents_even_when_graph_is_hidden() {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
-        let tickets = [test_ticket(root, None, &[child]),
-            test_ticket(child, Some(root), &[])];
+        let tickets = [
+            test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[]),
+        ];
         let ticket_by_id = tickets
             .iter()
             .map(|ticket| (ticket.id, ticket))
@@ -15204,6 +15054,56 @@ meta/tickets\t1779106269\tMeta\t<meta@example.com>\n";
         assert_eq!(parse_git_commit_count(b"12\n"), Some(12));
         assert_eq!(parse_git_commit_count(b""), None);
         assert_eq!(parse_git_commit_count(b"not-a-count\n"), None);
+    }
+
+    #[test]
+    fn tui_filter_matches_the_same_tickets_as_list_search() {
+        let mut cafe = test_ticket(uuid::Uuid::new_v4(), None, &[]);
+        cafe.title = "Ünïcode CAFÉ menu".to_string();
+        let mut described = test_ticket(uuid::Uuid::new_v4(), None, &[]);
+        described.title = "plain".to_string();
+        described.description = Some("needs a deep clean".to_string());
+        let mut commented = test_ticket(uuid::Uuid::new_v4(), None, &[]);
+        commented.title = "other".to_string();
+        commented.comments.push(Comment {
+            author: "a@example.com".to_string(),
+            at: OffsetDateTime::UNIX_EPOCH,
+            body: "see café notes".to_string(),
+        });
+        let tickets = vec![cafe, described, commented];
+
+        for spec in [
+            "café",
+            "ÜNÏCODE",
+            "title:café",
+            "comments:café",
+            "description:clean",
+            "\"deep clean\"",
+            "\"title:menu\"",
+            "café menu",
+        ] {
+            let via_list = query::apply(
+                tickets.clone(),
+                &Filter {
+                    search: Some(SearchFilter::parse(spec).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|t| t.id)
+            .collect::<BTreeSet<_>>();
+            let search = parse_search(spec);
+            let via_tui = tickets
+                .iter()
+                .filter(|t| search.matches(t))
+                .map(|t| t.id)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(via_tui, via_list, "spec {spec:?}");
+        }
+        assert!(parse_search("title:café").matches(&tickets[0]));
+        assert!(!parse_search("title:café").matches(&tickets[2]));
+        assert!(parse_search("comments:café").matches(&tickets[2]));
+        assert!(parse_search("").matches(&tickets[1]));
     }
 
     fn test_ticket(id: uuid::Uuid, parent: Option<uuid::Uuid>, children: &[uuid::Uuid]) -> Ticket {

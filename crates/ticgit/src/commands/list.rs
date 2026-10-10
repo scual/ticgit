@@ -1,9 +1,9 @@
-use crate::commands::{open_store, SessionGitDir};
+use crate::commands::{open_store, resolve_base_lifecycle, SessionGitDir};
 use crate::render;
 use crate::session_state::{SavedView, State};
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketLifecycle, TicketStatus};
+use ticgit_lib::{Filter, SearchFilter, SortOrder};
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -125,7 +125,7 @@ pub fn run(args: Args) -> Result<()> {
             status: saved.status.clone(),
             all: saved.all,
             open: false,
-            tag: saved_tags(saved),
+            tag: saved.tag_list(),
             tag_mode: if saved.tag_match_all { "all" } else { "any" }.to_string(),
             assigned: saved.assigned.clone(),
             only_tagged: saved.only_tagged,
@@ -143,19 +143,8 @@ pub fn run(args: Args) -> Result<()> {
         args
     };
 
-    let mut status = match args.status.as_deref() {
-        Some(s) => Some(TicketStatus::parse(s)?),
-        None if args.all || args.state.is_some() => None,
-        None => Some(TicketStatus::Open),
-    };
-    let mut state = None;
-    if let Some(spec) = args.state.as_deref() {
-        let lifecycle = TicketLifecycle::parse(spec)?;
-        status = Some(lifecycle.status);
-        if TicketStatus::parse(spec).is_err() {
-            state = Some(lifecycle.state);
-        }
-    }
+    let (status, state) =
+        resolve_base_lifecycle(args.status.as_deref(), args.state.as_deref(), args.all)?;
     let order = match args.order.as_deref() {
         Some(spec) => Some(
             SortOrder::parse(spec).ok_or_else(|| anyhow::anyhow!("unknown sort order `{spec}`"))?,
@@ -292,13 +281,6 @@ fn terminal_table_limit(total: usize) -> usize {
 fn table_limit_for_rows(total: usize, rows: usize) -> usize {
     let reserved = if total > rows.saturating_sub(7) { 8 } else { 7 };
     rows.saturating_sub(reserved).max(1)
-}
-
-fn saved_tags(saved: &SavedView) -> Vec<String> {
-    if !saved.tags.is_empty() {
-        return saved.tags.clone();
-    }
-    saved.tag.iter().cloned().collect()
 }
 
 #[cfg(test)]

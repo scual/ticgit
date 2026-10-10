@@ -98,6 +98,16 @@ pub struct SavedView {
     pub columns: Vec<String>,
 }
 
+impl SavedView {
+    /// Tags the view filters on: `tags`, falling back to the legacy single `tag`.
+    pub fn tag_list(&self) -> Vec<String> {
+        if !self.tags.is_empty() {
+            return self.tags.clone();
+        }
+        self.tag.iter().cloned().collect()
+    }
+}
+
 fn is_false(v: &bool) -> bool {
     !v
 }

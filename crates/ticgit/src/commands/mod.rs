@@ -44,7 +44,7 @@ pub mod view;
 pub mod writeup;
 
 use anyhow::{anyhow, Context, Result};
-use ticgit_lib::{TicketState, TicketStatus, TicketStore};
+use ticgit_lib::{TicketLifecycle, TicketState, TicketStatus, TicketStore};
 use uuid::Uuid;
 
 use crate::session_state::State;
@@ -110,4 +110,29 @@ pub fn apply_lifecycle(
             .map_err(|e| anyhow!("{e} (use --force to override)"))?;
     }
     Ok(())
+}
+
+/// Resolve the `--status` / `--state` / `--all` selectors of `ti list` (or a
+/// saved view) into the base status and state to filter on. Defaults to open
+/// tickets; `--all` or a `--state` lifts that default, and a state that is
+/// just a status name (`closed`) narrows only the status.
+pub(crate) fn resolve_base_lifecycle(
+    status: Option<&str>,
+    state: Option<&str>,
+    all: bool,
+) -> anyhow::Result<(Option<TicketStatus>, Option<TicketState>)> {
+    let mut base_status = match status {
+        Some(s) => Some(TicketStatus::parse(s)?),
+        None if all || state.is_some() => None,
+        None => Some(TicketStatus::Open),
+    };
+    let mut base_state = None;
+    if let Some(spec) = state {
+        let lifecycle = TicketLifecycle::parse(spec)?;
+        base_status = Some(lifecycle.status);
+        if TicketStatus::parse(spec).is_err() {
+            base_state = Some(lifecycle.state);
+        }
+    }
+    Ok((base_status, base_state))
 }
