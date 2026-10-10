@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
+use ticgit_lib::DepNode;
 use ticgit_lib::Ticket;
 use ticgit_lib::TicketStatus;
 use time::format_description::well_known::Rfc3339;
@@ -169,6 +170,70 @@ fn write_subissue_markdown(nodes: &[SubissueNode], depth: usize, out: &mut Strin
             markdown_inline(&flatten(&n.title))
         );
         write_subissue_markdown(&n.subissues, depth + 1, out);
+    }
+}
+
+/// Render a transitive dependency tree (see `ticgit_lib::dependency_tree`) as
+/// indented plain text, two spaces per level. Returns an empty string for no
+/// nodes (callers print their own "no blockers" line).
+pub fn dep_tree_text(nodes: &[DepNode]) -> String {
+    let mut out = String::new();
+    write_dep_text(nodes, 1, &mut out);
+    out
+}
+
+fn write_dep_text(nodes: &[DepNode], depth: usize, out: &mut String) {
+    for n in nodes {
+        let indent = "  ".repeat(depth);
+        let _ = writeln!(
+            out,
+            "{indent}{} {}  {}",
+            short_hex(&n.id),
+            n.state.as_str(),
+            flatten(&n.title)
+        );
+        write_dep_text(&n.children, depth + 1, out);
+    }
+}
+
+/// Render a dependency tree as a recursive JSON array. Each element is
+/// `{ id, title, state, status, children }`. Returns `[]` for no nodes.
+pub fn dep_tree_json(nodes: &[DepNode]) -> serde_json::Value {
+    serde_json::Value::Array(
+        nodes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id.to_string(),
+                    "title": n.title,
+                    "state": n.state.as_str(),
+                    "status": n.status.as_str(),
+                    "children": dep_tree_json(&n.children),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Render a dependency tree as a nested Markdown bullet list (no header).
+/// Returns an empty string when there are no nodes.
+pub fn dep_tree_markdown(nodes: &[DepNode]) -> String {
+    let mut out = String::new();
+    write_dep_markdown(nodes, 0, &mut out);
+    out
+}
+
+fn write_dep_markdown(nodes: &[DepNode], depth: usize, out: &mut String) {
+    for n in nodes {
+        let indent = "  ".repeat(depth);
+        let _ = writeln!(
+            out,
+            "{indent}- {} `{}` — {}",
+            short_hex(&n.id),
+            n.state.as_str(),
+            markdown_inline(&flatten(&n.title))
+        );
+        write_dep_markdown(&n.children, depth + 1, out);
     }
 }
 

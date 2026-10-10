@@ -1954,6 +1954,132 @@ fn at_sentinel_without_checkout_fails() {
         .stderr(predicate::str::contains("ti checkout"));
 }
 
+/// Build a blocker chain A depends on B depends on C and return (a, b, c).
+fn deps_chain(repo: &TestRepo) -> (String, String, String) {
+    let a = create_ticket(repo, "A");
+    let b = create_ticket(repo, "B");
+    let c = create_ticket(repo, "C");
+    repo.ti()
+        .args(["depends", "--ticket", &a, &b])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["depends", "--ticket", &b, &c])
+        .assert()
+        .success();
+    (a, b, c)
+}
+
+#[test]
+fn deps_shows_transitive_blockers_tree() {
+    let repo = TestRepo::new();
+    let (a, b, c) = deps_chain(&repo);
+
+    let output = repo
+        .ti()
+        .args(["deps", &a, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tree["direction"], "blockers");
+    let nodes = tree["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], b);
+    let grandchildren = nodes[0]["children"].as_array().unwrap();
+    assert_eq!(grandchildren.len(), 1);
+    assert_eq!(grandchildren[0]["id"], c);
+}
+
+#[test]
+fn deps_dependents_flips_direction() {
+    let repo = TestRepo::new();
+    let (a, b, c) = deps_chain(&repo);
+
+    let output = repo
+        .ti()
+        .args(["deps", &c, "--dependents", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tree["direction"], "dependents");
+    let nodes = tree["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], b);
+    assert_eq!(nodes[0]["children"][0]["id"], a);
+}
+
+#[test]
+fn deps_prunes_closed_by_default_but_includes_with_all() {
+    let repo = TestRepo::new();
+    let (a, b, _c) = deps_chain(&repo);
+    // B blocks on open C; --force closes it anyway (we're testing the walk).
+    repo.ti().args(["close", &b, "--force"]).assert().success();
+
+    // Default: closed B (and C beneath it) are pruned.
+    let output = repo
+        .ti()
+        .args(["deps", &a, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: Value = serde_json::from_slice(&output).unwrap();
+    assert!(tree["nodes"].as_array().unwrap().is_empty());
+
+    // --all: B reappears and the walk continues.
+    let output = repo
+        .ti()
+        .args(["deps", &a, "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: Value = serde_json::from_slice(&output).unwrap();
+    let nodes = tree["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], b);
+    assert_eq!(nodes[0]["status"], "closed");
+}
+
+#[test]
+fn deps_resolves_at_sentinel() {
+    let repo = TestRepo::new();
+    let (a, b, _c) = deps_chain(&repo);
+    repo.ti().args(["checkout", &a]).assert().success();
+
+    let output = repo
+        .ti()
+        .args(["deps", "@", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tree["ticket"], a);
+    assert_eq!(tree["nodes"][0]["id"], b);
+}
+
+#[test]
+fn deps_text_output_renders_tree() {
+    let repo = TestRepo::new();
+    let (a, _b, _c) = deps_chain(&repo);
+
+    repo.ti()
+        .args(["deps", &a])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("A").or(predicate::str::contains("Blockers")));
+}
+
 #[test]
 fn writeup_workflow_creates_versions_links_and_promotes() {
     let repo = TestRepo::new();

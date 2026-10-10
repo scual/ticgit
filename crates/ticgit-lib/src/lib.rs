@@ -63,8 +63,8 @@ pub use error::{Error, Result};
 pub use history::{HistoryAction, HistoryEntry};
 pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
 pub use query::{
-    matches_tags, next_queue, priority_rank, Filter, NextOptions, SearchFilter, SearchScope,
-    SortKey, SortOrder, DEFERRED_TAGS,
+    dependency_tree, matches_tags, next_queue, priority_rank, DepDirection, DepNode, Filter,
+    NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
 pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
