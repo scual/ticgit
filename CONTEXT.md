@@ -78,6 +78,24 @@ _Avoid_: Using Blocked to mean deferred, or a large Priority number to shelve wo
 **Next queue**:
 The ordering `ti next` uses to pick one ticket to work on. It excludes Closed tickets, Sub-issues, tickets with an unfinished Dependency, and Deferred tickets, then orders the rest by Priority (unprioritised last), then State (Blocked last), then oldest-created first.
 
+### Searching
+
+**Search**:
+A text query over tickets, made of one or more Search terms that must all match. An empty Search matches every ticket. Matching is case-insensitive across all languages, not just ASCII.
+_Avoid_: Filter (a Search is only one kind of filter), query
+
+**Search term**:
+One unit of a Search: a needle plus the Search scope it must be found in. Terms are separated by whitespace and combine with AND.
+_Avoid_: Keyword, token
+
+**Search scope**:
+The part of a ticket a Search term looks in: title, description, or comments. A term with no scope looks in all three.
+_Avoid_: Field (ticket fields are a storage concept), column
+
+**Phrase**:
+A Search term in double quotes, matched as one contiguous string rather than as separate words. Quoting also escapes the scope prefix: `"title:foo"` searches for that literal text, while `title:"foo bar"` scopes the Phrase to the title.
+_Avoid_: Exact match, literal
+
 ### Storage and integrity
 
 **Operation log**:

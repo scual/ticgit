@@ -51,8 +51,11 @@ Two conventions repeat almost everywhere, so they're stated once here:
     --tag-mode <all|any>   How multiple --tag combine. Default: all.
 -a, --assigned <ASSIGNED>  Filter by assignee.
 -T, --only-tagged          Only tickets that have at least one tag.
-    --search <SEARCH>      Search title/description/comments. Scope with
-                           `title:term`, `description:term`, `comments:term`.
+    --search <SEARCH>      Search title/description/comments. Terms are ANDed;
+                           "quote a phrase". Scope a term with `title:term`,
+                           `description:term`, `comments:term` (also
+                           `title:"a phrase"`). Quoting the prefix, e.g.
+                           `"title:x"`, searches that literal text.
 -o, --order <ORDER>        Sort: priority, state, title.desc, created, assigned, …
     --subissues            Include sub-issues (hidden by default).
     --depends-on <ID>      Tickets that depend on this ticket.
@@ -68,6 +71,7 @@ Two conventions repeat almost everywhere, so they're stated once here:
     --filter [<FILTER>]    Output one JSON field via a small jq-like path,
                            e.g. `.title`, `.spec`, `.parent`, `.children`,
                            `.comments[0].body`.
+    --search <SEARCH>      Highlight matches (same syntax as `ti list --search`).
 ```
 Like `ti next`, the output includes the ticket's **open sub-issues as a recursive
 tree** (closed pruned); `--json` adds the same additive `subissues` array

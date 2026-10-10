@@ -102,16 +102,18 @@ impl SearchFilter {
     /// Tokens split on whitespace, except a `"..."` run is one phrase token.
     /// A token may carry a leading `scope:` prefix (`title:`,
     /// `description:`/`desc:`, `comments:`/`comment:`); an unknown prefix is
-    /// left as part of the needle. Needles are lowercased (full Unicode).
+    /// left as part of the needle. The prefix must be unquoted: quoting
+    /// escapes it, so `"title:foo"` searches for the literal text `title:foo`.
+    /// Needles are lowercased (full Unicode).
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut terms = Vec::new();
         for token in tokenize(spec) {
-            let (scope, needle) = match token.split_once(':') {
-                Some((prefix, rest)) => match SearchScope::parse(prefix) {
-                    Some(scope) => (scope, rest.to_string()),
-                    None => (SearchScope::Any, token.clone()),
+            let (scope, needle) = match token.colon {
+                Some(i) => match SearchScope::parse(&token.text[..i]) {
+                    Some(scope) => (scope, token.text[i + 1..].to_string()),
+                    None => (SearchScope::Any, token.text),
                 },
-                None => (SearchScope::Any, token.clone()),
+                None => (SearchScope::Any, token.text),
             };
             let needle = needle.to_lowercase();
             if !needle.is_empty() {
@@ -169,30 +171,48 @@ impl SearchScope {
     }
 }
 
+/// One whitespace-delimited unit of a search spec.
+struct Token {
+    text: String,
+    /// Byte index in `text` of an unquoted `:` that may end a scope prefix.
+    /// `None` once a quote has opened before any colon, so quoting escapes it.
+    colon: Option<usize>,
+}
+
 /// Split a search spec into tokens: whitespace separates, `"..."` groups a
 /// phrase (quote chars are dropped, inner whitespace preserved). An unclosed
 /// quote runs to end of input.
-fn tokenize(spec: &str) -> Vec<String> {
+fn tokenize(spec: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
+    let mut colon = None;
+    let mut quoted = false;
     let mut in_quotes = false;
     let mut has_token = false;
     for ch in spec.chars() {
         if ch == '"' {
             in_quotes = !in_quotes;
+            quoted = true;
             has_token = true;
         } else if ch.is_whitespace() && !in_quotes {
             if has_token {
-                tokens.push(std::mem::take(&mut cur));
+                tokens.push(Token {
+                    text: std::mem::take(&mut cur),
+                    colon: colon.take(),
+                });
                 has_token = false;
+                quoted = false;
             }
         } else {
+            if ch == ':' && !quoted && colon.is_none() {
+                colon = Some(cur.len());
+            }
             cur.push(ch);
             has_token = true;
         }
     }
     if has_token {
-        tokens.push(cur);
+        tokens.push(Token { text: cur, colon });
     }
     tokens
 }
@@ -1091,6 +1111,28 @@ mod tests {
         assert_eq!(f.terms.len(), 1);
         assert_eq!(f.terms[0].scope, SearchScope::Any);
         assert_eq!(f.terms[0].needle, "foo:bar");
+    }
+
+    #[test]
+    fn search_quotes_escape_scope_prefix() {
+        let f = SearchFilter::parse("\"title:foo\"").unwrap();
+        assert_eq!(f.terms.len(), 1);
+        assert_eq!(f.terms[0].scope, SearchScope::Any);
+        assert_eq!(f.terms[0].needle, "title:foo");
+
+        // A quoted space after the colon is part of the literal, not a stray
+        // leading space on a scoped needle.
+        let f = SearchFilter::parse("\"title: foo\"").unwrap();
+        assert_eq!(f.terms[0].scope, SearchScope::Any);
+        assert_eq!(f.terms[0].needle, "title: foo");
+    }
+
+    #[test]
+    fn search_unquoted_prefix_scopes_quoted_phrase() {
+        let f = SearchFilter::parse("title:\"login timeout\"").unwrap();
+        assert_eq!(f.terms.len(), 1);
+        assert_eq!(f.terms[0].scope, SearchScope::Title);
+        assert_eq!(f.terms[0].needle, "login timeout");
     }
 
     #[test]
