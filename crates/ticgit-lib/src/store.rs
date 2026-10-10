@@ -1500,9 +1500,7 @@ impl TicketStore {
             let fields: Vec<(String, MetaValue)> = p
                 .get_all_values(Some(&prefix))?
                 .into_iter()
-                .filter_map(|(k, v)| {
-                    keys::parse_ticket_field(&k).map(|(_, f)| (f.to_string(), v))
-                })
+                .filter_map(|(k, v)| keys::parse_ticket_field(&k).map(|(_, f)| (f.to_string(), v)))
                 .collect();
             if !fields.is_empty() {
                 self.convert_legacy(&p, *id, &fields)?;
@@ -1642,6 +1640,53 @@ impl TicketStore {
             }
         }
         Ok(ops)
+    }
+
+    #[cfg(test)]
+    fn set_meta_scalar_for_test(&self, id: &Uuid, field: &str, value: &str) {
+        let mut fields = BTreeMap::new();
+        fields.insert(field.to_string(), value.to_string());
+        self.append_op(id, OpKind::SetField { fields }).unwrap();
+    }
+
+    /// Readable change history for a ticket, newest first: one entry per field
+    /// change in the op log, plus comments. A ticket with no ops (legacy
+    /// format) gets a synthesized `Created` entry.
+    pub fn history(&self, id: &Uuid) -> Result<Vec<crate::history::HistoryEntry>> {
+        let ticket = self.load(id)?;
+        let ops = self.load_ops(id)?;
+        Ok(crate::history::project_history(
+            &ops,
+            &ticket.comments,
+            Some((ticket.created_at, &ticket.created_by, &ticket.title)),
+        ))
+    }
+
+    /// When a ticket was closed, from the op log. `None` if it is not closed
+    /// or has no op recording the close (legacy format).
+    pub fn closed_at(&self, id: &Uuid) -> Result<Option<OffsetDateTime>> {
+        Ok(crate::history::project_closed_at(&self.load_ops(id)?))
+    }
+
+    /// Close times for every closed ticket that has one, in a single scan.
+    pub fn closed_times(&self) -> Result<std::collections::HashMap<Uuid, OffsetDateTime>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut ops_by_id: BTreeMap<Uuid, Vec<Op>> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, _, _)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    ops_by_id
+                        .entry(id)
+                        .or_default()
+                        .push(serde_json::from_str::<Op>(&s)?);
+                }
+            }
+        }
+        Ok(ops_by_id
+            .into_iter()
+            .filter_map(|(id, ops)| crate::history::project_closed_at(&ops).map(|t| (id, t)))
+            .collect())
     }
 
     // -------------------------------------------------------------------
@@ -2334,6 +2379,57 @@ mod tests {
         let plan = store.migrate(true).unwrap();
         assert!(!plan.iter().find(|o| o.id == id).unwrap().changed);
         assert_eq!(store.load_ops(&id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn history_and_closed_at_come_from_the_op_log() {
+        let (store, _td) = test_store();
+        let t = store.create("hist", NewTicketOpts::default()).unwrap();
+        assert_eq!(store.closed_at(&t.id).unwrap(), None);
+        store.set_state(&t.id, TicketState::InProgress).unwrap();
+        store.add_comment(&t.id, "working").unwrap();
+        let before = OffsetDateTime::now_utc();
+        store.set_state(&t.id, TicketState::Resolved).unwrap();
+
+        let history = store.history(&t.id).unwrap();
+        let has = |field: &str, value: &str| {
+            history
+                .iter()
+                .any(|e| e.field == field && e.value.as_deref() == Some(value))
+        };
+        assert!(has("title", "hist"));
+        assert!(has("state", "in-progress"));
+        assert!(has("status", "closed"));
+        assert!(has("state", "resolved"));
+        assert!(has("closed-by", store.email()));
+        assert!(has("comments", "working"));
+        assert!(
+            history.windows(2).all(|w| w[0].at >= w[1].at),
+            "newest first"
+        );
+
+        let closed = store.closed_at(&t.id).unwrap().expect("closed time");
+        assert!(closed >= before - time::Duration::seconds(1));
+        assert_eq!(store.closed_times().unwrap().get(&t.id), Some(&closed));
+
+        store.set_state(&t.id, TicketState::New).unwrap();
+        assert_eq!(store.closed_at(&t.id).unwrap(), None);
+    }
+
+    #[test]
+    fn closed_at_reflects_close_time_not_created_time() {
+        let (store, _td) = test_store();
+        let t = store.create("old", NewTicketOpts::default()).unwrap();
+        let long_ago = (OffsetDateTime::now_utc() - time::Duration::days(60))
+            .format(&Rfc3339)
+            .unwrap();
+        store.set_meta_scalar_for_test(&t.id, "created-at", &long_ago);
+        store.set_state(&t.id, TicketState::Resolved).unwrap();
+
+        let loaded = store.load(&t.id).unwrap();
+        assert!(loaded.created_at < OffsetDateTime::now_utc() - time::Duration::days(30));
+        let closed = store.closed_at(&t.id).unwrap().expect("closed time");
+        assert!(closed > OffsetDateTime::now_utc() - time::Duration::days(7));
     }
 
     #[test]

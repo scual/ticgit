@@ -46,6 +46,7 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
+    let closed_times = store.closed_times().unwrap_or_default();
     let now = OffsetDateTime::now_utc();
     let week_ago = now - time::Duration::days(7);
 
@@ -60,7 +61,7 @@ pub fn run(args: Args) -> Result<()> {
     let nick_map = crate::render::build_nick_map(&store.list_users().unwrap_or_default());
 
     let mut recently_opened: Vec<(OffsetDateTime, String, String)> = Vec::new();
-    // Collect recently closed tickets (by created_at as proxy for activity).
+    // Collect recently closed tickets (by close time, falling back to created_at).
     let mut recently_closed: Vec<(String, String)> = Vec::new(); // (short_id, title)
 
     for t in &tickets {
@@ -85,7 +86,8 @@ pub fn run(args: Args) -> Result<()> {
         if t.created_at >= week_ago {
             created_7d += 1;
         }
-        if t.status == ticgit_lib::TicketStatus::Closed && t.created_at >= week_ago {
+        let closed_time = closed_times.get(&t.id).copied().unwrap_or(t.created_at);
+        if t.status == ticgit_lib::TicketStatus::Closed && closed_time >= week_ago {
             closed_7d += 1;
         }
 

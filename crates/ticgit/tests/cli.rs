@@ -2929,6 +2929,47 @@ fn pull_applies_fork_parent_change_to_op_based_ticket() {
 }
 
 #[test]
+fn history_shows_readable_entries_without_raw_ops() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "hist ticket");
+    repo.ti()
+        .args(["state", "in-progress", "-t", &id])
+        .assert()
+        .success();
+    repo.ti().args(["close", "-t", &id]).assert().success();
+
+    let out = repo.ti().args(["history", "-t", &id]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("in-progress"), "{text}");
+    assert!(text.contains("closed"), "{text}");
+    assert!(!text.contains("ops:"), "raw op key leaked: {text}");
+    assert!(!text.contains("{\""), "raw JSON leaked: {text}");
+
+    let json = repo
+        .ti()
+        .args(["history", "-t", &id, "--json"])
+        .output()
+        .unwrap();
+    let entries: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["field"] == "status" && e["value"] == "closed"));
+}
+
+#[test]
+fn stats_counts_closed_by_close_time() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "to close");
+    repo.ti().args(["close", "-t", &id]).assert().success();
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["closed_7d"], 1);
+}
+
+#[test]
 fn stats_history_recent_and_mine_run() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "a ticket");

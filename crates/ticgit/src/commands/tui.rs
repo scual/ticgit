@@ -139,45 +139,6 @@ fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<
     Ok(())
 }
 
-fn load_closed_times(
-    git_dir: &std::path::Path,
-    tickets: &[Ticket],
-) -> HashMap<uuid::Uuid, OffsetDateTime> {
-    let db_path = git_dir.join("git-meta.sqlite");
-    let Ok(conn) =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    else {
-        return HashMap::new();
-    };
-
-    tickets
-        .iter()
-        .filter(|ticket| ticket.status == TicketStatus::Closed)
-        .filter_map(|ticket| {
-            query_closed_at(&conn, ticket.id).map(|closed_at| (ticket.id, closed_at))
-        })
-        .collect()
-}
-
-fn query_closed_at(conn: &rusqlite::Connection, id: uuid::Uuid) -> Option<OffsetDateTime> {
-    let status_key = format!("ticgit:tickets:{id}:status");
-    let closed_by_key = format!("ticgit:tickets:{id}:closed-by");
-    let timestamp_ms: i64 = conn
-        .query_row(
-            "SELECT timestamp \
-             FROM metadata_log \
-             WHERE target_type = 'project' \
-               AND operation != 'remove' \
-               AND ((key = ?1 AND value IN ('\"closed\"', 'closed')) OR key = ?2) \
-             ORDER BY timestamp DESC \
-             LIMIT 1",
-            rusqlite::params![status_key, closed_by_key],
-            |row| row.get(0),
-        )
-        .ok()?;
-    OffsetDateTime::from_unix_timestamp(timestamp_ms / 1000).ok()
-}
-
 struct App {
     store: TicketStore,
     all_tickets: Vec<Ticket>,
@@ -737,7 +698,7 @@ impl App {
 
     fn reload(&mut self, preferred_id: Option<uuid::Uuid>) -> Result<()> {
         let tickets = self.store.list()?;
-        self.closed_at = load_closed_times(&self.store.session().repo_git_dir(), &tickets);
+        self.closed_at = self.store.closed_times().unwrap_or_default();
         self.all_tickets = tickets.clone();
         self.ticket_reviews = load_ticket_reviews(&self.store, &tickets).unwrap_or_default();
         self.review_status_cache = load_review_status_cache(&self.store, &self.ticket_reviews);

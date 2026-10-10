@@ -3250,7 +3250,6 @@ dependencies = [
  "gix",
  "predicates",
  "ratatui",
- "rusqlite",
  "serde",
  "serde_json",
  "soe",

@@ -46,6 +46,7 @@
 //! docs and the stable JSON machine-output schema.
 
 pub mod error;
+pub mod history;
 pub mod keys;
 pub mod oplog;
 pub mod query;
@@ -58,6 +59,7 @@ pub mod writeup;
 pub mod test_support;
 
 pub use error::{Error, Result};
+pub use history::{HistoryAction, HistoryEntry};
 pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
 pub use query::{
     next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
