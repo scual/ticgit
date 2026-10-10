@@ -61,17 +61,36 @@ pub fn open_store() -> Result<TicketStore> {
 /// the currently checked-out ticket from session state.
 pub fn resolve_ticket(store: &TicketStore, explicit: Option<&str>) -> Result<Uuid> {
     if let Some(reference) = explicit {
-        return Ok(store.resolve_id(reference)?);
+        return resolve_ref(store, reference);
     }
+    current_ticket(store).ok_or_else(|| {
+        anyhow!(
+            "no ticket specified and none checked out - pass a ticket id or run `ti checkout <id>` first"
+        )
+    })
+}
 
+/// Resolve a user-supplied ticket reference, expanding the `@` sentinel to the
+/// currently checked-out ticket. Every other input defers to the store's id
+/// resolver (full UUID or unique prefix). Use this instead of
+/// `store.resolve_id` wherever a command accepts a ticket reference, so `@`
+/// works uniformly across the CLI.
+pub fn resolve_ref(store: &TicketStore, reference: &str) -> Result<Uuid> {
+    if reference.trim() == "@" {
+        return current_ticket(store).ok_or_else(|| {
+            anyhow!(
+                "`@` means the checked-out ticket, but none is checked out - run `ti checkout <id>` first"
+            )
+        });
+    }
+    Ok(store.resolve_id(reference)?)
+}
+
+/// The currently checked-out ticket for this repo, if any.
+fn current_ticket(store: &TicketStore) -> Option<Uuid> {
     let state = State::load().unwrap_or_default();
     let git_dir = store.session().repo_git_dir();
-    if let Some(id) = state.current_for(&git_dir) {
-        return Ok(id);
-    }
-    anyhow::bail!(
-        "no ticket specified and none checked out - pass a ticket id or run `ti checkout <id>` first"
-    );
+    state.current_for(&git_dir)
 }
 
 /// Tiny helper trait so we can ask the session for its git dir. We keep

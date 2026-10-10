@@ -7,7 +7,9 @@ when you need a specific flag. Grouped as the CLI groups them.
 Two conventions repeat almost everywhere, so they're stated once here:
 - **`-t, --ticket <id>`** — target a ticket by id or unique prefix; omit to use
   the checked-out ticket. (A few commands take the id **positionally** instead —
-  noted below where they differ.)
+  noted below where they differ.) The sentinel **`@`** means the checked-out
+  ticket anywhere an id is accepted — including required flag values that can't
+  default, e.g. `ti list --blocks @`.
 - **`--json` / `--markdown`** — output format; available on nearly every command.
   `--markdown` is preferred for reading (richer, suggests next commands).
 

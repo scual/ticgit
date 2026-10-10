@@ -1868,6 +1868,93 @@ fn list_blocks_view_save_and_replay_pins_full_id() {
 }
 
 #[test]
+fn at_sentinel_resolves_to_checked_out_ticket_in_show() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "the current one");
+
+    repo.ti().args(["checkout", &id]).assert().success();
+
+    let output = repo
+        .ti()
+        .args(["show", "@", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ticket: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(ticket["id"], id);
+}
+
+#[test]
+fn at_sentinel_resolves_in_blocks_filter() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+    // Check out the dependent; `--blocks @` should then mean `--blocks <dependent>`.
+    repo.ti().args(["checkout", &dependent]).assert().success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--blocks", "@", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tickets: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], blocker);
+}
+
+#[test]
+fn at_sentinel_in_saved_view_pins_full_id() {
+    let repo = TestRepo::new();
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+
+    repo.ti()
+        .args(["depends", "--ticket", &dependent, &blocker])
+        .assert()
+        .success();
+    repo.ti().args(["checkout", &dependent]).assert().success();
+
+    repo.ti()
+        .args(["list", "--all", "--blocks", "@"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["views", "save", "blockers"])
+        .assert()
+        .success();
+
+    // The view must pin the resolved full id, never the `@` sentinel.
+    repo.ti()
+        .args(["views"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("--blocks {dependent}")))
+        .stdout(predicate::str::contains("--blocks @").not());
+}
+
+#[test]
+fn at_sentinel_without_checkout_fails() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "a ticket exists but none is checked out");
+
+    repo.ti()
+        .args(["show", "@"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ti checkout"));
+}
+
+#[test]
 fn writeup_workflow_creates_versions_links_and_promotes() {
     let repo = TestRepo::new();
     let output = repo

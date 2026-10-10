@@ -167,17 +167,17 @@ pub fn run(args: Args) -> Result<()> {
     let depends_on = args
         .depends_on
         .as_deref()
-        .map(|reference| store.resolve_id(reference))
+        .map(|reference| super::resolve_ref(&store, reference))
         .transpose()?;
     let blocks = args
         .blocks
         .as_deref()
-        .map(|reference| store.resolve_id(reference))
+        .map(|reference| super::resolve_ref(&store, reference))
         .transpose()?;
     let parent = args
         .parent
         .as_deref()
-        .map(|reference| store.resolve_id(reference))
+        .map(|reference| super::resolve_ref(&store, reference))
         .transpose()?;
 
     let filter = Filter {

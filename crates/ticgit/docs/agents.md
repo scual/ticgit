@@ -9,7 +9,8 @@ TicGit stores tickets as Git metadata. Use `ti` for planning, progress notes,
 triage, and resolving work. Prefer commands with `--markdown` when reading
 ticket data because Markdown output includes useful context and next commands;
 every read and mutation also supports `--json` for machine parsing. Ids may be a
-full UUID or any unique prefix.
+full UUID or any unique prefix. The sentinel `@` stands for the checked-out
+ticket anywhere a ticket id is accepted (e.g. `ti show @`, `ti list --blocks @`).
 
 ## Basic Workflow
 

@@ -17,7 +17,9 @@ all 30+ subcommands. For the always-current upstream guide run `ti agent`.
 
 - **`-t, --ticket <id>`** targets a ticket by id or unique prefix. Omit it to act
   on the currently checked-out ticket (`ti checkout <id>` sets that). Short prefixes
-  are fine as long as they're unique.
+  are fine as long as they're unique. The sentinel **`@`** means the checked-out
+  ticket anywhere an id is accepted (e.g. `ti show @`, `ti list --blocks @`) —
+  handy for the required flag values that can't otherwise default.
 - **Read with `--markdown`** — richer than the default and it suggests useful
   next commands. `--json` is available on almost everything for scripting;
   `ti show --filter .field` extracts one field with a small jq-like path.
