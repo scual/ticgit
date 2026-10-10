@@ -9,7 +9,17 @@ use crate::session_state::State;
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Ticket id (or prefix). Defaults to the currently checked-out ticket.
+    #[arg(value_name = "TICKET")]
     pub ticket: Option<String>,
+
+    /// Ticket id (or prefix); same as the positional argument, matching `ti state -t`.
+    #[arg(
+        short = 't',
+        long = "ticket",
+        value_name = "TICKET",
+        conflicts_with = "ticket"
+    )]
+    pub ticket_flag: Option<String>,
 
     /// Output the updated ticket as JSON.
     #[arg(long = "json")]
@@ -26,7 +36,10 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
-    let id = resolve_ticket(&store, args.ticket.as_deref())?;
+    let id = resolve_ticket(
+        &store,
+        args.ticket_flag.as_deref().or(args.ticket.as_deref()),
+    )?;
     if args.force {
         store.set_lifecycle_forced(&id, TicketStatus::Closed, TicketState::Resolved)?;
     } else {

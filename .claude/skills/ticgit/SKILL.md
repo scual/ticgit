@@ -62,7 +62,7 @@ ti claim                     # assign to me + mark assigned
 ti comment -t <id> "found the failing case"   # progress / blockers / verification
 ti state in-progress -t <id> # lifecycle: status, state, or status:state
 ti state blocked -t <id>
-ti close <id>                # resolve (positional id, not -t); records closed_by
+ti close <id>                # resolve (id positional or -t); records closed_by
 ti delete <id> [<id>...] --yes          # permanently delete (positional ids); irreversible
 ti delete <parent> --recursive --yes    # also delete the whole sub-issue subtree
 ```

@@ -145,7 +145,7 @@ open: `new assigned in-progress blocked review` · closed: `resolved wontfix dup
 
 ### `ti close` — resolve a ticket
 ```
-[TICKET]                   Id/prefix (POSITIONAL, not -t). Defaults to checked-out.
+[TICKET] | -t, --ticket    Id/prefix, positional or flag (not both). Defaults to checked-out.
     --json / --markdown
 ```
 Shorthand for `ti state resolved`; records the current user as `closed_by`.
@@ -382,8 +382,8 @@ CLI version — useful when a new `ti` release adds subcommands not listed here.
 
 ## Notes & gotchas
 
-- **`ti close` takes the id positionally**, unlike most field/state commands
-  which use `-t`. `ti close <id>`, not `ti close -t <id>`.
+- **`ti close` takes the id positionally or via `-t`**: `ti close <id>` and
+  `ti close -t <id>` are equivalent (not both at once).
 - **`ti delete` is irreversible and non-interactive-safe only with `--yes`.**
   It takes ids positionally (like `close`), accepts several at once, and refuses
   to run in `--json`/`--markdown` or a non-TTY without `--yes`. Deleting a parent
