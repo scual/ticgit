@@ -48,6 +48,10 @@ Two crates (`Cargo.toml` is a virtual workspace, version is shared via
   `assigned`, `in-progress`, `blocked`, `review` when open; `resolved`,
   `wontfix`, `duplicate`, `invalid` when closed).
 - `query.rs` — `Filter` / `SearchFilter` / sort keys for `list`.
+- `stats.rs` — `TicketStats::compute`, the one aggregation behind `ti stats` and
+  the TUI dashboard. Search matching (`SearchFilter::matches`), tag matching
+  (`matches_tags`) and the Priority rank (`priority_rank`) live in `query.rs` and
+  are used by the CLI *and* the TUI — don't reimplement them in the TUI.
 - `writeup.rs` — "writeups": versioned markdown docs that can be promoted to tickets.
 - `error.rs` — `Error` / `Result`.
 
