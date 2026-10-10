@@ -109,7 +109,7 @@ ti close <id>
 | ------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **Create & browse** | `new` · `list`/`ls` · `show` · `recent` · `mine` · `history` · `tui`                                       |
 | **Work on tickets** | `checkout`/`co` · `next` · `edit` · `comment` · `state`/`status` · `close` · `delete`                      |
-| **Ticket fields**   | `tag` · `assign` · `priority` · `points` · `milestone` · `subissue` · `code` · `depends` · `spec` · `meta` |
+| **Ticket fields**   | `tag` · `assign` · `priority` · `points` · `milestone` · `subissue` · `code` · `depends` · `deps` · `spec` · `meta` |
 | **Views & import**  | `views` · `writeup` · `review` · `stats` · `import gh\|linear`                                             |
 | **Team**            | `users`                                                                                                    |
 | **Sync & setup**    | `sync` · `pull` · `push` · `init` · `setup` · `update`                                                     |

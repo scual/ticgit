@@ -245,6 +245,22 @@ All of these accept `-t, --ticket <id>` (default: checked-out) and
     --json / --markdown
 ```
 
+### `ti deps` — transitive dependency tree
+Walks the dependency chain and prints it as a tree. Unlike `ti list --depends-on`
+/ `--blocks` (direct relations only), this recurses.
+```
+[TICKET]                   Id/prefix/`@`. Defaults to the checked-out ticket.
+-t, --ticket <TICKET>      Same, as a flag.
+    --dependents           Downstream tree (what finishing this unblocks).
+                           Default is the upstream blockers tree.
+    --both                 Print both the blockers and dependents trees.
+    --all                  Include closed tickets (pruned by default) and keep
+                           walking through them.
+    --json / --markdown
+```
+Direction: default shows **blockers** (what the ticket waits on, via `depends_on`);
+`--dependents` shows **dependents** (what waits on the ticket, via `blocks`).
+
 ### `ti spec` — implementation spec
 ```
 [SPEC]                     Spec text. Omit to open $EDITOR, or --clear to remove.

@@ -4,6 +4,7 @@
 //! `-o ORDER` selectors, with a stable, testable semantics.
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use crate::ticket::{Ticket, TicketState, TicketStatus};
 use uuid::Uuid;
@@ -475,6 +476,83 @@ fn compare(a: &Ticket, b: &Ticket, key: SortKey, desc: bool) -> Ordering {
     } else {
         ord
     }
+}
+
+/// Which way [`dependency_tree`] walks the dependency graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepDirection {
+    /// Follow `depends_on` edges — the blockers a ticket waits on (upstream).
+    Blockers,
+    /// Follow `blocks` edges — the dependents waiting on a ticket (downstream).
+    Dependents,
+}
+
+/// A node in a transitive dependency tree (see [`dependency_tree`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepNode {
+    pub id: Uuid,
+    pub title: String,
+    pub state: TicketState,
+    pub status: TicketStatus,
+    pub children: Vec<DepNode>,
+}
+
+/// Build the transitive dependency tree rooted at `root`.
+///
+/// `Blockers` follows `depends_on` edges ("what must finish before `root`");
+/// `Dependents` follows `blocks` edges ("what finishing `root` unblocks").
+/// When `include_closed` is false, a closed ticket is omitted along with the
+/// whole subtree beneath it. Cycles on the active path are cut by a visited
+/// set, so the walk always terminates. An unknown `root` yields an empty tree.
+#[must_use]
+pub fn dependency_tree(
+    tickets: &[Ticket],
+    root: Uuid,
+    direction: DepDirection,
+    include_closed: bool,
+) -> Vec<DepNode> {
+    let by_id: HashMap<Uuid, &Ticket> = tickets.iter().map(|t| (t.id, t)).collect();
+    let Some(root_ticket) = by_id.get(&root) else {
+        return Vec::new();
+    };
+    let mut path = HashSet::new();
+    path.insert(root);
+    build_dep_nodes(root_ticket, direction, include_closed, &by_id, &mut path)
+}
+
+fn build_dep_nodes(
+    ticket: &Ticket,
+    direction: DepDirection,
+    include_closed: bool,
+    by_id: &HashMap<Uuid, &Ticket>,
+    path: &mut HashSet<Uuid>,
+) -> Vec<DepNode> {
+    let edges = match direction {
+        DepDirection::Blockers => &ticket.depends_on,
+        DepDirection::Dependents => &ticket.blocks,
+    };
+    let mut nodes = Vec::new();
+    for edge_id in edges {
+        let Some(next) = by_id.get(edge_id) else {
+            continue;
+        };
+        if !include_closed && next.status == TicketStatus::Closed {
+            continue;
+        }
+        if !path.insert(*edge_id) {
+            continue; // already on the active path — cut the cycle
+        }
+        let children = build_dep_nodes(next, direction, include_closed, by_id, path);
+        path.remove(edge_id);
+        nodes.push(DepNode {
+            id: next.id,
+            title: next.title.clone(),
+            state: next.state,
+            status: next.status,
+            children,
+        });
+    }
+    nodes
 }
 
 #[cfg(test)]
@@ -1360,5 +1438,83 @@ mod tests {
 
         assert_eq!(out[0].title, "older");
         assert_eq!(out[1].title, "newer");
+    }
+
+    // A depends on B, B depends on C (A -> B -> C blocker chain).
+    fn blocker_chain() -> [Ticket; 3] {
+        let mut a = t("A", TicketStatus::Open, TicketState::New, None, None, 3);
+        let mut b = t("B", TicketStatus::Open, TicketState::New, None, None, 2);
+        let mut c = t("C", TicketStatus::Open, TicketState::New, None, None, 1);
+        // The store keeps both sides of each dependency in sync.
+        a.depends_on.insert(b.id);
+        b.blocks.insert(a.id);
+        b.depends_on.insert(c.id);
+        c.blocks.insert(b.id);
+        [a, b, c]
+    }
+
+    #[test]
+    fn dependency_tree_walks_transitive_blockers() {
+        let [a, b, c] = blocker_chain();
+        let (a_id, b_id, c_id) = (a.id, b.id, c.id);
+        let tickets = vec![a, b, c];
+
+        let tree = dependency_tree(&tickets, a_id, DepDirection::Blockers, false);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].id, b_id);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].id, c_id);
+    }
+
+    #[test]
+    fn dependency_tree_dependents_walks_upward() {
+        let [a, b, c] = blocker_chain();
+        let (a_id, b_id, c_id) = (a.id, b.id, c.id);
+        let tickets = vec![a, b, c];
+
+        // From C, who transitively depends on C? B, then A.
+        let tree = dependency_tree(&tickets, c_id, DepDirection::Dependents, false);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].id, b_id);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].id, a_id);
+    }
+
+    #[test]
+    fn dependency_tree_prunes_closed_by_default_but_includes_with_flag() {
+        let [a, mut b, c] = blocker_chain();
+        let a_id = a.id;
+        let b_id = b.id;
+        b.status = TicketStatus::Closed;
+        b.state = TicketState::Resolved;
+        let tickets = vec![a, b, c];
+
+        // Default: B is closed, so B (and C beneath it) are pruned.
+        let pruned = dependency_tree(&tickets, a_id, DepDirection::Blockers, false);
+        assert!(pruned.is_empty());
+
+        // --all: B appears (with its closed status) and the walk continues to C.
+        let full = dependency_tree(&tickets, a_id, DepDirection::Blockers, true);
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0].id, b_id);
+        assert_eq!(full[0].status, TicketStatus::Closed);
+        assert_eq!(full[0].children.len(), 1);
+    }
+
+    #[test]
+    fn dependency_tree_terminates_on_cycle() {
+        let mut a = t("A", TicketStatus::Open, TicketState::New, None, None, 2);
+        let mut b = t("B", TicketStatus::Open, TicketState::New, None, None, 1);
+        a.depends_on.insert(b.id);
+        b.depends_on.insert(a.id); // cycle A -> B -> A
+        let a_id = a.id;
+        let b_id = b.id;
+        let tickets = vec![a, b];
+
+        let tree = dependency_tree(&tickets, a_id, DepDirection::Blockers, false);
+        // A -> B, and B -> A is cut by the visited guard.
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].id, b_id);
+        assert!(tree[0].children.is_empty());
     }
 }

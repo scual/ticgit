@@ -10,6 +10,7 @@ pub mod code;
 pub mod comment;
 pub mod delete;
 pub mod depends;
+pub mod deps;
 pub mod edit;
 pub mod history;
 pub mod hook;

@@ -158,9 +158,14 @@ same directed relation; the depended-on ticket is the blocker:
 ```sh
 ti depends <blocker-id> -t <id>
 ti depends <blocker-id> -t <id> --remove
+ti deps <id>                 # transitive blockers tree (what must finish first)
+ti deps <id> --dependents    # transitive dependents tree (what this unblocks)
+ti deps <id> --both --all    # both directions, including closed nodes (--json/--markdown)
 ```
 
-`ti next` skips tickets with open dependencies.
+`ti next` skips tickets with open dependencies. `ti list --depends-on`/`--blocks`
+show only *direct* relations; `ti deps` walks the chain transitively and prints
+it as a tree (closed tickets pruned unless `--all`).
 
 ## Picking The Next Ticket
 

@@ -84,6 +84,7 @@ ti milestone v1.0 -t <id>    # --clear
 ti tag bug parser -t <id>    # add; -d/--remove <tag> to remove
 ti subissue <parent> -t <id> # nest under parent; -c/--clear to detach
 ti depends <blocker> -t <id> # this ticket depends on <blocker>; --remove / --clear
+ti deps <id>                 # transitive dependency tree; --dependents / --both / --all
 ti spec -F /tmp/spec.md -t <id>   # implementation notes; read back: ti show <id> --filter .spec
 ti code https://host/path:branch -t <id>   # link code URI; --clear
 ti meta <field> <value> -t <id>            # arbitrary metadata field
