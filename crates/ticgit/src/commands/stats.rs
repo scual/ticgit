@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use clap::Parser;
 use crossterm::terminal;
 use time::OffsetDateTime;
+
+use ticgit_lib::TicketStats;
 
 use crate::commands::open_store;
 
@@ -47,78 +47,48 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let closed_times = store.closed_times().unwrap_or_default();
-    let now = OffsetDateTime::now_utc();
-    let week_ago = now - time::Duration::days(7);
-
-    let mut open = 0usize;
-    let mut closed = 0usize;
-    let mut with_comments = 0usize;
-    let mut created_7d = 0usize;
-    let mut closed_7d = 0usize;
-    let mut states: BTreeMap<String, usize> = BTreeMap::new();
-    let mut tags: BTreeMap<String, usize> = BTreeMap::new();
-    let mut assignees: BTreeMap<String, usize> = BTreeMap::new();
     let nick_map = crate::render::build_nick_map(&store.list_users().unwrap_or_default());
-
-    let mut recently_opened: Vec<(OffsetDateTime, String, String)> = Vec::new();
-    // Collect recently closed tickets (by close time, falling back to created_at).
-    let mut recently_closed: Vec<(String, String)> = Vec::new(); // (short_id, title)
-
-    for t in &tickets {
-        recently_opened.push((
-            t.created_at,
-            t.id.to_string().chars().take(6).collect(),
-            t.title.clone(),
-        ));
-        match t.status {
-            ticgit_lib::TicketStatus::Open => open += 1,
-            ticgit_lib::TicketStatus::Closed => {
-                closed += 1;
-                recently_closed.push((t.id.to_string().chars().take(6).collect(), t.title.clone()));
-            }
-        }
-        *states.entry(t.state.as_str().to_string()).or_default() += 1;
-
-        if !t.comments.is_empty() {
-            with_comments += 1;
-        }
-
-        if t.created_at >= week_ago {
-            created_7d += 1;
-        }
-        let closed_time = closed_times.get(&t.id).copied().unwrap_or(t.created_at);
-        if t.status == ticgit_lib::TicketStatus::Closed && closed_time >= week_ago {
-            closed_7d += 1;
-        }
-
-        for tag in &t.tags {
-            *tags.entry(tag.clone()).or_default() += 1;
-        }
-
-        if let Some(ref a) = t.assigned {
-            let short = if let Some(nick) = nick_map.get(a.as_str()) {
-                nick.clone()
-            } else {
-                a.split_once('@')
-                    .map(|(local, _)| local)
-                    .unwrap_or(a)
-                    .to_string()
-            };
-            *assignees.entry(short).or_default() += 1;
-        }
-    }
-    recently_opened.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let stats = TicketStats::compute(&tickets, &closed_times, OffsetDateTime::now_utc(), |a| {
+        nick_map.get(a).cloned().unwrap_or_else(|| {
+            a.split_once('@')
+                .map(|(local, _)| local)
+                .unwrap_or(a)
+                .to_string()
+        })
+    });
+    let short = |id: &uuid::Uuid| id.to_string().chars().take(6).collect::<String>();
+    let recently_opened: Vec<(String, String)> = stats
+        .recently_opened
+        .iter()
+        .map(|(id, title)| (short(id), title.clone()))
+        .collect();
+    let recently_closed: Vec<(String, String)> = stats
+        .recently_closed
+        .iter()
+        .map(|(id, _, title)| (short(id), title.clone()))
+        .collect();
+    let TicketStats {
+        open,
+        closed,
+        with_comments,
+        created_7d,
+        closed_7d,
+        states: state_vec,
+        tags: tag_vec,
+        assignees: assignee_vec,
+        ..
+    } = stats;
 
     if args.json {
-        let states_json: serde_json::Value = states
+        let states_json: serde_json::Value = state_vec
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::json!(v)))
             .collect();
-        let tags_json: serde_json::Value = tags
+        let tags_json: serde_json::Value = tag_vec
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::json!(v)))
             .collect();
-        let assignees_json: serde_json::Value = assignees
+        let assignees_json: serde_json::Value = assignee_vec
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::json!(v)))
             .collect();
@@ -141,14 +111,6 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if args.markdown {
-        // Pre-sort data.
-        let mut state_vec: Vec<_> = states.iter().collect();
-        state_vec.sort_by(|a, b| b.1.cmp(a.1));
-        let mut tag_vec: Vec<_> = tags.iter().collect();
-        tag_vec.sort_by(|a, b| b.1.cmp(a.1));
-        let mut assignee_vec: Vec<_> = assignees.iter().collect();
-        assignee_vec.sort_by(|a, b| b.1.cmp(a.1));
-
         println!("# Ticket Stats\n");
         println!("| Metric | Count |");
         println!("| --- | --- |");
@@ -199,7 +161,7 @@ pub fn run(args: Args) -> Result<()> {
 
         if !recently_opened.is_empty() {
             println!("\n## Recently Opened\n");
-            for (_, id, title) in recently_opened.iter().take(10) {
+            for (id, title) in recently_opened.iter().take(10) {
                 println!("- `{id}` {title}");
             }
         }
@@ -215,16 +177,6 @@ pub fn run(args: Args) -> Result<()> {
 
     let width = term_width.min(120);
     let two_col = width >= 70;
-
-    // Pre-sort data.
-    let mut state_vec: Vec<_> = states.into_iter().collect();
-    state_vec.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let mut tag_vec: Vec<_> = tags.into_iter().collect();
-    tag_vec.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let mut assignee_vec: Vec<_> = assignees.into_iter().collect();
-    assignee_vec.sort_by(|a, b| b.1.cmp(&a.1));
 
     // Budget vertical space conservatively.
     // Fixed overhead: blank + divider + title + divider + blank + overview + blank + divider = 8
@@ -396,7 +348,7 @@ pub fn run(args: Args) -> Result<()> {
         // Right: Recently Opened
         if recently_opened_limit > 0 {
             right_lines.push(format!("{GREEN}{BOLD}  Recently Opened{RESET}"));
-            for (_, id, title) in recently_opened.iter().take(recently_opened_limit) {
+            for (id, title) in recently_opened.iter().take(recently_opened_limit) {
                 let max_title = col_width.saturating_sub(12);
                 let display_title = if title.len() > max_title {
                     format!("{}...", &title[..max_title.saturating_sub(3)])
@@ -482,7 +434,7 @@ pub fn run(args: Args) -> Result<()> {
 
         if recently_opened_limit > 0 {
             println!("  {GREEN}{BOLD}Recently Opened{RESET}");
-            for (_, id, title) in recently_opened.iter().take(recently_opened_limit) {
+            for (id, title) in recently_opened.iter().take(recently_opened_limit) {
                 let max_title = width.saturating_sub(12);
                 let display_title = if title.len() > max_title {
                     format!("{}...", &title[..max_title.saturating_sub(3)])

@@ -94,7 +94,7 @@ pub fn describe_view(v: &SavedView) -> String {
     if let Some(s) = &v.state {
         parts.push(format!("--state {s}"));
     }
-    let tags = saved_tags(v);
+    let tags = v.tag_list();
     for tag in &tags {
         parts.push(format!("--tag {tag}"));
     }
@@ -133,11 +133,4 @@ pub fn describe_view(v: &SavedView) -> String {
     } else {
         parts.join(" ")
     }
-}
-
-fn saved_tags(v: &SavedView) -> Vec<String> {
-    if !v.tags.is_empty() {
-        return v.tags.clone();
-    }
-    v.tag.iter().cloned().collect()
 }

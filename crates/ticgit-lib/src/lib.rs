@@ -51,6 +51,7 @@ pub mod keys;
 pub mod oplog;
 pub mod query;
 pub mod signing;
+pub mod stats;
 pub mod store;
 pub mod ticket;
 pub mod writeup;
@@ -62,8 +63,10 @@ pub use error::{Error, Result};
 pub use history::{HistoryAction, HistoryEntry};
 pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
 pub use query::{
-    next_queue, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
+    matches_tags, next_queue, priority_rank, Filter, NextOptions, SearchFilter, SearchScope,
+    SortKey, SortOrder, DEFERRED_TAGS,
 };
+pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
     validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,

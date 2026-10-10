@@ -128,7 +128,8 @@ impl SearchFilter {
         self.terms.iter().map(|term| term.needle.clone()).collect()
     }
 
-    fn matches(&self, ticket: &Ticket) -> bool {
+    /// Whether `ticket` satisfies every term (AND). An empty filter matches all.
+    pub fn matches(&self, ticket: &Ticket) -> bool {
         self.terms.iter().all(|term| term.matches(ticket))
     }
 }
@@ -232,16 +233,8 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
                     return false;
                 }
             }
-            let tags = filter_tags(filter);
-            if !tags.is_empty() {
-                let matches = if filter.tag_match_all {
-                    tags.iter().all(|tag| t.tags.contains(*tag))
-                } else {
-                    tags.iter().any(|tag| t.tags.contains(*tag))
-                };
-                if !matches {
-                    return false;
-                }
+            if !matches_tags(t, filter_tags(filter), filter.tag_match_all) {
+                return false;
             }
             if let Some(assigned) = &filter.assigned {
                 if t.assigned.as_deref() != Some(assigned.as_str()) {
@@ -395,6 +388,24 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
     candidates
 }
 
+/// Whether `ticket` carries the wanted `tags`: every one when `match_all`, at
+/// least one otherwise. No wanted tags matches everything.
+pub fn matches_tags<'a>(
+    ticket: &Ticket,
+    tags: impl IntoIterator<Item = &'a String>,
+    match_all: bool,
+) -> bool {
+    let mut tags = tags.into_iter().peekable();
+    if tags.peek().is_none() {
+        return true;
+    }
+    if match_all {
+        tags.all(|tag| ticket.tags.contains(tag))
+    } else {
+        tags.any(|tag| ticket.tags.contains(tag))
+    }
+}
+
 fn filter_tags(filter: &Filter) -> Vec<&String> {
     let mut tags = Vec::new();
     if let Some(tag) = &filter.tag {
@@ -428,7 +439,7 @@ fn state_rank(s: TicketState) -> u8 {
 
 /// Tickets with a priority sort before those without; among prioritised
 /// tickets, lower numbers come first (1 = most important).
-fn priority_rank(p: Option<i64>) -> (u8, i64) {
+pub fn priority_rank(p: Option<i64>) -> (u8, i64) {
     match p {
         Some(v) => (0, v),
         None => (1, 0),
@@ -509,6 +520,31 @@ mod tests {
             created_at: OffsetDateTime::from_unix_timestamp(ts).unwrap(),
             created_by: "tester".into(),
         }
+    }
+
+    #[test]
+    fn matches_tags_all_vs_any() {
+        let mut ticket = t(
+            "x",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("a"),
+            None,
+            1,
+        );
+        ticket.tags.insert("b".into());
+        let a = "a".to_string();
+        let c = "c".to_string();
+        assert!(matches_tags(&ticket, [&a], true));
+        assert!(!matches_tags(&ticket, [&a, &c], true));
+        assert!(matches_tags(&ticket, [&a, &c], false));
+        assert!(matches_tags(&ticket, std::iter::empty::<&String>(), true));
+    }
+
+    #[test]
+    fn priority_rank_puts_unprioritised_last() {
+        assert!(priority_rank(Some(1_000_000)) < priority_rank(None));
+        assert!(priority_rank(Some(1)) < priority_rank(Some(2)));
     }
 
     #[test]
