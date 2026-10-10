@@ -1,0 +1,1 @@
+{"author":"carlo.cifarelli@gmail.com","body":"Implemented: @ sentinel resolved in CLI layer (commands::resolve_ref), routed through resolve_ticket and list --depends-on/--blocks/--parent. Saved views pin resolved full id. 4 CLI integration tests. Docs in ti agent guide + skill. Merged to master 5717c88."}
