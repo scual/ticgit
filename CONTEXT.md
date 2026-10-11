@@ -11,12 +11,16 @@ A directed relation between two tickets where one cannot proceed until the other
 _Avoid_: Link, relation (too vague)
 
 **Depends on**:
-The downstream reading of a Dependency: the ticket that waits. "A depends on B" means A waits for B.
+The downstream reading of a Dependency: the ticket that waits. "A depends on B" means A waits for B. The waiting ticket is the dependent.
 _Avoid_: Blocked by, needs, requires
 
 **Blocks**:
-The upstream reading of a Dependency: the ticket being waited for. "B blocks A" means A waits for B.
-_Avoid_: Blocker of, prerequisite of, depended on by
+The upstream reading of a Dependency: the ticket being waited for. "B blocks A" means A waits for B. The ticket being waited for is the blocker.
+_Avoid_: Blocker of (for the relationship), prerequisite of, depended on by
+
+**Dependency tree**:
+The transitive hierarchy of dependencies rooted at a ticket, walked upstream (blockers: what must finish before this ticket) or downstream (dependents: what waiting work this ticket unblocks). Because a Dependency is satisfied once its target is Closed, an upstream walk prunes closed tickets and their subtrees by default.
+_Avoid_: Dependency graph (rendered as a tree with cycle cuts), blocker chain (a chain implies a single path, whereas a tree branches)
 
 **Sub-issue**:
 A ticket that is part of another ticket's work. It has exactly one Parent and may itself have Sub-issues, to any depth. A Parent is closed only after its Sub-issues are.
@@ -62,7 +66,7 @@ _Avoid_: Auto-sync, pre-push script
 ### Working context
 
 **Checked-out ticket**:
-The one ticket a person is currently focused on, so commands can act on it when no ticket is named. It is personal to each user and each clone, and is never shared through the repository. It may be a Closed ticket.
+The one ticket a person is currently focused on, so commands can act on it when no ticket is named, or referenced explicitly via `@` where a ticket argument is required. It is personal to each user and each clone, and is never shared through the repository. It may be a Closed ticket.
 _Avoid_: Current ticket, active ticket, selected ticket
 
 ### Prioritising work
