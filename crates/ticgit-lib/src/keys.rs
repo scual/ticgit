@@ -209,6 +209,39 @@ pub fn parse_view_name(key: &str) -> Option<&str> {
     }
 }
 
+/// Review index key on the project target listing all review branch ids.
+pub const REVIEW_INDEX_KEY: &str = "review:branches";
+
+/// Key for the list of active revisions on a review branch target.
+pub const REVIEW_REVISIONS_KEY: &str = "review:revisions";
+
+/// Key for cumulative revision changes on a review branch target.
+pub const REVIEW_REVISION_HISTORY_KEY: &str = "review:revision-history";
+
+/// Key for review messages on a review branch target.
+pub const REVIEW_MESSAGES_KEY: &str = "review:messages";
+
+/// Key for the set of reviewer emails on a review branch target.
+pub const REVIEW_REVIEWERS_KEY: &str = "review:reviewers";
+
+/// Key for commit approvals on a commit target.
+pub const REVIEW_APPROVALS_KEY: &str = "review:approvals";
+
+/// Key for reviewed commit mark on a commit target.
+pub const REVIEW_REVIEWED_KEY: &str = "review:reviewed";
+
+/// Key for review created timestamp on a review branch target.
+pub const REVIEW_CREATED_AT_KEY: &str = "review:created-at";
+
+/// Key for review creator email on a review branch target.
+pub const REVIEW_CREATED_BY_KEY: &str = "review:created-by";
+
+/// Key for merge timestamp on a review branch target.
+pub const REVIEW_MERGED_AT_KEY: &str = "review:merged-at";
+
+/// Key for merger email on a review branch target.
+pub const REVIEW_MERGED_BY_KEY: &str = "review:merged-by";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +369,16 @@ mod tests {
         assert_eq!(parse_view_name("ticgit:views:foo-bar"), Some("foo-bar"));
         assert_eq!(parse_view_name("ticgit:owners"), None);
         assert_eq!(parse_view_name("ticgit:views:"), None);
+    }
+
+    #[test]
+    fn review_keys_are_consistent() {
+        assert_eq!(REVIEW_INDEX_KEY, "review:branches");
+        assert_eq!(REVIEW_REVISIONS_KEY, "review:revisions");
+        assert_eq!(REVIEW_REVISION_HISTORY_KEY, "review:revision-history");
+        assert_eq!(REVIEW_MESSAGES_KEY, "review:messages");
+        assert_eq!(REVIEW_REVIEWERS_KEY, "review:reviewers");
+        assert_eq!(REVIEW_APPROVALS_KEY, "review:approvals");
+        assert_eq!(REVIEW_REVIEWED_KEY, "review:reviewed");
     }
 }

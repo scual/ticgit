@@ -55,6 +55,7 @@ pub mod stats;
 pub mod store;
 pub mod ticket;
 pub mod writeup;
+pub mod review;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -66,6 +67,7 @@ pub use query::{
     dependency_tree, matches_tags, next_queue, priority_rank, DepDirection, DepNode, Filter,
     NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
+pub use review::*;
 pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
