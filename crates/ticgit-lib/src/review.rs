@@ -62,7 +62,10 @@ impl Review {
     #[must_use]
     pub fn commits(&self) -> Vec<String> {
         if !self.revisions.is_empty() {
-            self.revisions.iter().map(|entry| entry.sha.clone()).collect()
+            self.revisions
+                .iter()
+                .map(|entry| entry.sha.clone())
+                .collect()
         } else {
             self.head_sha.iter().cloned().collect()
         }
@@ -263,7 +266,10 @@ impl FakeVcsAdapter {
     }
 
     pub fn set_ref(&self, reference: &str, sha: &str) {
-        self.refs.write().unwrap().insert(reference.to_string(), sha.to_string());
+        self.refs
+            .write()
+            .unwrap()
+            .insert(reference.to_string(), sha.to_string());
     }
 
     pub fn set_default_base(&self, base: &str) {
@@ -271,23 +277,38 @@ impl FakeVcsAdapter {
     }
 
     pub fn set_merge_base(&self, base_ref: &str, branch: &str, sha: &str) {
-        self.merge_bases.write().unwrap().insert((base_ref.to_string(), branch.to_string()), sha.to_string());
+        self.merge_bases
+            .write()
+            .unwrap()
+            .insert((base_ref.to_string(), branch.to_string()), sha.to_string());
     }
 
     pub fn set_branch_head(&self, branch: &str, sha: &str) {
-        self.branch_heads.write().unwrap().insert(branch.to_string(), sha.to_string());
+        self.branch_heads
+            .write()
+            .unwrap()
+            .insert(branch.to_string(), sha.to_string());
     }
 
     pub fn set_revisions(&self, base_sha: &str, head_sha: &str, commits: Vec<String>) {
-        self.revisions.write().unwrap().insert((base_sha.to_string(), head_sha.to_string()), commits);
+        self.revisions
+            .write()
+            .unwrap()
+            .insert((base_sha.to_string(), head_sha.to_string()), commits);
     }
 
     pub fn set_change_id(&self, sha: &str, change_id: &str) {
-        self.change_ids.write().unwrap().insert(sha.to_string(), change_id.to_string());
+        self.change_ids
+            .write()
+            .unwrap()
+            .insert(sha.to_string(), change_id.to_string());
     }
 
     pub fn set_patch_id(&self, sha: &str, patch_id: &str) {
-        self.patch_ids.write().unwrap().insert(sha.to_string(), patch_id.to_string());
+        self.patch_ids
+            .write()
+            .unwrap()
+            .insert(sha.to_string(), patch_id.to_string());
     }
 
     pub fn set_remote_url(&self, url: Option<&str>) {
@@ -295,7 +316,10 @@ impl FakeVcsAdapter {
     }
 
     pub fn set_branch_snapshot(&self, branch: &str, snapshot: ReviewBranchSnapshot) {
-        self.branch_snapshots.write().unwrap().insert(branch.to_string(), snapshot);
+        self.branch_snapshots
+            .write()
+            .unwrap()
+            .insert(branch.to_string(), snapshot);
     }
 
     pub fn set_branch_choices(&self, choices: Vec<ReviewBranchChoice>) {
@@ -303,25 +327,34 @@ impl FakeVcsAdapter {
     }
 
     pub fn set_commit_info(&self, sha: &str, info: ReviewCommitInfo) {
-        self.commit_infos.write().unwrap().insert(sha.to_string(), info);
+        self.commit_infos
+            .write()
+            .unwrap()
+            .insert(sha.to_string(), info);
     }
 
     pub fn set_commit_patch_lines(&self, sha: &str, lines: Vec<String>) {
-        self.commit_patch_lines.write().unwrap().insert(sha.to_string(), lines);
+        self.commit_patch_lines
+            .write()
+            .unwrap()
+            .insert(sha.to_string(), lines);
     }
 
     pub fn set_changed_file_count(&self, oldest: &str, head: &str, count: usize) {
-        self.changed_file_counts.write().unwrap().insert((oldest.to_string(), head.to_string()), count);
+        self.changed_file_counts
+            .write()
+            .unwrap()
+            .insert((oldest.to_string(), head.to_string()), count);
     }
 }
 
 impl ReviewVcs for FakeVcsAdapter {
     fn current_branch(&self) -> crate::Result<String> {
-        self.current_branch
-            .read()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| crate::Error::Vcs("cannot default review to detached HEAD; pass --branch or a review id".into()))
+        self.current_branch.read().unwrap().clone().ok_or_else(|| {
+            crate::Error::Vcs(
+                "cannot default review to detached HEAD; pass --branch or a review id".into(),
+            )
+        })
     }
 
     fn resolve_ref(&self, reference: &str) -> crate::Result<String> {
@@ -342,10 +375,16 @@ impl ReviewVcs for FakeVcsAdapter {
     }
 
     fn merge_base(&self, base_ref: &str, branch_name: &str) -> crate::Result<String> {
-        if let Some(sha) = self.merge_bases.read().unwrap().get(&(base_ref.to_string(), branch_name.to_string())) {
+        if let Some(sha) = self
+            .merge_bases
+            .read()
+            .unwrap()
+            .get(&(base_ref.to_string(), branch_name.to_string()))
+        {
             return Ok(sha.clone());
         }
-        self.resolve_ref(base_ref).or_else(|_| self.resolve_ref("HEAD"))
+        self.resolve_ref(base_ref)
+            .or_else(|_| self.resolve_ref("HEAD"))
     }
 
     fn resolve_branch_head(&self, branch_name: &str) -> crate::Result<String> {
@@ -496,10 +535,9 @@ impl RealVcsAdapter {
     }
 
     fn git_output(&self, args: &[&str]) -> crate::Result<String> {
-        let output = self
-            .git_command(args)
-            .output()
-            .map_err(|e| crate::Error::Vcs(format!("failed to spawn git {}: {e}", args.join(" "))))?;
+        let output = self.git_command(args).output().map_err(|e| {
+            crate::Error::Vcs(format!("failed to spawn git {}: {e}", args.join(" ")))
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(crate::Error::Vcs(format!(
@@ -533,7 +571,9 @@ impl RealVcsAdapter {
                 "could not resolve review branch `{branch_name}`: {err}"
             )))
         } else {
-            Err(crate::Error::Vcs("could not resolve empty review branch".into()))
+            Err(crate::Error::Vcs(
+                "could not resolve empty review branch".into(),
+            ))
         }
     }
 
@@ -543,9 +583,11 @@ impl RealVcsAdapter {
             if choice.commits_ahead.is_none() {
                 if let Ok(branch_ref) = self.resolve_branch_ref(&choice.name) {
                     let range = format!("{target}..{}", branch_ref.name);
-                    if let Ok(output) = self.git_command(&["rev-list", "--count", &range]).output() {
+                    if let Ok(output) = self.git_command(&["rev-list", "--count", &range]).output()
+                    {
                         if output.status.success() {
-                            choice.commits_ahead = String::from_utf8_lossy(&output.stdout).trim().parse().ok();
+                            choice.commits_ahead =
+                                String::from_utf8_lossy(&output.stdout).trim().parse().ok();
                         }
                     }
                 }
@@ -565,7 +607,10 @@ impl RealVcsAdapter {
         ]).output().map_err(|e| crate::Error::Vcs(format!("running git for-each-ref: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(crate::Error::Vcs(format!("git for-each-ref failed: {}", stderr.trim())));
+            return Err(crate::Error::Vcs(format!(
+                "git for-each-ref failed: {}",
+                stderr.trim()
+            )));
         }
         let mut choices = parse_git_review_branch_choices(connected_branches, &output.stdout)?;
         self.fill_missing_commits_ahead(&mut choices);
@@ -604,7 +649,10 @@ impl ReviewVcs for RealVcsAdapter {
     }
 
     fn merge_base(&self, base_ref: &str, branch_name: &str) -> crate::Result<String> {
-        if let Ok(output) = self.git_command(&["merge-base", base_ref, branch_name]).output() {
+        if let Ok(output) = self
+            .git_command(&["merge-base", base_ref, branch_name])
+            .output()
+        {
             if output.status.success() {
                 let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !sha.is_empty() {
@@ -612,7 +660,8 @@ impl ReviewVcs for RealVcsAdapter {
                 }
             }
         }
-        self.resolve_ref(base_ref).or_else(|_| self.resolve_ref("HEAD"))
+        self.resolve_ref(base_ref)
+            .or_else(|_| self.resolve_ref("HEAD"))
     }
 
     fn resolve_branch_head(&self, branch_name: &str) -> crate::Result<String> {
@@ -680,9 +729,13 @@ impl ReviewVcs for RealVcsAdapter {
     }
 
     fn load_branch_snapshot(&self, branch_name: &str) -> crate::Result<ReviewBranchSnapshot> {
-        if let Ok(output) = self.but_command(&["branch", "show", branch_name, "--json"]).output() {
+        if let Ok(output) = self
+            .but_command(&["branch", "show", branch_name, "--json"])
+            .output()
+        {
             if output.status.success() {
-                if let Ok(mut snapshot) = parse_review_branch_snapshot(branch_name, &output.stdout) {
+                if let Ok(mut snapshot) = parse_review_branch_snapshot(branch_name, &output.stdout)
+                {
                     if snapshot.head_sha.is_empty() {
                         snapshot.head_sha = self.resolve_ref(branch_name).unwrap_or_default();
                     }
@@ -759,7 +812,10 @@ impl ReviewVcs for RealVcsAdapter {
             .lines()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let subject = lines.first().cloned().unwrap_or_else(|| sha.get(..7).unwrap_or(sha).to_string());
+        let subject = lines
+            .first()
+            .cloned()
+            .unwrap_or_else(|| sha.get(..7).unwrap_or(sha).to_string());
         let author = lines.get(1).cloned().unwrap_or_default();
         let updated = lines
             .get(2)
@@ -768,7 +824,12 @@ impl ReviewVcs for RealVcsAdapter {
             .map(|ts| format!("{ts}"))
             .unwrap_or_default();
         let body = if lines.len() > 3 {
-            lines.drain(3..).collect::<Vec<_>>().join("\n").trim().to_string()
+            lines
+                .drain(3..)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
         } else {
             String::new()
         };
@@ -926,10 +987,7 @@ pub fn parse_review_branch_snapshot(
         .map(|commit| commit.sha.clone())
         .filter(|sha| !sha.is_empty())
         .collect::<Vec<_>>();
-    let base_sha = show
-        .base_commit
-        .map(|base| base.sha)
-        .unwrap_or_default();
+    let base_sha = show.base_commit.map(|base| base.sha).unwrap_or_default();
     let title = head
         .map(|commit| commit.message.clone())
         .filter(|message| !message.is_empty())
@@ -1024,7 +1082,10 @@ mod tests {
         };
         let formatted_partial = format_review_revision(&partial);
         assert_eq!(formatted_partial, "def5678::p-1");
-        assert_eq!(parse_review_revision_change(&formatted_partial), Some(partial));
+        assert_eq!(
+            parse_review_revision_change(&formatted_partial),
+            Some(partial)
+        );
 
         let sha_only = parse_review_revision_change("1234567").unwrap();
         assert_eq!(sha_only.sha, "1234567");
@@ -1073,7 +1134,11 @@ mod tests {
         fake.set_merge_base("main", "feature/cool", "0000000");
         assert_eq!(fake.merge_base("main", "feature/cool").unwrap(), "0000000");
 
-        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+        fake.set_revisions(
+            "0000000",
+            "2222222",
+            vec!["1111111".into(), "2222222".into()],
+        );
         assert_eq!(
             fake.revision_list("0000000", "2222222").unwrap(),
             vec!["1111111".to_string(), "2222222".to_string()]

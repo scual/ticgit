@@ -50,12 +50,12 @@ pub mod history;
 pub mod keys;
 pub mod oplog;
 pub mod query;
+pub mod review;
 pub mod signing;
 pub mod stats;
 pub mod store;
 pub mod ticket;
 pub mod writeup;
-pub mod review;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

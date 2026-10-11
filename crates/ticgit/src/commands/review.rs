@@ -289,10 +289,13 @@ fn review_output(
     ref_lengths: &std::collections::BTreeMap<uuid::Uuid, usize>,
 ) -> ReviewOutput {
     let ticket_ref = review.ticket_id.and_then(|id| {
-        all_tickets.iter().find(|ticket| ticket.id == id).map(|ticket| {
-            let len = ref_lengths.get(&ticket.id).copied().unwrap_or(6).max(6);
-            ticket.id.to_string().replace('-', "")[..len].to_string()
-        })
+        all_tickets
+            .iter()
+            .find(|ticket| ticket.id == id)
+            .map(|ticket| {
+                let len = ref_lengths.get(&ticket.id).copied().unwrap_or(6).max(6);
+                ticket.id.to_string().replace('-', "")[..len].to_string()
+            })
     });
     let progress = store.review_progress(&review.commits(), &review.messages);
     ReviewOutput {
@@ -474,7 +477,9 @@ fn approve(args: ApproveArgs) -> Result<()> {
     let (branch_id, commit) = match args.target.as_deref() {
         Some(target)
             if looks_like_sha(target)
-                && store.resolve_review_branch_id(Some(target), Some(&vcs)).is_err() =>
+                && store
+                    .resolve_review_branch_id(Some(target), Some(&vcs))
+                    .is_err() =>
         {
             (
                 store.resolve_review_branch_id(None, Some(&vcs)).ok(),
@@ -564,7 +569,10 @@ fn split_review_and_body(
         return Ok((None, args[0].clone()));
     }
 
-    if store.resolve_review_branch_id(Some(&args[0]), Some(vcs)).is_ok() {
+    if store
+        .resolve_review_branch_id(Some(&args[0]), Some(vcs))
+        .is_ok()
+    {
         Ok((Some(args[0].clone()), args[1..].join(" ")))
     } else {
         Ok((None, args.join(" ")))

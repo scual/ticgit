@@ -16,12 +16,12 @@ use uuid::Uuid;
 use crate::error::{Error, Result};
 use crate::keys;
 use crate::oplog::{Op, OpKind};
-use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
-use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 use crate::review::{
     format_review_revision, parse_review_revision_change, CommitReviewStatus, NewReviewOpts,
     Review, ReviewMessage, ReviewProgress, ReviewRevisionChange, ReviewVcs,
 };
+use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
+use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 
 /// Basic email format check: must contain exactly one `@` with non-empty
 /// local and domain parts.
@@ -1479,7 +1479,11 @@ impl TicketStore {
                 if let Ok(review) = self.load_review(&branch_id) {
                     reviews.insert(ticket.id, review);
                 }
-            } else if let Some(branch_name) = ticket.code.as_deref().and_then(crate::review::code_branch_name) {
+            } else if let Some(branch_name) = ticket
+                .code
+                .as_deref()
+                .and_then(crate::review::code_branch_name)
+            {
                 if let Ok(review) = self.load_review(branch_name) {
                     reviews.insert(ticket.id, review);
                 } else {
@@ -1623,8 +1627,8 @@ impl TicketStore {
         vcs: &impl ReviewVcs,
     ) -> Result<()> {
         let target = self.session.target(&Target::branch(branch_id));
-        let base_is_empty = meta_string(target.get_value("base:sha")?)
-            .is_none_or(|base| base.is_empty());
+        let base_is_empty =
+            meta_string(target.get_value("base:sha")?).is_none_or(|base| base.is_empty());
         if base_is_empty && !snapshot.base_sha.is_empty() {
             target.set("base:sha", snapshot.base_sha.as_str())?;
         }
@@ -1688,11 +1692,7 @@ impl TicketStore {
     }
 
     /// Return true if every commit in `review` is approved.
-    pub fn review_commits_all_approved(
-        &self,
-        review: &Review,
-        approved_sha: Option<&str>,
-    ) -> bool {
+    pub fn review_commits_all_approved(&self, review: &Review, approved_sha: Option<&str>) -> bool {
         let commits = review.commits();
         !commits.is_empty()
             && commits.iter().all(|sha| {
@@ -3971,26 +3971,34 @@ mod tests {
         fake.set_branch_head("feat/review", "2222222");
         fake.set_default_base("main");
         fake.set_merge_base("main", "feat/review", "0000000");
-        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+        fake.set_revisions(
+            "0000000",
+            "2222222",
+            vec!["1111111".into(), "2222222".into()],
+        );
         fake.set_change_id("1111111", "ch-1");
         fake.set_patch_id("1111111", "p-1");
         fake.set_change_id("2222222", "ch-2");
         fake.set_patch_id("2222222", "p-2");
 
-        let ticket = store.create("Reviewable task", NewTicketOpts::default()).unwrap();
+        let ticket = store
+            .create("Reviewable task", NewTicketOpts::default())
+            .unwrap();
 
-        let review = store.create_review(
-            &NewReviewOpts {
-                branch: Some("feat/review".into()),
-                base: Some("main".into()),
-                ticket: Some(ticket.short_id()),
-                title: Some("Reviewable task".into()),
-                description: Some("Implement feature".into()),
-                reviewers: vec!["reviewer@example.com".into()],
-                commits: None,
-            },
-            &fake,
-        ).unwrap();
+        let review = store
+            .create_review(
+                &NewReviewOpts {
+                    branch: Some("feat/review".into()),
+                    base: Some("main".into()),
+                    ticket: Some(ticket.short_id()),
+                    title: Some("Reviewable task".into()),
+                    description: Some("Implement feature".into()),
+                    reviewers: vec!["reviewer@example.com".into()],
+                    commits: None,
+                },
+                &fake,
+            )
+            .unwrap();
 
         assert_eq!(review.title, "Reviewable task");
         assert_eq!(review.status, "open");
@@ -4009,10 +4017,14 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].branch_id, review.branch_id);
 
-        let resolved_id = store.resolve_review_branch_id(Some(&ticket.short_id()), Some(&fake)).unwrap();
+        let resolved_id = store
+            .resolve_review_branch_id(Some(&ticket.short_id()), Some(&fake))
+            .unwrap();
         assert_eq!(resolved_id, review.branch_id);
 
-        let resolved_by_branch = store.resolve_review_branch_id(Some("feat/review"), Some(&fake)).unwrap();
+        let resolved_by_branch = store
+            .resolve_review_branch_id(Some("feat/review"), Some(&fake))
+            .unwrap();
         assert_eq!(resolved_by_branch, review.branch_id);
     }
 
@@ -4027,23 +4039,29 @@ mod tests {
         fake.set_change_id("1111111", "ch-1");
         fake.set_patch_id("1111111", "p-1");
 
-        let review = store.create_review(
-            &NewReviewOpts {
-                branch: Some("feat/history".into()),
-                base: Some("main".into()),
-                ticket: None,
-                title: Some("History test".into()),
-                description: None,
-                reviewers: vec![],
-                commits: None,
-            },
-            &fake,
-        ).unwrap();
+        let review = store
+            .create_review(
+                &NewReviewOpts {
+                    branch: Some("feat/history".into()),
+                    base: Some("main".into()),
+                    ticket: None,
+                    title: Some("History test".into()),
+                    description: None,
+                    reviewers: vec![],
+                    commits: None,
+                },
+                &fake,
+            )
+            .unwrap();
         assert_eq!(review.revisions.len(), 1);
 
         // Advance branch head to 2222222
         fake.set_branch_head("feat/history", "2222222");
-        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+        fake.set_revisions(
+            "0000000",
+            "2222222",
+            vec!["1111111".into(), "2222222".into()],
+        );
         fake.set_change_id("2222222", "ch-2");
         fake.set_patch_id("2222222", "p-2");
 
@@ -4063,30 +4081,40 @@ mod tests {
         fake.set_default_base("main");
         fake.set_branch_head("feat/approvals", "2222222");
         fake.set_merge_base("main", "feat/approvals", "0000000");
-        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+        fake.set_revisions(
+            "0000000",
+            "2222222",
+            vec!["1111111".into(), "2222222".into()],
+        );
 
-        let review = store.create_review(
-            &NewReviewOpts {
-                branch: Some("feat/approvals".into()),
-                base: Some("main".into()),
-                ticket: None,
-                title: Some("Approvals test".into()),
-                description: None,
-                reviewers: vec![],
-                commits: None,
-            },
-            &fake,
-        ).unwrap();
+        let review = store
+            .create_review(
+                &NewReviewOpts {
+                    branch: Some("feat/approvals".into()),
+                    base: Some("main".into()),
+                    ticket: None,
+                    title: Some("Approvals test".into()),
+                    description: None,
+                    reviewers: vec![],
+                    commits: None,
+                },
+                &fake,
+            )
+            .unwrap();
         assert_eq!(review.status, "open");
 
         // Approve commit 1 - review not yet all approved
-        let all_approved = store.approve_review_commit(Some(&review.branch_id), "1111111", "looks good 1").unwrap();
+        let all_approved = store
+            .approve_review_commit(Some(&review.branch_id), "1111111", "looks good 1")
+            .unwrap();
         assert!(!all_approved);
         let loaded = store.load_review(&review.branch_id).unwrap();
         assert_eq!(loaded.status, "open");
 
         // Approve commit 2 - now all commits approved!
-        let all_approved = store.approve_review_commit(Some(&review.branch_id), "2222222", "looks good 2").unwrap();
+        let all_approved = store
+            .approve_review_commit(Some(&review.branch_id), "2222222", "looks good 2")
+            .unwrap();
         assert!(all_approved);
         let loaded = store.load_review(&review.branch_id).unwrap();
         assert_eq!(loaded.status, "approved");
@@ -4101,32 +4129,36 @@ mod tests {
         fake.set_merge_base("main", "feat/lifecycle", "0000000");
         fake.set_revisions("0000000", "1111111", vec!["1111111".into()]);
 
-        let review = store.create_review(
-            &NewReviewOpts {
-                branch: Some("feat/lifecycle".into()),
-                base: Some("main".into()),
-                ticket: None,
-                title: Some("Lifecycle test".into()),
-                description: None,
-                reviewers: vec![],
-                commits: None,
-            },
-            &fake,
-        ).unwrap();
+        let review = store
+            .create_review(
+                &NewReviewOpts {
+                    branch: Some("feat/lifecycle".into()),
+                    base: Some("main".into()),
+                    ticket: None,
+                    title: Some("Lifecycle test".into()),
+                    description: None,
+                    reviewers: vec![],
+                    commits: None,
+                },
+                &fake,
+            )
+            .unwrap();
 
         // Request changes
-        store.request_changes(
-            &review.branch_id,
-            ReviewMessage {
-                author: "alice@example.com".into(),
-                body: "needs tests".into(),
-                message_type: "changes-requested".into(),
-                commit: None,
-                path: None,
-                lines: None,
-                at: None,
-            },
-        ).unwrap();
+        store
+            .request_changes(
+                &review.branch_id,
+                ReviewMessage {
+                    author: "alice@example.com".into(),
+                    body: "needs tests".into(),
+                    message_type: "changes-requested".into(),
+                    commit: None,
+                    path: None,
+                    lines: None,
+                    at: None,
+                },
+            )
+            .unwrap();
         let loaded = store.load_review(&review.branch_id).unwrap();
         assert_eq!(loaded.status, "changes-requested");
         assert_eq!(loaded.messages.len(), 1);
@@ -4142,7 +4174,9 @@ mod tests {
         assert_eq!(loaded.status, "open");
 
         // Integrate review
-        store.integrate_review(&review.branch_id, "9999999").unwrap();
+        store
+            .integrate_review(&review.branch_id, "9999999")
+            .unwrap();
         let loaded = store.load_review(&review.branch_id).unwrap();
         assert_eq!(loaded.status, "merged");
         assert_eq!(loaded.integration_sha.as_deref(), Some("9999999"));

@@ -26,17 +26,17 @@ use ratatui::{Frame, Terminal};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
-use ticgit_lib::{
-    matches_tags, parse_review_revision_change, priority_rank, query, Comment, CommitReviewStatus,
-    Filter, NewReviewOpts, NewTicketOpts, NewWriteupOpts, RealVcsAdapter, Review,
-    ReviewBranchChoice, ReviewBranchSnapshot, ReviewCommitInfo,
-    ReviewMessage as ReviewMessageView, ReviewRevisionChange, ReviewVcs, SearchFilter, SortKey,
-    SortOrder, Ticket, TicketState, TicketStats, TicketStatus, TicketStore, Writeup, WriteupStatus,
-};
 #[cfg(test)]
 pub(crate) use ticgit_lib::{
     is_reviewable_git_branch_name, parse_git_commit_count, parse_git_review_branch_choices,
     parse_review_branch_snapshot,
+};
+use ticgit_lib::{
+    matches_tags, parse_review_revision_change, priority_rank, query, Comment, CommitReviewStatus,
+    Filter, NewReviewOpts, NewTicketOpts, NewWriteupOpts, RealVcsAdapter, Review,
+    ReviewBranchChoice, ReviewBranchSnapshot, ReviewCommitInfo, ReviewMessage as ReviewMessageView,
+    ReviewRevisionChange, ReviewVcs, SearchFilter, SortKey, SortOrder, Ticket, TicketState,
+    TicketStats, TicketStatus, TicketStore, Writeup, WriteupStatus,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -393,7 +393,6 @@ impl From<Review> for TicketReview {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct ReviewCommitInfoLoad {
@@ -5099,12 +5098,10 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.next_review_branch_choice(),
             KeyCode::Up | KeyCode::Char('k') => self.previous_review_branch_choice(),
-            KeyCode::Enter => {
-                if self.create_review_from_selected_branch()? {
-                    self.mode = Mode::Normal;
-                    self.review_branch_choices.clear();
-                    self.review_branch_state.select(None);
-                }
+            KeyCode::Enter if self.create_review_from_selected_branch()? => {
+                self.mode = Mode::Normal;
+                self.review_branch_choices.clear();
+                self.review_branch_state.select(None);
             }
             _ => {}
         }
@@ -5568,11 +5565,8 @@ impl App {
         match edited? {
             Some(edited) => {
                 let (title, description) = editor::parse_ticket_edit(&edited)?;
-                self.store.set_review_details(
-                    &review.branch_id,
-                    &title,
-                    description.as_deref(),
-                )?;
+                self.store
+                    .set_review_details(&review.branch_id, &title, description.as_deref())?;
                 self.status = Some("Updated review branch.".to_string());
                 self.clear_review_caches();
                 self.reload_all(Some(ticket_id), None)?;
@@ -5812,7 +5806,6 @@ impl App {
         };
         Some((ticket, review, sha, location))
     }
-
 
     fn reload_after_review_action(&mut self, ticket_id: uuid::Uuid) -> Result<()> {
         self.clear_review_caches();
@@ -8804,7 +8797,6 @@ fn load_review_branch_choices(
         .map_err(Into::into)
 }
 
-
 fn load_review_branch_snapshot(branch_name: &str) -> Result<ReviewBranchSnapshot> {
     RealVcsAdapter::new()
         .load_branch_snapshot(branch_name)
@@ -8858,7 +8850,6 @@ fn load_ticket_reviews(
         .collect())
 }
 
-
 fn review_branch_label(review: &TicketReview) -> String {
     match review.branch_name.as_deref() {
         Some(name) => name.to_string(),
@@ -8902,7 +8893,6 @@ fn load_review_status_cache(
 fn commit_review_status(store: &TicketStore, sha: &str) -> CommitReviewStatus {
     store.commit_review_status(sha)
 }
-
 
 fn short_hash(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
@@ -9238,11 +9228,7 @@ fn progress_segment(
 fn review_commit_meter(count: usize) -> String {
     let filled = count.min(12);
     let empty = 12usize.saturating_sub(filled);
-    format!(
-        "{} {}",
-        count,
-        format!("{}{}", "█".repeat(filled), "░".repeat(empty))
-    )
+    format!("{} {}{}", count, "█".repeat(filled), "░".repeat(empty))
 }
 
 fn review_authors_display(infos: &[ReviewCommitInfo]) -> String {
@@ -11939,11 +11925,11 @@ fn compact_ticket_list_line(
     while compact_title_width(short_id, &meta, width) < title_target_width {
         if !remove_first_meta_width(&mut meta, LIST_STATE_WIDTH)
             && !remove_first_meta_width(&mut meta, LIST_AGE_WIDTH)
-                && short_id.take().is_none()
-                    && !remove_first_meta_width(&mut meta, LIST_PRIORITY_WIDTH)
-                {
-                    break;
-                }
+            && short_id.take().is_none()
+            && !remove_first_meta_width(&mut meta, LIST_PRIORITY_WIDTH)
+        {
+            break;
+        }
     }
 
     ticket_list_line_from_parts(
