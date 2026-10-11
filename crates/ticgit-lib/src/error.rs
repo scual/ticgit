@@ -55,6 +55,12 @@ pub enum Error {
 
     #[error("signing error: {0}")]
     Signing(String),
+
+    #[error("vcs error: {0}")]
+    Vcs(String),
+
+    #[error("no review metadata found for `{0}`; run `ti review new` first")]
+    ReviewNotFound(String),
 }
 
 impl Error {
