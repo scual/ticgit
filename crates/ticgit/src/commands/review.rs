@@ -203,6 +203,7 @@ fn new(args: NewArgs) -> Result<()> {
         title: args.title,
         description: args.description,
         reviewers: args.reviewers,
+        commits: None,
     };
     let review = store.create_review(&opts, &vcs)?;
     println!("Created review {}: {}", review.branch_id, review.title);

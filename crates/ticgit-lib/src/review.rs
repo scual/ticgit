@@ -21,13 +21,13 @@ pub struct ReviewMessage {
     pub body: String,
     #[serde(rename = "type")]
     pub message_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
 }
 
@@ -141,6 +141,7 @@ pub struct NewReviewOpts {
     pub title: Option<String>,
     pub description: Option<String>,
     pub reviewers: Vec<String>,
+    pub commits: Option<Vec<String>>,
 }
 
 /// Format a [`ReviewRevisionChange`] into the wire string format `<sha>:<change_id>:<patch_id>`.
@@ -566,18 +567,8 @@ impl RealVcsAdapter {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(crate::Error::Vcs(format!("git for-each-ref failed: {}", stderr.trim())));
         }
-        let mut choices = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| git_review_branch_choice_from_ref_line(connected_branches, line))
-            .collect::<Vec<_>>();
+        let mut choices = parse_git_review_branch_choices(connected_branches, &output.stdout)?;
         self.fill_missing_commits_ahead(&mut choices);
-        choices.sort_by(|a, b| {
-            b.last_commit_at
-                .cmp(&a.last_commit_at)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        let mut seen = BTreeSet::new();
-        choices.retain(|choice| seen.insert(choice.name.clone()));
         Ok(choices)
     }
 }
@@ -691,31 +682,16 @@ impl ReviewVcs for RealVcsAdapter {
     fn load_branch_snapshot(&self, branch_name: &str) -> crate::Result<ReviewBranchSnapshot> {
         if let Ok(output) = self.but_command(&["branch", "show", branch_name, "--json"]).output() {
             if output.status.success() {
-                if let Ok(show) = serde_json::from_slice::<ButBranchShow>(&output.stdout) {
-                    let head = show.commits.first();
-                    let head_sha = head
-                        .map(|c| c.sha.clone())
-                        .filter(|sha| !sha.is_empty())
-                        .unwrap_or_else(|| self.resolve_ref(branch_name).unwrap_or_default());
-                    let commits = show
-                        .commits
-                        .iter()
-                        .map(|c| c.sha.clone())
-                        .filter(|sha| !sha.is_empty())
-                        .collect();
-                    let base_sha = show
-                        .base_commit
-                        .map(|b| b.sha)
-                        .unwrap_or_else(|| self.merge_base(&self.default_base_ref(), branch_name).unwrap_or_default());
-                    let title = head
-                        .and_then(|c| c.message.lines().next().map(str::to_string))
-                        .unwrap_or_else(|| self.commit_info(&head_sha).subject);
-                    return Ok(ReviewBranchSnapshot {
-                        base_sha,
-                        head_sha,
-                        commits,
-                        title,
-                    });
+                if let Ok(mut snapshot) = parse_review_branch_snapshot(branch_name, &output.stdout) {
+                    if snapshot.head_sha.is_empty() {
+                        snapshot.head_sha = self.resolve_ref(branch_name).unwrap_or_default();
+                    }
+                    if snapshot.base_sha.is_empty() {
+                        snapshot.base_sha = self
+                            .merge_base(&self.default_base_ref(), branch_name)
+                            .unwrap_or_default();
+                    }
+                    return Ok(snapshot);
                 }
             }
         }
@@ -884,7 +860,17 @@ fn git_review_branch_choice_from_ref_line(
     })
 }
 
-fn is_reviewable_git_branch_name(name: &str) -> bool {
+/// Extract the branch name from a `code` specifier like `origin:my-branch` or `https://...:my-branch`.
+#[must_use]
+pub fn code_branch_name(code: &str) -> Option<&str> {
+    code.rsplit_once(':')
+        .map(|(_, branch)| branch.trim())
+        .filter(|branch| !branch.is_empty())
+}
+
+/// Check if a Git branch name is suitable for review (excluding base branches and meta/gitbutler refs).
+#[must_use]
+pub fn is_reviewable_git_branch_name(name: &str) -> bool {
     !name.is_empty()
         && name != "HEAD"
         && name != "origin"
@@ -895,6 +881,65 @@ fn is_reviewable_git_branch_name(name: &str) -> bool {
         && !name.ends_with("/HEAD")
         && !name.starts_with("gitbutler/")
         && !name.starts_with("meta/")
+}
+
+/// Parse git commit count from `git rev-list --count` output.
+#[must_use]
+pub fn parse_git_commit_count(stdout: &[u8]) -> Option<i64> {
+    String::from_utf8_lossy(stdout).trim().parse().ok()
+}
+
+/// Parse review branch choices from `git for-each-ref` output.
+pub fn parse_git_review_branch_choices(
+    connected_branches: &BTreeSet<String>,
+    stdout: &[u8],
+) -> crate::Result<Vec<ReviewBranchChoice>> {
+    let mut choices = String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| git_review_branch_choice_from_ref_line(connected_branches, line))
+        .collect::<Vec<_>>();
+    choices.sort_by(|a, b| {
+        b.last_commit_at
+            .cmp(&a.last_commit_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let mut seen = BTreeSet::new();
+    choices.retain(|choice| seen.insert(choice.name.clone()));
+    Ok(choices)
+}
+
+/// Parse a `ReviewBranchSnapshot` from `but branch show --json` output.
+pub fn parse_review_branch_snapshot(
+    branch_name: &str,
+    json: &[u8],
+) -> crate::Result<ReviewBranchSnapshot> {
+    let show = serde_json::from_slice::<ButBranchShow>(json)
+        .map_err(|e| crate::Error::Vcs(format!("parsing but branch show --json: {e}")))?;
+    let head = show.commits.first();
+    let head_sha = head
+        .map(|commit| commit.sha.clone())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_default();
+    let commits = show
+        .commits
+        .iter()
+        .map(|commit| commit.sha.clone())
+        .filter(|sha| !sha.is_empty())
+        .collect::<Vec<_>>();
+    let base_sha = show
+        .base_commit
+        .map(|base| base.sha)
+        .unwrap_or_default();
+    let title = head
+        .map(|commit| commit.message.clone())
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| branch_name.to_string());
+    Ok(ReviewBranchSnapshot {
+        base_sha,
+        head_sha,
+        commits,
+        title,
+    })
 }
 
 #[derive(Debug, Deserialize)]

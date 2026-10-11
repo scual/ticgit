@@ -1315,7 +1315,11 @@ impl TicketStore {
         for reviewer in &opts.reviewers {
             target.set_add(keys::REVIEW_REVIEWERS_KEY, reviewer)?;
         }
-        self.refresh_review_revisions_from_range(&branch_id, &base_sha, &head_sha, vcs)?;
+        if let Some(ref commits) = opts.commits {
+            self.refresh_review_revisions_from_commits(&branch_id, commits, vcs)?;
+        } else {
+            self.refresh_review_revisions_from_range(&branch_id, &base_sha, &head_sha, vcs)?;
+        }
         self.session
             .target(&Target::project())
             .set_add(keys::REVIEW_INDEX_KEY, branch_id.as_str())?;
@@ -1475,6 +1479,21 @@ impl TicketStore {
                 if let Ok(review) = self.load_review(&branch_id) {
                     reviews.insert(ticket.id, review);
                 }
+            } else if let Some(branch_name) = ticket.code.as_deref().and_then(crate::review::code_branch_name) {
+                if let Ok(review) = self.load_review(branch_name) {
+                    reviews.insert(ticket.id, review);
+                } else {
+                    reviews.insert(
+                        ticket.id,
+                        Review {
+                            branch_id: branch_name.to_string(),
+                            branch_name: Some(branch_name.to_string()),
+                            title: branch_name.to_string(),
+                            status: "open".to_string(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
 
@@ -1594,6 +1613,23 @@ impl TicketStore {
         self.refresh_review_revisions_from_range(branch_id, &base_sha, &head_sha, vcs)?;
         let review = self.load_review(branch_id)?;
         Ok((review, head_sha))
+    }
+
+    /// Update a review's head and refresh revisions from an existing branch snapshot.
+    pub fn update_review_from_snapshot(
+        &self,
+        branch_id: &str,
+        snapshot: &crate::ReviewBranchSnapshot,
+        vcs: &impl ReviewVcs,
+    ) -> Result<()> {
+        let target = self.session.target(&Target::branch(branch_id));
+        let base_is_empty = meta_string(target.get_value("base:sha")?)
+            .is_none_or(|base| base.is_empty());
+        if base_is_empty && !snapshot.base_sha.is_empty() {
+            target.set("base:sha", snapshot.base_sha.as_str())?;
+        }
+        target.set("head:sha", snapshot.head_sha.as_str())?;
+        self.refresh_review_revisions_from_commits(branch_id, &snapshot.commits, vcs)
     }
 
     /// Record merge / integration commit for a review.
@@ -3951,6 +3987,7 @@ mod tests {
                 title: Some("Reviewable task".into()),
                 description: Some("Implement feature".into()),
                 reviewers: vec!["reviewer@example.com".into()],
+                commits: None,
             },
             &fake,
         ).unwrap();
@@ -3998,6 +4035,7 @@ mod tests {
                 title: Some("History test".into()),
                 description: None,
                 reviewers: vec![],
+                commits: None,
             },
             &fake,
         ).unwrap();
@@ -4035,6 +4073,7 @@ mod tests {
                 title: Some("Approvals test".into()),
                 description: None,
                 reviewers: vec![],
+                commits: None,
             },
             &fake,
         ).unwrap();
@@ -4070,6 +4109,7 @@ mod tests {
                 title: Some("Lifecycle test".into()),
                 description: None,
                 reviewers: vec![],
+                commits: None,
             },
             &fake,
         ).unwrap();

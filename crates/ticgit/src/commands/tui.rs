@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -23,14 +23,20 @@ use ratatui::widgets::{
     Block, Borders, Clear, Gauge, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui::{Frame, Terminal};
-use serde::{Deserialize, Serialize};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use ticgit_lib::{
-    keys, matches_tags, priority_rank, query, Comment, Filter, MetaValue, NewTicketOpts,
-    NewWriteupOpts, SearchFilter, SortKey, SortOrder, Target, Ticket, TicketState, TicketStats,
-    TicketStatus, TicketStore, Writeup, WriteupStatus,
+    matches_tags, parse_review_revision_change, priority_rank, query, Comment, CommitReviewStatus,
+    Filter, NewReviewOpts, NewTicketOpts, NewWriteupOpts, RealVcsAdapter, Review,
+    ReviewBranchChoice, ReviewBranchSnapshot, ReviewCommitInfo,
+    ReviewMessage as ReviewMessageView, ReviewRevisionChange, ReviewVcs, SearchFilter, SortKey,
+    SortOrder, Ticket, TicketState, TicketStats, TicketStatus, TicketStore, Writeup, WriteupStatus,
+};
+#[cfg(test)]
+pub(crate) use ticgit_lib::{
+    is_reviewable_git_branch_name, parse_git_commit_count, parse_git_review_branch_choices,
+    parse_review_branch_snapshot,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -364,122 +370,35 @@ struct TicketReview {
     messages: Vec<ReviewMessageView>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-struct ReviewRevisionChange {
-    sha: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    change_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    patch_id: Option<String>,
+impl From<Review> for TicketReview {
+    fn from(r: Review) -> Self {
+        Self {
+            branch_id: r.branch_id,
+            branch_name: r.branch_name,
+            title: r.title,
+            description: r.description,
+            status: r.status,
+            head_sha: r.head_sha,
+            revisions: r
+                .revisions
+                .iter()
+                .map(|e| match (&e.change_id, &e.patch_id) {
+                    (Some(c), Some(p)) => format!("{}:{}:{}", e.sha, c, p),
+                    (Some(c), None) => format!("{}:{}", e.sha, c),
+                    _ => e.sha.clone(),
+                })
+                .collect(),
+            revision_changes: r.revision_history,
+            messages: r.messages,
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReviewBranchChoice {
-    name: String,
-    last_commit_at: Option<OffsetDateTime>,
-    commits_ahead: Option<i64>,
-    author: String,
-}
 
 #[derive(Debug, Clone)]
 struct ReviewCommitInfoLoad {
     sha: String,
     info: ReviewCommitInfo,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButBranchList {
-    #[serde(default, rename = "appliedStacks")]
-    applied_stacks: Vec<ButAppliedStack>,
-    #[serde(default)]
-    branches: Vec<ButBranch>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButAppliedStack {
-    #[serde(default)]
-    heads: Vec<ButBranch>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButBranch {
-    name: String,
-    #[serde(default, rename = "lastCommitAt")]
-    last_commit_at: Option<i64>,
-    #[serde(default, rename = "commitsAhead")]
-    commits_ahead: Option<i64>,
-    #[serde(default, rename = "lastAuthor")]
-    last_author: Option<ButAuthor>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButAuthor {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    email: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButBranchShow {
-    #[serde(default)]
-    commits: Vec<ButBranchCommit>,
-    #[serde(default, rename = "baseCommit")]
-    base_commit: Option<ButBranchBaseCommit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButBranchCommit {
-    sha: String,
-    #[serde(default)]
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ButBranchBaseCommit {
-    sha: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReviewBranchSnapshot {
-    base_sha: String,
-    head_sha: String,
-    commits: Vec<String>,
-    title: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-struct ReviewMessageView {
-    author: String,
-    body: String,
-    #[serde(rename = "type")]
-    message_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lines: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    at: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CommitReviewStatus {
-    reviewed: BTreeSet<String>,
-    approvals: BTreeSet<String>,
-    signed_off: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-struct ReviewCommitInfo {
-    subject: String,
-    body: String,
-    author: String,
-    updated: String,
-    shortstat: String,
-    change_id: Option<String>,
-    patch_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -5649,12 +5568,11 @@ impl App {
         match edited? {
             Some(edited) => {
                 let (title, description) = editor::parse_ticket_edit(&edited)?;
-                let target = self
-                    .store
-                    .session()
-                    .target(&Target::branch(&review.branch_id));
-                target.set("title", title.as_str())?;
-                target.set("description", description.as_deref().unwrap_or(""))?;
+                self.store.set_review_details(
+                    &review.branch_id,
+                    &title,
+                    description.as_deref(),
+                )?;
                 self.status = Some("Updated review branch.".to_string());
                 self.clear_review_caches();
                 self.reload_all(Some(ticket_id), None)?;
@@ -5775,24 +5693,20 @@ impl App {
         }
 
         let branch_id = review.branch_id.clone();
+        let message = ReviewMessageView {
+            author: self.store.email().to_string(),
+            body: body.to_string(),
+            message_type: message_type.to_string(),
+            commit: Some(sha),
+            path: location.as_ref().map(|location| location.path.clone()),
+            lines: location.map(|location| location.line.to_string()),
+            at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+        };
         if message_type == "changes-requested" {
-            self.store
-                .session()
-                .target(&Target::branch(&branch_id))
-                .set("status", "changes-requested")?;
+            self.store.request_changes(&branch_id, message)?;
+        } else {
+            self.store.add_review_comment(&branch_id, message)?;
         }
-        self.append_review_message(
-            &branch_id,
-            ReviewMessageView {
-                author: self.store.email().to_string(),
-                body: body.to_string(),
-                message_type: message_type.to_string(),
-                commit: Some(sha),
-                path: location.as_ref().map(|location| location.path.clone()),
-                lines: location.map(|location| location.line.to_string()),
-                at: now_rfc3339().ok(),
-            },
-        )?;
         self.reload_after_review_action(ticket.id)?;
         self.status = Some(if message_type == "changes-requested" {
             "Requested changes.".to_string()
@@ -5864,40 +5778,12 @@ impl App {
         sha: String,
         body: &str,
     ) -> Result<()> {
-        let email = self.store.email().to_string();
-        let commit_target = self.store.session().target(&Target::commit(&sha)?);
-        commit_target.set_add("review:approvals", &email)?;
-        commit_target.set_add("review:reviewed", &email)?;
-        self.append_review_message(
-            &review.branch_id,
-            ReviewMessageView {
-                author: email,
-                body: body.to_string(),
-                message_type: "approval".to_string(),
-                commit: Some(sha.clone()),
-                path: None,
-                lines: None,
-                at: now_rfc3339().ok(),
-            },
-        )?;
-        if self.review_commits_all_approved(&review, &sha) {
-            self.store
-                .session()
-                .target(&Target::branch(&review.branch_id))
-                .set("status", "approved")?;
-        }
+        self.store
+            .approve_review_commit(Some(&review.branch_id), &sha, body)?;
         self.mode = Mode::Normal;
         self.reload_after_review_action(ticket.id)?;
         self.status = Some(format!("Approved commit {}.", short_hash(&sha)));
         Ok(())
-    }
-
-    fn review_commits_all_approved(&self, review: &TicketReview, approved_sha: &str) -> bool {
-        let commits = review_commits(review);
-        !commits.is_empty()
-            && commits.iter().all(|sha| {
-                sha == approved_sha || !commit_review_status(&self.store, sha).approvals.is_empty()
-            })
     }
 
     fn selected_review_action_target(
@@ -5927,14 +5813,6 @@ impl App {
         Some((ticket, review, sha, location))
     }
 
-    fn append_review_message(&self, branch_id: &str, message: ReviewMessageView) -> Result<()> {
-        let json = serde_json::to_string(&message)?;
-        self.store
-            .session()
-            .target(&Target::branch(branch_id))
-            .list_push("review:messages", &json)?;
-        Ok(())
-    }
 
     fn reload_after_review_action(&mut self, ticket_id: uuid::Uuid) -> Result<()> {
         self.clear_review_caches();
@@ -6039,10 +5917,7 @@ impl App {
             self.mode = Mode::Normal;
             return Ok(());
         }
-        self.store
-            .session()
-            .target(&Target::branch(&branch_id))
-            .set("status", "closed")?;
+        self.store.close_review(&branch_id)?;
         self.mode = Mode::Normal;
         self.clear_review_caches();
         self.reload_all(Some(ticket_id), None)?;
@@ -6056,10 +5931,7 @@ impl App {
             self.status = Some("Select a review first.".to_string());
             return Ok(());
         };
-        self.store
-            .session()
-            .target(&Target::branch(&review.branch_id))
-            .set("status", "open")?;
+        self.store.reopen_review(&review.branch_id)?;
         self.store
             .set_lifecycle(&ticket_id, TicketStatus::Open, TicketState::Review)?;
         self.clear_review_caches();
@@ -6103,17 +5975,11 @@ impl App {
             return Ok(());
         }
 
-        let target = self
-            .store
-            .session()
-            .target(&Target::branch(&review.branch_id));
-        let base_is_empty = meta_string(target.get_value("base:sha").ok().flatten())
-            .is_none_or(|base| base.is_empty());
-        if base_is_empty && !snapshot.base_sha.is_empty() {
-            target.set("base:sha", snapshot.base_sha.as_str())?;
-        }
-        target.set("head:sha", snapshot.head_sha.as_str())?;
-        refresh_review_revisions_from_commits(&self.store, &review.branch_id, &snapshot.commits)?;
+        self.store.update_review_from_snapshot(
+            &review.branch_id,
+            &snapshot,
+            &RealVcsAdapter::new(),
+        )?;
 
         self.clear_review_caches();
         self.reload_all(Some(ticket_id), None)?;
@@ -8933,256 +8799,16 @@ fn view_state_title(title: String) -> Line<'static> {
 fn load_review_branch_choices(
     connected_review_branches: &BTreeSet<String>,
 ) -> Result<Vec<ReviewBranchChoice>> {
-    let output = Command::new("but")
-        .args(["branch", "list", "--json"])
-        .output()
-        .with_context(|| "running but branch list --json")?;
-    if !output.status.success() {
-        return load_git_review_branch_choices(connected_review_branches);
-    }
-    let branch_list: ButBranchList =
-        serde_json::from_slice(&output.stdout).with_context(|| "parsing but branch list --json")?;
-    let mut branches = branch_list.branches;
-    for stack in branch_list.applied_stacks {
-        branches.extend(stack.heads);
-    }
-
-    let mut choices = branches
-        .into_iter()
-        .filter(|branch| !connected_review_branches.contains(&branch.name))
-        .map(|branch| ReviewBranchChoice {
-            name: branch.name,
-            last_commit_at: branch
-                .last_commit_at
-                .and_then(|millis| OffsetDateTime::from_unix_timestamp(millis / 1000).ok()),
-            commits_ahead: branch.commits_ahead,
-            author: branch_author_display(branch.last_author),
-        })
-        .collect::<Vec<_>>();
-    fill_missing_review_branch_commits_ahead(&mut choices);
-    choices.sort_by(|a, b| {
-        b.last_commit_at
-            .cmp(&a.last_commit_at)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    let mut seen = BTreeSet::new();
-    choices.retain(|choice| seen.insert(choice.name.clone()));
-    Ok(choices)
+    RealVcsAdapter::new()
+        .load_branch_choices(connected_review_branches)
+        .map_err(Into::into)
 }
 
-fn load_git_review_branch_choices(
-    connected_review_branches: &BTreeSet<String>,
-) -> Result<Vec<ReviewBranchChoice>> {
-    let output = Command::new("git")
-        .args([
-            "for-each-ref",
-            "--format=%(refname:short)%09%(committerdate:unix)%09%(authorname)%09%(authoremail)",
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .output()
-        .with_context(|| "running git for-each-ref")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git for-each-ref failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    parse_git_review_branch_choices(connected_review_branches, &output.stdout)
-}
-
-fn parse_git_review_branch_choices(
-    connected_review_branches: &BTreeSet<String>,
-    stdout: &[u8],
-) -> Result<Vec<ReviewBranchChoice>> {
-    let mut choices = String::from_utf8_lossy(stdout)
-        .lines()
-        .filter_map(|line| git_review_branch_choice_from_ref_line(connected_review_branches, line))
-        .collect::<Vec<_>>();
-    fill_missing_review_branch_commits_ahead(&mut choices);
-    choices.sort_by(|a, b| {
-        b.last_commit_at
-            .cmp(&a.last_commit_at)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    let mut seen = BTreeSet::new();
-    choices.retain(|choice| seen.insert(choice.name.clone()));
-    Ok(choices)
-}
-
-fn git_review_branch_choice_from_ref_line(
-    connected_review_branches: &BTreeSet<String>,
-    line: &str,
-) -> Option<ReviewBranchChoice> {
-    let mut fields = line.split('\t');
-    let name = fields.next()?.trim();
-    if !is_reviewable_git_branch_name(name) || connected_review_branches.contains(name) {
-        return None;
-    }
-    let last_commit_at = fields
-        .next()
-        .and_then(|timestamp| timestamp.parse::<i64>().ok())
-        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok());
-    let author_name = fields.next().unwrap_or_default().trim();
-    let author_email = fields
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_start_matches('<')
-        .trim_end_matches('>');
-    Some(ReviewBranchChoice {
-        name: name.to_string(),
-        last_commit_at,
-        commits_ahead: None,
-        author: if !author_name.is_empty() {
-            author_name.to_string()
-        } else if !author_email.is_empty() {
-            author_email.to_string()
-        } else {
-            "-".to_string()
-        },
-    })
-}
-
-fn is_reviewable_git_branch_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "HEAD"
-        && name != "origin"
-        && name != "main"
-        && name != "master"
-        && name != "origin/main"
-        && name != "origin/master"
-        && !name.ends_with("/HEAD")
-        && !name.starts_with("gitbutler/")
-        && !name.starts_with("meta/")
-}
-
-fn fill_missing_review_branch_commits_ahead(choices: &mut [ReviewBranchChoice]) {
-    for choice in choices {
-        if choice.commits_ahead.is_none() {
-            choice.commits_ahead = review_commits_ahead_of_target(&choice.name);
-        }
-    }
-}
-
-fn review_commits_ahead_of_target(branch_name: &str) -> Option<i64> {
-    let target = default_review_base_ref();
-    let branch = resolve_review_branch_ref(branch_name).ok()?;
-    let range = format!("{target}..{}", branch.name);
-    let output = Command::new("git")
-        .args(["rev-list", "--count", &range])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_git_commit_count(&output.stdout)
-}
-
-fn parse_git_commit_count(stdout: &[u8]) -> Option<i64> {
-    String::from_utf8_lossy(stdout).trim().parse().ok()
-}
-
-fn branch_author_display(author: Option<ButAuthor>) -> String {
-    author
-        .and_then(|author| author.name.or(author.email))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "-".to_string())
-}
 
 fn load_review_branch_snapshot(branch_name: &str) -> Result<ReviewBranchSnapshot> {
-    let output = Command::new("but")
-        .args(["branch", "show", branch_name, "--json"])
-        .output()
-        .with_context(|| format!("running but branch show {branch_name} --json"))?;
-    if output.status.success() {
-        return parse_review_branch_snapshot(branch_name, &output.stdout);
-    }
-
-    let branch_ref = resolve_review_branch_ref(branch_name)?;
-    let base_sha = review_base_sha(&branch_ref.name)?;
-    let head_sha = branch_ref.sha;
-    let commits = review_revision_list(&base_sha, &head_sha)?;
-    Ok(ReviewBranchSnapshot {
-        base_sha,
-        head_sha: head_sha.clone(),
-        commits,
-        title: review_commit_info(&head_sha).subject,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedReviewBranchRef {
-    name: String,
-    sha: String,
-}
-
-fn resolve_review_branch_ref(branch_name: &str) -> Result<ResolvedReviewBranchRef> {
-    let mut candidates = vec![branch_name.to_string()];
-    if !branch_name.starts_with("origin/") && !branch_name.starts_with("refs/") {
-        candidates.push(format!("origin/{branch_name}"));
-    }
-    let mut last_error = None;
-    for candidate in candidates {
-        match resolve_git_ref(&candidate) {
-            Ok(sha) => {
-                return Ok(ResolvedReviewBranchRef {
-                    name: candidate,
-                    sha,
-                });
-            }
-            Err(err) => last_error = Some(err),
-        }
-    }
-    if let Some(err) = last_error {
-        Err(err).with_context(|| {
-            format!(
-                "could not resolve review branch `{branch_name}`; GitButler branch data was unavailable and no Git ref with that name exists"
-            )
-        })
-    } else {
-        anyhow::bail!("could not resolve empty review branch")
-    }
-}
-
-fn parse_review_branch_snapshot(branch_name: &str, json: &[u8]) -> Result<ReviewBranchSnapshot> {
-    let show: ButBranchShow =
-        serde_json::from_slice(json).with_context(|| "parsing but branch show --json")?;
-    let head = show.commits.first();
-    let head_sha = head
-        .map(|commit| commit.sha.clone())
-        .filter(|sha| !sha.is_empty())
-        .unwrap_or_else(|| resolve_git_ref(branch_name).unwrap_or_default());
-    let commits = show
-        .commits
-        .iter()
-        .map(|commit| commit.sha.clone())
-        .filter(|sha| !sha.is_empty())
-        .collect::<Vec<_>>();
-    let base_sha = show
-        .base_commit
-        .map(|base| base.sha)
-        .filter(|sha| !sha.is_empty())
-        .or_else(|| review_base_from_commits(&commits))
-        .unwrap_or_else(|| {
-            review_base_sha(branch_name)
-                .unwrap_or_else(|_| resolve_git_ref("HEAD").unwrap_or_default())
-        });
-    Ok(ReviewBranchSnapshot {
-        base_sha,
-        head_sha,
-        commits,
-        title: head
-            .map(|commit| commit.message.clone())
-            .filter(|message| !message.is_empty())
-            .unwrap_or_else(|| branch_name.to_string()),
-    })
-}
-
-fn review_base_from_commits(commits: &[String]) -> Option<String> {
-    let oldest = commits.last()?.as_str();
-    let parent = format!("{oldest}^");
-    resolve_git_ref(&parent).ok()
+    RealVcsAdapter::new()
+        .load_branch_snapshot(branch_name)
+        .map_err(Into::into)
 }
 
 fn review_ticket_title(branch_name: &str, snapshot: &ReviewBranchSnapshot) -> String {
@@ -9206,333 +8832,32 @@ fn create_review_for_ticket(
     branch_name: &str,
     snapshot: &ReviewBranchSnapshot,
 ) -> Result<String> {
-    let branch_id = create_review_branch_id(store, branch_name)?;
-    let target = store.session().target(&Target::branch(&branch_id));
-    let ticket_id = ticket.id.to_string();
-    let description = ticket.description.clone().unwrap_or_default();
-    let now = now_rfc3339()?;
-
-    target.set_add("issue:id", &ticket_id)?;
-    target.set("title", ticket.title.as_str())?;
-    target.set("description", description.as_str())?;
-    target.set("status", "open")?;
-    target.set("base:sha", snapshot.base_sha.as_str())?;
-    target.set("head:sha", snapshot.head_sha.as_str())?;
-    target.set("review:created-at", now.as_str())?;
-    target.set("review:created-by", store.email())?;
-    target.set("code:branch", branch_name)?;
-    if let Some(url) = remote_url()? {
-        target.set("code:url", url.as_str())?;
-        if url.starts_with("http://") || url.starts_with("https://") {
-            let code = format!("{url}:{branch_name}");
-            store.set_code(&ticket.id, Some(&code))?;
-        }
-    }
-    refresh_review_revisions_from_commits(store, &branch_id, &snapshot.commits)?;
-
-    let project = store.session().target(&Target::project());
-    project.set(
-        &keys::ticket_field(&ticket.id, "branch-id"),
-        branch_id.as_str(),
+    let review = store.create_review(
+        &NewReviewOpts {
+            branch: Some(branch_name.to_string()),
+            base: Some(snapshot.base_sha.clone()),
+            ticket: Some(ticket.id.to_string()),
+            title: Some(ticket.title.clone()),
+            description: ticket.description.clone(),
+            reviewers: Vec::new(),
+            commits: Some(snapshot.commits.clone()),
+        },
+        &RealVcsAdapter::new(),
     )?;
-    project.set_add("review:branches", branch_id.as_str())?;
-    Ok(branch_id)
-}
-
-fn create_review_branch_id(store: &TicketStore, branch_name: &str) -> Result<String> {
-    let branch_target = store.session().target(&Target::branch(branch_name));
-    let timestamp = OffsetDateTime::now_utc().unix_timestamp();
-    let branch_id = format!("{branch_name}@{timestamp}");
-    branch_target.set("branch-id", branch_id.as_str())?;
-    Ok(branch_id)
-}
-
-fn refresh_review_revisions_from_commits(
-    store: &TicketStore,
-    branch_id: &str,
-    commits: &[String],
-) -> Result<()> {
-    let target = store.session().target(&Target::branch(branch_id));
-    let previous = target
-        .list_entries("review:revisions")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| parse_review_revision_change(&entry.value))
-        .collect::<Vec<_>>();
-    let commits = commits
-        .iter()
-        .map(|sha| review_revision_change_for_commit(store, sha))
-        .collect::<Result<Vec<_>>>()?;
-    target.remove("review:revisions")?;
-    for entry in &commits {
-        target.list_push("review:revisions", &format_review_revision(entry))?;
-    }
-    append_review_revision_changes(store, branch_id, &previous)?;
-    append_review_revision_changes(store, branch_id, &commits)?;
-    Ok(())
-}
-
-fn append_review_revision_changes(
-    store: &TicketStore,
-    branch_id: &str,
-    commits: &[ReviewRevisionChange],
-) -> Result<()> {
-    let target = store.session().target(&Target::branch(branch_id));
-    let mut history = target
-        .list_entries("review:revision-history")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| parse_review_revision_change(&entry.value))
-        .collect::<Vec<_>>();
-
-    let mut changed = false;
-    for entry in &mut history {
-        if entry.patch_id.is_none() {
-            entry.patch_id = ensure_commit_patch_id(store, &entry.sha)?;
-            changed |= entry.patch_id.is_some();
-        }
-    }
-
-    let mut seen = history
-        .iter()
-        .map(|entry| entry.sha.clone())
-        .collect::<BTreeSet<_>>();
-    for entry in commits.iter().rev() {
-        if seen.insert(entry.sha.clone()) {
-            history.push(entry.clone());
-            changed = true;
-        }
-    }
-
-    if changed {
-        target.remove("review:revision-history")?;
-        for entry in history {
-            target.list_push("review:revision-history", &serde_json::to_string(&entry)?)?;
-        }
-    }
-    Ok(())
-}
-
-fn review_revision_change_for_commit(
-    store: &TicketStore,
-    sha: &str,
-) -> Result<ReviewRevisionChange> {
-    Ok(ReviewRevisionChange {
-        sha: sha.to_string(),
-        change_id: commit_change_id(sha),
-        patch_id: ensure_commit_patch_id(store, sha)?,
-    })
-}
-
-fn format_review_revision(entry: &ReviewRevisionChange) -> String {
-    format!(
-        "{}:{}:{}",
-        entry.sha,
-        entry.change_id.as_deref().unwrap_or_default(),
-        entry.patch_id.as_deref().unwrap_or_default()
-    )
-}
-
-fn review_revision_list(base_sha: &str, head_sha: &str) -> Result<Vec<String>> {
-    if base_sha.is_empty() || head_sha.is_empty() {
-        return Ok(Vec::new());
-    }
-    let range = format!("{base_sha}..{head_sha}");
-    let output = Command::new("git")
-        .args(["rev-list", &range])
-        .output()
-        .with_context(|| "running git rev-list")?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-fn review_base_sha(branch_name: &str) -> Result<String> {
-    let base_ref = default_review_base_ref();
-    let output = Command::new("git")
-        .args(["merge-base", &base_ref, branch_name])
-        .output()
-        .with_context(|| format!("running git merge-base {base_ref} {branch_name}"))?;
-    if output.status.success() {
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !sha.is_empty() {
-            return Ok(sha);
-        }
-    }
-    resolve_git_ref(&base_ref).or_else(|_| resolve_git_ref("HEAD"))
-}
-
-fn default_review_base_ref() -> String {
-    for candidate in ["origin/main", "origin/master", "main", "master"] {
-        if resolve_git_ref(candidate).is_ok() {
-            return candidate.to_string();
-        }
-    }
-    "HEAD".into()
-}
-
-fn remote_url() -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .with_context(|| "running git remote get-url origin")?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!url.is_empty()).then_some(url))
-}
-
-fn now_rfc3339() -> Result<String> {
-    Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
+    Ok(review.branch_id)
 }
 
 fn load_ticket_reviews(
     store: &TicketStore,
     tickets: &[Ticket],
 ) -> Result<HashMap<uuid::Uuid, TicketReview>> {
-    let project = store.session().target(&Target::project());
-    let mut reviews = HashMap::new();
-
-    for ticket in tickets {
-        if let Some(branch_id) =
-            meta_string(project.get_value(&keys::ticket_field(&ticket.id, "branch-id"))?)
-        {
-            reviews.insert(ticket.id, load_review_metadata(store, &branch_id));
-        } else if let Some(branch_name) = ticket.code.as_deref().and_then(code_branch_name) {
-            reviews.insert(ticket.id, ticket_code_review(branch_name));
-        }
-    }
-
-    for branch_id in meta_set(project.get_value("review:branches")?) {
-        let review = load_review_metadata(store, &branch_id);
-        let target = store.session().target(&Target::branch(&branch_id));
-        for ticket_id in meta_set(target.get_value("issue:id")?) {
-            if let Ok(ticket_id) = uuid::Uuid::parse_str(&ticket_id) {
-                reviews.entry(ticket_id).or_insert_with(|| review.clone());
-            }
-        }
-    }
-
-    Ok(reviews)
-}
-
-fn load_review_metadata(store: &TicketStore, branch_id: &str) -> TicketReview {
-    let target = store.session().target(&Target::branch(branch_id));
-    let branch_name = meta_string(target.get_value("code:branch").ok().flatten());
-    let title = meta_string(target.get_value("title").ok().flatten())
-        .or_else(|| branch_name.clone())
-        .unwrap_or_else(|| branch_id.to_string());
-    let description =
-        meta_string(target.get_value("description").ok().flatten()).unwrap_or_default();
-    let status = meta_string(target.get_value("status").ok().flatten()).unwrap_or_default();
-    let head_sha = meta_string(target.get_value("head:sha").ok().flatten());
-    let revisions: Vec<String> = target
-        .list_entries("review:revisions")
-        .unwrap_or_default()
+    let reviews = store.load_ticket_reviews(tickets)?;
+    Ok(reviews
         .into_iter()
-        .map(|entry| entry.value)
-        .collect();
-    let mut revision_changes = target
-        .list_entries("review:revision-history")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| parse_review_revision_change(&entry.value))
-        .collect::<Vec<_>>();
-    if revision_changes.is_empty() {
-        revision_changes = revisions
-            .iter()
-            .rev()
-            .filter_map(|entry| parse_review_revision_change(entry))
-            .collect();
-    }
-    let messages = target
-        .list_entries("review:messages")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| serde_json::from_str::<ReviewMessageView>(&entry.value).ok())
-        .collect();
-    TicketReview {
-        branch_id: branch_id.to_string(),
-        branch_name,
-        title,
-        description,
-        status,
-        head_sha,
-        revisions,
-        revision_changes,
-        messages,
-    }
+        .map(|(id, r)| (id, TicketReview::from(r)))
+        .collect())
 }
 
-fn ticket_code_review(branch_name: &str) -> TicketReview {
-    TicketReview {
-        branch_id: branch_name.to_string(),
-        branch_name: Some(branch_name.to_string()),
-        title: branch_name.to_string(),
-        description: String::new(),
-        status: "open".to_string(),
-        head_sha: resolve_git_ref(branch_name).ok(),
-        revisions: Vec::new(),
-        revision_changes: Vec::new(),
-        messages: Vec::new(),
-    }
-}
-
-fn parse_review_revision_change(value: &str) -> Option<ReviewRevisionChange> {
-    if let Ok(entry) = serde_json::from_str::<ReviewRevisionChange>(value) {
-        return Some(entry);
-    }
-
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Some((sha, rest)) = value.split_once(':') {
-        let (change_id, patch_id) = rest.split_once(':').unwrap_or((rest, ""));
-        return Some(ReviewRevisionChange {
-            sha: sha.to_string(),
-            change_id: non_empty(change_id),
-            patch_id: non_empty(patch_id),
-        });
-    }
-    Some(ReviewRevisionChange {
-        sha: value.to_string(),
-        change_id: None,
-        patch_id: None,
-    })
-}
-
-fn code_branch_name(code: &str) -> Option<&str> {
-    code.rsplit_once(':')
-        .map(|(_, branch)| branch.trim())
-        .filter(|branch| !branch.is_empty())
-}
-
-fn meta_string(value: Option<MetaValue>) -> Option<String> {
-    match value {
-        Some(MetaValue::String(value)) if !value.is_empty() => Some(value),
-        _ => None,
-    }
-}
-
-fn meta_set(value: Option<MetaValue>) -> BTreeSet<String> {
-    match value {
-        Some(MetaValue::Set(values)) => values,
-        Some(MetaValue::String(value)) if !value.is_empty() => BTreeSet::from([value]),
-        _ => BTreeSet::new(),
-    }
-}
-
-fn non_empty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_string())
-}
 
 fn review_branch_label(review: &TicketReview) -> String {
     match review.branch_name.as_deref() {
@@ -9575,30 +8900,9 @@ fn load_review_status_cache(
 }
 
 fn commit_review_status(store: &TicketStore, sha: &str) -> CommitReviewStatus {
-    let Ok(target) = Target::commit(sha) else {
-        return CommitReviewStatus::default();
-    };
-    let handle = store.session().target(&target);
-    CommitReviewStatus {
-        reviewed: meta_set(handle.get_value("review:reviewed").ok().flatten()),
-        approvals: meta_set(handle.get_value("review:approvals").ok().flatten()),
-        signed_off: meta_set(handle.get_value("signed-off").ok().flatten()),
-    }
+    store.commit_review_status(sha)
 }
 
-fn resolve_git_ref(reference: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", reference])
-        .output()
-        .with_context(|| format!("running git rev-parse {reference}"))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git rev-parse {reference} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
 
 fn short_hash(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
@@ -9627,141 +8931,15 @@ fn write_review_commit_info_cache_file(path: &Path, info: &ReviewCommitInfo) {
 }
 
 fn review_commit_info(sha: &str) -> ReviewCommitInfo {
-    let output = Command::new("git")
-        .args(["show", "-s", "--format=%s%n%an <%ae>%n%ct%n%B", sha])
-        .output();
-    let mut lines = output
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let subject = lines
-        .first()
-        .cloned()
-        .unwrap_or_else(|| short_hash(sha).to_string());
-    let author = lines.get(1).cloned().unwrap_or_default();
-    let updated = lines
-        .get(2)
-        .and_then(|timestamp| timestamp.parse::<i64>().ok())
-        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
-        .map(|timestamp| relative_time(timestamp, OffsetDateTime::now_utc()))
-        .unwrap_or_default();
-    let body = if lines.len() > 3 {
-        lines
-            .drain(3..)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
-    } else {
-        String::new()
-    };
-    ReviewCommitInfo {
-        subject,
-        body,
-        author,
-        updated,
-        shortstat: commit_shortstat(sha),
-        change_id: commit_change_id(sha),
-        patch_id: commit_patch_id(sha),
-    }
-}
-
-fn commit_change_id(sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args(["cat-file", "-p", sha])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| line.strip_prefix("change-id ").map(str::to_string))
-}
-
-fn ensure_commit_patch_id(store: &TicketStore, sha: &str) -> Result<Option<String>> {
-    let target = store.session().target(&Target::commit(sha)?);
-    if let Some(patch_id) = meta_string(target.get_value("patch-id")?) {
-        return Ok(Some(patch_id));
-    }
-    let Some(patch_id) = commit_patch_id(sha) else {
-        return Ok(None);
-    };
-    target.set("patch-id", patch_id.as_str())?;
-    Ok(Some(patch_id))
-}
-
-fn commit_patch_id(sha: &str) -> Option<String> {
-    let mut diff = Command::new("git")
-        .args(["diff-tree", "--patch", sha])
-        .stdout(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let stdout = diff.stdout.take()?;
-    let patch_id = Command::new("git")
-        .args(["patch-id", "--stable"])
-        .stdin(Stdio::from(stdout))
-        .output()
-        .ok()?;
-    let _ = diff.wait();
-    if !patch_id.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&patch_id.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_string)
-}
-
-fn commit_shortstat(sha: &str) -> String {
-    let output = Command::new("git")
-        .args(["show", "--shortstat", "--format=", sha])
-        .output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_default()
+    RealVcsAdapter::new().commit_info(sha)
 }
 
 fn commit_patch_lines(sha: &str) -> Vec<String> {
-    let output = Command::new("git")
-        .args([
-            "show",
-            "--format=",
-            "--patch",
-            "--find-renames",
-            "--color=never",
-            sha,
-        ])
-        .output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    RealVcsAdapter::new().commit_patch_lines(sha)
 }
 
 fn review_changed_file_count(oldest: &str, head: &str) -> usize {
-    let base = format!("{oldest}^");
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "--find-renames", &base, head])
-        .output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).lines().count())
-        .unwrap_or_default()
+    RealVcsAdapter::new().changed_file_count(oldest, head)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
