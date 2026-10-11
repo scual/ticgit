@@ -5,7 +5,7 @@
 //! the `project` target. There is no separate index; tickets are
 //! discovered by prefix-scanning `ticgit:tickets`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use git_meta_lib::{ListEntry, MetaValue, Session, Target};
 use serde::Serialize;
@@ -18,6 +18,10 @@ use crate::keys;
 use crate::oplog::{Op, OpKind};
 use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
 use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
+use crate::review::{
+    format_review_revision, parse_review_revision_change, CommitReviewStatus, NewReviewOpts,
+    Review, ReviewMessage, ReviewProgress, ReviewRevisionChange, ReviewVcs,
+};
 
 /// Basic email format check: must contain exactly one `@` with non-empty
 /// local and domain parts.
@@ -1259,6 +1263,566 @@ impl TicketStore {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Code Reviews
+    // -------------------------------------------------------------------
+
+    /// Create review metadata for a branch, optionally linking it to a ticket.
+    pub fn create_review(&self, opts: &NewReviewOpts, vcs: &impl ReviewVcs) -> Result<Review> {
+        let branch_name = match opts.branch.as_deref() {
+            Some(b) => b.to_string(),
+            None => vcs.current_branch()?,
+        };
+        let branch_id = self.ensure_review_branch_id(&branch_name)?;
+        let base_ref = opts.base.clone().unwrap_or_else(|| vcs.default_base_ref());
+        let base_sha = vcs
+            .resolve_ref(&base_ref)
+            .or_else(|_| vcs.merge_base(&base_ref, &branch_name))
+            .unwrap_or_else(|_| vcs.resolve_ref("HEAD").unwrap_or_default());
+        let head_sha = vcs.resolve_branch_head(&branch_name)?;
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|e| Error::Time(e.to_string()))?;
+        let target = self.session.target(&Target::branch(&branch_id));
+        let mut title = opts.title.clone().unwrap_or_else(|| branch_name.clone());
+        let mut description = opts.description.clone().unwrap_or_default();
+        let mut linked_ticket_id = None;
+
+        if let Some(ticket_ref) = opts.ticket.as_deref() {
+            let ticket_id = self.resolve_id(ticket_ref)?;
+            let ticket = self.load(&ticket_id)?;
+            if title == branch_name {
+                title = ticket.title.clone();
+            }
+            if description.is_empty() {
+                description = ticket.description.clone().unwrap_or_default();
+            }
+            target.set_add("issue:id", &ticket_id.to_string())?;
+            self.session.target(&Target::project()).set(
+                &keys::ticket_field(&ticket_id, "branch-id"),
+                branch_id.as_str(),
+            )?;
+            linked_ticket_id = Some(ticket_id);
+        }
+
+        target.set("title", title.as_str())?;
+        target.set("description", description.as_str())?;
+        target.set("status", "open")?;
+        target.set("base:sha", base_sha.as_str())?;
+        target.set("head:sha", head_sha.as_str())?;
+        target.set(keys::REVIEW_CREATED_AT_KEY, now.as_str())?;
+        target.set(keys::REVIEW_CREATED_BY_KEY, self.email())?;
+        for reviewer in &opts.reviewers {
+            target.set_add(keys::REVIEW_REVIEWERS_KEY, reviewer)?;
+        }
+        self.refresh_review_revisions_from_range(&branch_id, &base_sha, &head_sha, vcs)?;
+        self.session
+            .target(&Target::project())
+            .set_add(keys::REVIEW_INDEX_KEY, branch_id.as_str())?;
+
+        let branch_target = self.session.target(&Target::branch(&branch_id));
+        branch_target.set("code:branch", branch_name.as_str())?;
+        if let Ok(Some(url)) = vcs.remote_url() {
+            branch_target.set("code:url", url.as_str())?;
+            if let Some(ticket_id) = linked_ticket_id {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    let code = format!("{url}:{branch_name}");
+                    let _ = self.set_code(&ticket_id, Some(&code));
+                }
+            }
+        }
+
+        self.load_review(&branch_id)
+    }
+
+    /// Return the existing branch-id or generate a new timestamped ID e.g. `feature@1770000000`.
+    pub fn ensure_review_branch_id(&self, branch_name: &str) -> Result<String> {
+        let branch_target = self.session.target(&Target::branch(branch_name));
+        if let Some(MetaValue::String(id)) = branch_target.get_value("branch-id")? {
+            if !id.is_empty() {
+                return Ok(id);
+            }
+        }
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        let branch_id = format!("{branch_name}@{timestamp}");
+        branch_target.set("branch-id", branch_id.as_str())?;
+        Ok(branch_id)
+    }
+
+    /// Load the review record for `branch_id`.
+    pub fn load_review(&self, branch_id: &str) -> Result<Review> {
+        let target = self.session.target(&Target::branch(branch_id));
+        let branch_name = meta_string(target.get_value("code:branch")?);
+        let title = meta_string(target.get_value("title")?)
+            .or_else(|| branch_name.clone())
+            .unwrap_or_else(|| branch_id.to_string());
+        let description = meta_string(target.get_value("description")?).unwrap_or_default();
+        let status = meta_string(target.get_value("status")?).unwrap_or_else(|| "unknown".into());
+        let head_sha = meta_string(target.get_value("head:sha")?);
+        let base_sha = meta_string(target.get_value("base:sha")?);
+        let integration_sha = meta_string(target.get_value("integration:sha")?);
+        let created_at = meta_string(target.get_value(keys::REVIEW_CREATED_AT_KEY)?);
+        let created_by = meta_string(target.get_value(keys::REVIEW_CREATED_BY_KEY)?);
+        let reviewers = meta_set(target.get_value(keys::REVIEW_REVIEWERS_KEY)?)
+            .into_iter()
+            .collect();
+        let ticket_id = meta_set(target.get_value("issue:id")?)
+            .into_iter()
+            .filter_map(|s| Uuid::parse_str(&s).ok())
+            .next();
+        let revisions = target
+            .list_entries(keys::REVIEW_REVISIONS_KEY)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| parse_review_revision_change(&e.value))
+            .collect();
+        let mut revision_history = target
+            .list_entries(keys::REVIEW_REVISION_HISTORY_KEY)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| parse_review_revision_change(&e.value))
+            .collect::<Vec<_>>();
+        if revision_history.is_empty() {
+            let rev_copy: &Vec<ReviewRevisionChange> = &revisions;
+            revision_history = rev_copy.iter().rev().cloned().collect();
+        }
+        let messages = target
+            .list_entries(keys::REVIEW_MESSAGES_KEY)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| serde_json::from_str::<ReviewMessage>(&e.value).ok())
+            .collect();
+
+        Ok(Review {
+            branch_id: branch_id.to_string(),
+            branch_name,
+            ticket_id,
+            title,
+            description,
+            status,
+            base_sha,
+            head_sha,
+            integration_sha,
+            created_at,
+            created_by,
+            reviewers,
+            revisions,
+            revision_history,
+            messages,
+        })
+    }
+
+    /// List all reviews registered in `review:branches`.
+    pub fn list_reviews(&self) -> Result<Vec<Review>> {
+        let project = self.session.target(&Target::project());
+        let branch_ids = meta_set(project.get_value(keys::REVIEW_INDEX_KEY)?);
+        let mut reviews = Vec::with_capacity(branch_ids.len());
+        for id in branch_ids {
+            if let Ok(review) = self.load_review(&id) {
+                reviews.push(review);
+            }
+        }
+        Ok(reviews)
+    }
+
+    /// Resolve an explicit ticket-id, branch-id, branch name, or default to current branch.
+    pub fn resolve_review_branch_id(
+        &self,
+        explicit: Option<&str>,
+        vcs: Option<&impl ReviewVcs>,
+    ) -> Result<String> {
+        let name = match explicit {
+            Some(n) => n.to_string(),
+            None => match vcs {
+                Some(v) => v.current_branch()?,
+                None => return Err(Error::ReviewNotFound("no branch specified".into())),
+            },
+        };
+        if let Ok(ticket_id) = self.resolve_id(&name) {
+            if let Some(MetaValue::String(branch_id)) = self
+                .session
+                .target(&Target::project())
+                .get_value(&keys::ticket_field(&ticket_id, "branch-id"))?
+            {
+                if !branch_id.is_empty() {
+                    return Ok(branch_id);
+                }
+            }
+        }
+        let branch_target = self.session.target(&Target::branch(&name));
+        if let Some(MetaValue::String(branch_id)) = branch_target.get_value("branch-id")? {
+            if !branch_id.is_empty() {
+                return Ok(branch_id);
+            }
+        }
+        if branch_target.get_value("status")?.is_some()
+            || branch_target.get_value("title")?.is_some()
+        {
+            return Ok(name);
+        }
+        Err(Error::ReviewNotFound(name))
+    }
+
+    /// Load mapped reviews for tickets (used by TUI review table/detail).
+    pub fn load_ticket_reviews(&self, tickets: &[Ticket]) -> Result<HashMap<Uuid, Review>> {
+        let project = self.session.target(&Target::project());
+        let mut reviews = HashMap::new();
+
+        for ticket in tickets {
+            if let Some(branch_id) =
+                meta_string(project.get_value(&keys::ticket_field(&ticket.id, "branch-id"))?)
+            {
+                if let Ok(review) = self.load_review(&branch_id) {
+                    reviews.insert(ticket.id, review);
+                }
+            }
+        }
+
+        for branch_id in meta_set(project.get_value(keys::REVIEW_INDEX_KEY)?) {
+            if let Ok(review) = self.load_review(&branch_id) {
+                let target = self.session.target(&Target::branch(&branch_id));
+                for ticket_id in meta_set(target.get_value("issue:id")?) {
+                    if let Ok(ticket_id) = Uuid::parse_str(&ticket_id) {
+                        reviews.entry(ticket_id).or_insert_with(|| review.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(reviews)
+    }
+
+    /// Add a reviewer email to a review branch.
+    pub fn add_reviewer(&self, branch_id: &str, email: &str) -> Result<()> {
+        self.session
+            .target(&Target::branch(branch_id))
+            .set_add(keys::REVIEW_REVIEWERS_KEY, email)?;
+        Ok(())
+    }
+
+    /// Append a comment message to a review.
+    pub fn add_review_comment(&self, branch_id: &str, message: ReviewMessage) -> Result<()> {
+        self.append_review_message(branch_id, message)
+    }
+
+    /// Request changes on a review, setting its status to `changes-requested`.
+    pub fn request_changes(&self, branch_id: &str, message: ReviewMessage) -> Result<()> {
+        self.session
+            .target(&Target::branch(branch_id))
+            .set("status", "changes-requested")?;
+        self.append_review_message(branch_id, message)
+    }
+
+    /// Approve a specific commit. If `branch_id` is passed, appends an approval message
+    /// and checks if all commits in the review are approved (setting status to `approved` if so).
+    /// Returns `true` if the review is now all approved.
+    pub fn approve_review_commit(
+        &self,
+        branch_id: Option<&str>,
+        sha: &str,
+        body: &str,
+    ) -> Result<bool> {
+        let email = self.email().to_string();
+        let commit_target = self.session.target(&Target::commit(sha)?);
+        commit_target.set_add(keys::REVIEW_APPROVALS_KEY, &email)?;
+        commit_target.set_add(keys::REVIEW_REVIEWED_KEY, &email)?;
+
+        let mut all_approved = false;
+        if let Some(branch_id) = branch_id {
+            self.append_review_message(
+                branch_id,
+                ReviewMessage {
+                    author: email,
+                    body: body.to_string(),
+                    message_type: "approval".into(),
+                    commit: Some(sha.to_string()),
+                    path: None,
+                    lines: None,
+                    at: None,
+                },
+            )?;
+            let review = self.load_review(branch_id)?;
+            all_approved = self.review_commits_all_approved(&review, Some(sha));
+            if all_approved {
+                self.session
+                    .target(&Target::branch(branch_id))
+                    .set("status", "approved")?;
+            }
+        }
+        Ok(all_approved)
+    }
+
+    /// Mark a review approved directly.
+    pub fn approve_review(
+        &self,
+        branch_id: &str,
+        body: &str,
+        commit: Option<String>,
+    ) -> Result<()> {
+        let target = self.session.target(&Target::branch(branch_id));
+        target.set("status", "approved")?;
+        self.append_review_message(
+            branch_id,
+            ReviewMessage {
+                author: self.email().to_string(),
+                body: body.to_string(),
+                message_type: "approval".into(),
+                commit,
+                path: None,
+                lines: None,
+                at: None,
+            },
+        )
+    }
+
+    /// Refresh a review's head commit and revision change list.
+    pub fn update_review(
+        &self,
+        branch_id: &str,
+        head: Option<&str>,
+        vcs: &impl ReviewVcs,
+    ) -> Result<(Review, String)> {
+        let target = self.session.target(&Target::branch(branch_id));
+        let branch =
+            meta_string(target.get_value("code:branch")?).unwrap_or_else(|| branch_id.to_string());
+        let head_sha = match head {
+            Some(h) => vcs.resolve_ref(h).unwrap_or_else(|_| h.to_string()),
+            None => vcs.resolve_branch_head(&branch)?,
+        };
+        let base_sha = meta_string(target.get_value("base:sha")?).unwrap_or_default();
+        target.set("head:sha", head_sha.as_str())?;
+        self.refresh_review_revisions_from_range(branch_id, &base_sha, &head_sha, vcs)?;
+        let review = self.load_review(branch_id)?;
+        Ok((review, head_sha))
+    }
+
+    /// Record merge / integration commit for a review.
+    pub fn integrate_review(&self, branch_id: &str, integration_sha: &str) -> Result<()> {
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|e| Error::Time(e.to_string()))?;
+        let target = self.session.target(&Target::branch(branch_id));
+        target.set("integration:sha", integration_sha)?;
+        target.set("status", "merged")?;
+        target.set(keys::REVIEW_MERGED_AT_KEY, now.as_str())?;
+        target.set(keys::REVIEW_MERGED_BY_KEY, self.email())?;
+        Ok(())
+    }
+
+    /// Close a review branch.
+    pub fn close_review(&self, branch_id: &str) -> Result<()> {
+        self.session
+            .target(&Target::branch(branch_id))
+            .set("status", "closed")?;
+        Ok(())
+    }
+
+    /// Reopen a closed review branch.
+    pub fn reopen_review(&self, branch_id: &str) -> Result<()> {
+        self.session
+            .target(&Target::branch(branch_id))
+            .set("status", "open")?;
+        Ok(())
+    }
+
+    /// Set review title and description.
+    pub fn set_review_details(
+        &self,
+        branch_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let target = self.session.target(&Target::branch(branch_id));
+        target.set("title", title)?;
+        target.set("description", description.unwrap_or(""))?;
+        Ok(())
+    }
+
+    /// Return approval and reviewed marks for a commit.
+    pub fn commit_review_status(&self, sha: &str) -> CommitReviewStatus {
+        let Ok(target) = Target::commit(sha) else {
+            return CommitReviewStatus::default();
+        };
+        let handle = self.session.target(&target);
+        CommitReviewStatus {
+            reviewed: meta_set(handle.get_value(keys::REVIEW_REVIEWED_KEY).ok().flatten()),
+            approvals: meta_set(handle.get_value(keys::REVIEW_APPROVALS_KEY).ok().flatten()),
+            signed_off: meta_set(handle.get_value("signed-off").ok().flatten()),
+        }
+    }
+
+    /// Return true if every commit in `review` is approved.
+    pub fn review_commits_all_approved(
+        &self,
+        review: &Review,
+        approved_sha: Option<&str>,
+    ) -> bool {
+        let commits = review.commits();
+        !commits.is_empty()
+            && commits.iter().all(|sha| {
+                approved_sha == Some(sha.as_str())
+                    || !self.commit_review_status(sha).approvals.is_empty()
+            })
+    }
+
+    /// Aggregate review progress across commits.
+    pub fn review_progress(
+        &self,
+        commits: &[String],
+        messages: &[ReviewMessage],
+    ) -> ReviewProgress {
+        let mut progress = ReviewProgress {
+            total: commits.len(),
+            ..Default::default()
+        };
+        for sha in commits {
+            let status = self.commit_review_status(sha);
+            let mut reviewed = status.reviewed;
+            let mut approvals = status.approvals;
+            for msg in messages.iter().filter(|m| {
+                m.commit
+                    .as_deref()
+                    .is_some_and(|c| c == sha || sha.starts_with(c) || c.starts_with(sha))
+            }) {
+                match msg.message_type.as_str() {
+                    "approval" => {
+                        reviewed.insert(msg.author.clone());
+                        approvals.insert(msg.author.clone());
+                    }
+                    "changes-requested" | "comment" => {
+                        reviewed.insert(msg.author.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if !reviewed.is_empty() {
+                progress.reviewed += 1;
+            }
+            if !approvals.is_empty() {
+                progress.approved += 1;
+            }
+        }
+        progress
+    }
+
+    /// Ensure commit patch-id is stored in git-meta.
+    pub fn ensure_commit_patch_id(
+        &self,
+        sha: &str,
+        vcs: &impl ReviewVcs,
+    ) -> Result<Option<String>> {
+        let target = self.session.target(&Target::commit(sha)?);
+        if let Some(patch_id) = meta_string(target.get_value("patch-id")?) {
+            return Ok(Some(patch_id));
+        }
+        let Some(patch_id) = vcs.commit_patch_id(sha) else {
+            return Ok(None);
+        };
+        target.set("patch-id", patch_id.as_str())?;
+        Ok(Some(patch_id))
+    }
+
+    /// Refresh review revisions from a base..head range.
+    pub fn refresh_review_revisions_from_range(
+        &self,
+        branch_id: &str,
+        base_sha: &str,
+        head_sha: &str,
+        vcs: &impl ReviewVcs,
+    ) -> Result<()> {
+        let commits = vcs.revision_list(base_sha, head_sha)?;
+        self.refresh_review_revisions_from_commits(branch_id, &commits, vcs)
+    }
+
+    /// Refresh review revisions from an explicit list of commit SHAs.
+    pub fn refresh_review_revisions_from_commits(
+        &self,
+        branch_id: &str,
+        commits: &[String],
+        vcs: &impl ReviewVcs,
+    ) -> Result<()> {
+        let target = self.session.target(&Target::branch(branch_id));
+        let previous = target
+            .list_entries(keys::REVIEW_REVISIONS_KEY)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| parse_review_revision_change(&e.value))
+            .collect::<Vec<_>>();
+        let entries = commits
+            .iter()
+            .map(|sha| {
+                Ok(ReviewRevisionChange {
+                    sha: sha.clone(),
+                    change_id: vcs.commit_change_id(sha),
+                    patch_id: self.ensure_commit_patch_id(sha, vcs)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        target.remove(keys::REVIEW_REVISIONS_KEY)?;
+        for entry in &entries {
+            target.list_push(keys::REVIEW_REVISIONS_KEY, &format_review_revision(entry))?;
+        }
+        self.append_revision_change_history(branch_id, &previous, vcs)?;
+        self.append_revision_change_history(branch_id, &entries, vcs)?;
+        Ok(())
+    }
+
+    fn append_revision_change_history(
+        &self,
+        branch_id: &str,
+        commits: &[ReviewRevisionChange],
+        vcs: &impl ReviewVcs,
+    ) -> Result<()> {
+        let target = self.session.target(&Target::branch(branch_id));
+        let mut history = target
+            .list_entries(keys::REVIEW_REVISION_HISTORY_KEY)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| parse_review_revision_change(&e.value))
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for entry in &mut history {
+            if entry.patch_id.is_none() {
+                entry.patch_id = self.ensure_commit_patch_id(&entry.sha, vcs)?;
+                changed |= entry.patch_id.is_some();
+            }
+        }
+        let mut seen = history
+            .iter()
+            .map(|e| e.sha.clone())
+            .collect::<BTreeSet<_>>();
+        for entry in commits.iter().rev() {
+            if seen.insert(entry.sha.clone()) {
+                history.push(entry.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            target.remove(keys::REVIEW_REVISION_HISTORY_KEY)?;
+            for entry in history {
+                target.list_push(
+                    keys::REVIEW_REVISION_HISTORY_KEY,
+                    &serde_json::to_string(&entry)?,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn append_review_message(&self, branch_id: &str, mut message: ReviewMessage) -> Result<()> {
+        if message.at.is_none() {
+            let now = OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|e| Error::Time(e.to_string()))?;
+            message.at = Some(now);
+        }
+        let json = serde_json::to_string(&message)?;
+        self.session
+            .target(&Target::branch(branch_id))
+            .list_push(keys::REVIEW_MESSAGES_KEY, &json)?;
+        Ok(())
+    }
+
     /// Roll every ticket forward to [`CURRENT_TICKET_FORMAT`] (the op-log
     /// format), returning a per-ticket plan. With `write == false` this is a
     /// dry run. With `write == true` each legacy (scalar-key, no-op) ticket is
@@ -2015,6 +2579,21 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
     })
 }
 
+fn meta_string(val: Option<MetaValue>) -> Option<String> {
+    match val {
+        Some(MetaValue::String(s)) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+fn meta_set(val: Option<MetaValue>) -> BTreeSet<String> {
+    match val {
+        Some(MetaValue::Set(set)) => set,
+        Some(MetaValue::String(s)) if !s.is_empty() => BTreeSet::from([s]),
+        _ => BTreeSet::new(),
+    }
+}
+
 fn build_writeup(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Writeup> {
     if fields.is_empty() {
         return None;
@@ -2155,6 +2734,7 @@ fn metadata_priority_sort_key(priority: Option<i64>) -> (u8, i64) {
 mod tests {
     use super::*;
     use crate::test_support::test_store;
+    use crate::FakeVcsAdapter;
 
     #[test]
     fn create_and_load_round_trips() {
@@ -3344,5 +3924,187 @@ mod tests {
         assert_eq!(after.comments.len(), 1);
         assert!(after.children.contains(&child.id));
         assert_verifies(&local);
+    }
+
+    #[test]
+    fn review_create_and_load_round_trip() {
+        let (store, _td) = test_store();
+        let fake = FakeVcsAdapter::default();
+        fake.set_current_branch("feat/review");
+        fake.set_ref("HEAD", "1111111");
+        fake.set_branch_head("feat/review", "2222222");
+        fake.set_default_base("main");
+        fake.set_merge_base("main", "feat/review", "0000000");
+        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+        fake.set_change_id("1111111", "ch-1");
+        fake.set_patch_id("1111111", "p-1");
+        fake.set_change_id("2222222", "ch-2");
+        fake.set_patch_id("2222222", "p-2");
+
+        let ticket = store.create("Reviewable task", NewTicketOpts::default()).unwrap();
+
+        let review = store.create_review(
+            &NewReviewOpts {
+                branch: Some("feat/review".into()),
+                base: Some("main".into()),
+                ticket: Some(ticket.short_id()),
+                title: Some("Reviewable task".into()),
+                description: Some("Implement feature".into()),
+                reviewers: vec!["reviewer@example.com".into()],
+            },
+            &fake,
+        ).unwrap();
+
+        assert_eq!(review.title, "Reviewable task");
+        assert_eq!(review.status, "open");
+        assert_eq!(review.base_sha.as_deref(), Some("0000000"));
+        assert_eq!(review.head_sha.as_deref(), Some("2222222"));
+        assert_eq!(review.reviewers, vec!["reviewer@example.com".to_string()]);
+        assert_eq!(review.revisions.len(), 2);
+        assert_eq!(review.ticket_id, Some(ticket.id));
+
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.branch_id, review.branch_id);
+        assert_eq!(loaded.title, "Reviewable task");
+        assert_eq!(loaded.ticket_id, Some(ticket.id));
+
+        let list = store.list_reviews().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].branch_id, review.branch_id);
+
+        let resolved_id = store.resolve_review_branch_id(Some(&ticket.short_id()), Some(&fake)).unwrap();
+        assert_eq!(resolved_id, review.branch_id);
+
+        let resolved_by_branch = store.resolve_review_branch_id(Some("feat/review"), Some(&fake)).unwrap();
+        assert_eq!(resolved_by_branch, review.branch_id);
+    }
+
+    #[test]
+    fn review_update_tracks_revision_change_history() {
+        let (store, _td) = test_store();
+        let fake = FakeVcsAdapter::default();
+        fake.set_default_base("main");
+        fake.set_branch_head("feat/history", "1111111");
+        fake.set_merge_base("main", "feat/history", "0000000");
+        fake.set_revisions("0000000", "1111111", vec!["1111111".into()]);
+        fake.set_change_id("1111111", "ch-1");
+        fake.set_patch_id("1111111", "p-1");
+
+        let review = store.create_review(
+            &NewReviewOpts {
+                branch: Some("feat/history".into()),
+                base: Some("main".into()),
+                ticket: None,
+                title: Some("History test".into()),
+                description: None,
+                reviewers: vec![],
+            },
+            &fake,
+        ).unwrap();
+        assert_eq!(review.revisions.len(), 1);
+
+        // Advance branch head to 2222222
+        fake.set_branch_head("feat/history", "2222222");
+        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+        fake.set_change_id("2222222", "ch-2");
+        fake.set_patch_id("2222222", "p-2");
+
+        let (updated, new_head) = store.update_review(&review.branch_id, None, &fake).unwrap();
+        assert_eq!(new_head, "2222222");
+        assert_eq!(updated.head_sha.as_deref(), Some("2222222"));
+        assert_eq!(updated.revisions.len(), 2);
+        // History should retain previous commits
+        assert!(updated.revision_history.iter().any(|r| r.sha == "1111111"));
+        assert!(updated.revision_history.iter().any(|r| r.sha == "2222222"));
+    }
+
+    #[test]
+    fn review_approvals_and_all_approved_rule() {
+        let (store, _td) = test_store();
+        let fake = FakeVcsAdapter::default();
+        fake.set_default_base("main");
+        fake.set_branch_head("feat/approvals", "2222222");
+        fake.set_merge_base("main", "feat/approvals", "0000000");
+        fake.set_revisions("0000000", "2222222", vec!["1111111".into(), "2222222".into()]);
+
+        let review = store.create_review(
+            &NewReviewOpts {
+                branch: Some("feat/approvals".into()),
+                base: Some("main".into()),
+                ticket: None,
+                title: Some("Approvals test".into()),
+                description: None,
+                reviewers: vec![],
+            },
+            &fake,
+        ).unwrap();
+        assert_eq!(review.status, "open");
+
+        // Approve commit 1 - review not yet all approved
+        let all_approved = store.approve_review_commit(Some(&review.branch_id), "1111111", "looks good 1").unwrap();
+        assert!(!all_approved);
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.status, "open");
+
+        // Approve commit 2 - now all commits approved!
+        let all_approved = store.approve_review_commit(Some(&review.branch_id), "2222222", "looks good 2").unwrap();
+        assert!(all_approved);
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.status, "approved");
+    }
+
+    #[test]
+    fn review_request_changes_and_lifecycle() {
+        let (store, _td) = test_store();
+        let fake = FakeVcsAdapter::default();
+        fake.set_default_base("main");
+        fake.set_branch_head("feat/lifecycle", "1111111");
+        fake.set_merge_base("main", "feat/lifecycle", "0000000");
+        fake.set_revisions("0000000", "1111111", vec!["1111111".into()]);
+
+        let review = store.create_review(
+            &NewReviewOpts {
+                branch: Some("feat/lifecycle".into()),
+                base: Some("main".into()),
+                ticket: None,
+                title: Some("Lifecycle test".into()),
+                description: None,
+                reviewers: vec![],
+            },
+            &fake,
+        ).unwrap();
+
+        // Request changes
+        store.request_changes(
+            &review.branch_id,
+            ReviewMessage {
+                author: "alice@example.com".into(),
+                body: "needs tests".into(),
+                message_type: "changes-requested".into(),
+                commit: None,
+                path: None,
+                lines: None,
+                at: None,
+            },
+        ).unwrap();
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.status, "changes-requested");
+        assert_eq!(loaded.messages.len(), 1);
+
+        // Close review
+        store.close_review(&review.branch_id).unwrap();
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.status, "closed");
+
+        // Reopen review
+        store.reopen_review(&review.branch_id).unwrap();
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.status, "open");
+
+        // Integrate review
+        store.integrate_review(&review.branch_id, "9999999").unwrap();
+        let loaded = store.load_review(&review.branch_id).unwrap();
+        assert_eq!(loaded.status, "merged");
+        assert_eq!(loaded.integration_sha.as_deref(), Some("9999999"));
     }
 }
