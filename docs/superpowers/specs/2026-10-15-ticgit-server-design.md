@@ -137,7 +137,62 @@ become repo-aware. `CONTEXT.md` terminology is updated: the symmetric relation h
 but cross-repo it is realized as *forward stored, reverse derived* rather than a single
 stored fact.
 
-## 6. Layers
+## 6. Cross-repo requests
+
+Section 5 covers pointing at a ticket that already exists elsewhere. This section
+covers the opposite, write-side primitive: asking for work to be *created* in a repo
+you do not own — e.g. a frontend developer needing the backend team to change an API
+signature. The two are symmetric:
+
+- **Cross-repo reference** (read side): "I point at your existing ticket."
+- **Cross-repo request** (write side): "I propose a ticket into your repo; you accept."
+
+### The constraint it respects
+
+A writer only ever mutates repos it controls. A frontend developer normally has no
+write access to the backend repo's git-meta, so they cannot simply create a ticket
+there. The request flow routes around this *without* violating the rule.
+
+### Flow
+
+```
+# frontend dev — writes only their OWN repo
+ti new "Backend: getUser() should also return email" --request-to backend
+ti depends @ --on backend#?         # pending cross-repo reference — the "unresolved" tier (section 5), reused
+
+# server (holds both repos) surfaces it in the backend's inbox — a DERIVED view
+# backend maintainer — the repo's own authority:
+ti inbox                            # sees inbound proposals
+ti accept <id>                      # server writes the real ticket into backend git-meta + pushes;
+                                    #   the pending reference now resolves, reverse "blocks frontend#X" derives
+ti reject <id> --reason "..."       # stays a note in the frontend repo; nothing written to backend
+```
+
+If the requester *does* hold a writer token on the target repo (L4 auth), they
+skip the proposal entirely and create directly via the write path (`ti new --repo
+backend …`). The request flow is specifically the no-write-access path.
+
+### Where each piece lives
+
+| Piece | Who writes it | Where it lives |
+| --- | --- | --- |
+| Request ticket + pending reference | frontend (its own repo) | frontend git-meta — truth |
+| Proposal in the backend inbox | no one | **derived** by the server |
+| Accepted ticket in the backend | backend (its owner authorizes) | backend git-meta — truth |
+| Reverse "blocks" edge | no one | **derived** |
+
+Only `accept` writes a repo the requester doesn't own, and it is triggered by *that
+repo's* owner — never by the requester. The authority boundary stays crisp, and no new
+stored truth is introduced: the proposal is derived state until the backend accepts.
+
+### Serverless degradation
+
+Without a shared daemon there is no inbox. The frontend dev still writes only the
+request ticket (pending reference) in their own repo; promotion requires someone with
+the backend repo to run `ti accept` / `ti new`. Honest degradation — the server is
+what makes the hand-off fluid, consistent with every other layer.
+
+## 7. Layers
 
 Build order is bottom-up; each layer depends on the one below and delivers value
 standalone.
@@ -199,12 +254,14 @@ Built on diff-on-ingest.
 - **Auth.** Static API tokens (config file / `ti serve --token`) for API and
   webhooks. Optional basic user list for dashboard login. The authenticated identity
   maps to the git-meta author on write-back, so web edits attribute correctly.
-- **Access control.** Coarse: reader vs. writer token. Per-field ACL is YAGNI until
-  asked.
+- **Access control.** Coarse: reader vs. writer token, scoped per repo (the daemon
+  holds many). A cross-repo request's `accept` (section 6) is gated on a writer token
+  for the *target* repo — that is exactly what keeps the authority boundary crisp.
+  Per-field ACL is YAGNI until asked.
 - **Notifications.** Built on L2 events — email/Slack sinks are webhook consumers,
   not a separate subsystem.
 
-## 7. Tech stack & code layout
+## 8. Tech stack & code layout
 
 - **Async/HTTP:** `axum` + `tokio`. New deps, confined to the server crate so the
   CLI and library stay synchronous and lean.
@@ -219,7 +276,7 @@ Built on diff-on-ingest.
   adding the async/HTTP stack; check the `gix`/`winnow` graph when introducing
   `axum`/`tokio`.
 
-## 8. Testing approach
+## 9. Testing approach
 
 Mirror the existing CLI integration suite (`crates/ticgit/tests/cli.rs`): each test
 builds a throwaway git repo in a tempdir, boots the server on an ephemeral port, and
@@ -232,23 +289,29 @@ drives real HTTP.
 - **Cross-repo tests:** two tempdir repos; assert a forward `coordinate#UUID`
   dependency resolves, the reverse edge is derived in the portfolio, and an absent
   referenced repo yields an unresolved marker (not an error).
+- **Request tests:** a `--request-to` ticket writes only the requester's repo and
+  leaves a pending reference; `accept` (with a target-repo writer token) writes the
+  target git-meta and resolves the reference; `reject` writes nothing to the target;
+  `accept` without the token is refused.
 - Keep the tempdir pattern for hermeticity; prefer end-to-end HTTP tests for anything
   user-observable.
 
-## 9. Build sequence
+## 10. Build sequence
 
 1. **L1** — shared engine (ingest loop, SQLite index, diff-on-ingest) + read/write
    API. The bottleneck everything else needs. Lands the cross-repo reference *format*
    (`keys.rs` layout + bare-UUID back-compat) so later layers resolve against it.
 2. **L2** — events/webhooks on the diff machinery.
 3. **L3** — dashboard (htmx+SSE) and portfolio aggregation, including cross-repo
-   reference resolution, derived reverse edges, and the multi-repo `ti deps` graph.
-4. **L4** — auth, access control, notification sinks.
+   reference resolution, derived reverse edges, the multi-repo `ti deps` graph, and
+   the cross-repo request inbox (a derived view).
+4. **L4** — auth, access control, notification sinks; gates cross-repo `accept` on a
+   writer token for the target repo.
 
 Each layer is specced, planned, and built on its own before the next begins; L1–L3
 are useful standalone (internal/single-team) before L4's cost is paid.
 
-## 10. Open questions (resolve at per-layer spec time)
+## 11. Open questions (resolve at per-layer spec time)
 
 - `ti serve` subcommand vs. separate `ti-server` binary.
 - Index schema detail and migration strategy for `docs/schema/v1.json` extensions.
@@ -258,3 +321,5 @@ are useful standalone (internal/single-team) before L4's cost is paid.
   known-repos registry is configured and secured.
 - How a locally-cloned (serverless) CLI discovers sibling repos to resolve forward
   references without a server present.
+- Cross-repo request lifecycle beyond accept/reject: how a pending request is
+  superseded or expires, and whether `reject` notifies the requester (via L2 events).
