@@ -192,7 +192,40 @@ request ticket (pending reference) in their own repo; promotion requires someone
 the backend repo to run `ti accept` / `ti new`. Honest degradation — the server is
 what makes the hand-off fluid, consistent with every other layer.
 
-## 7. Layers
+## 7. Communication model (and an explicit non-goal)
+
+Communication in TicGit is **anchored to work and stored where it is worth keeping** —
+never a general messenger. This section records what is in scope and, deliberately,
+what is not, so the boundary is not re-litigated later.
+
+### In scope
+
+- **Comment threads** (exist today via `ti comment`): discussion lives attached to the
+  ticket, not in a vacuum. The server renders them live via the L2 SSE stream, so a
+  dashboard viewer sees new comments in real time without a separate chat system.
+- **`@mention` + directed notification:** the git-native form of "tell one person
+  something" — you address them *about a ticket*, so there is always context. It is
+  durable and rides the existing L2 event / L4 notification rails (into email/Slack).
+- **`ti announce` — durable broadcast:** a team-wide notice (`"freeze on main
+  Friday"`), synced to everyone, shown as a dashboard banner and emitted as an L2
+  event. Low-volume, durable, worth keeping — a notice, not a conversation. (Whether
+  it is a special ticket kind or a distinct object is an open question.)
+
+### Explicit non-goal: 1-to-1 chat
+
+Real-time private chat is **rejected**, because git-meta inverts nearly every property
+it needs: git syncs on pull/interval (async, eventually-consistent) where chat wants
+low latency; git history is append-only forever (no clean message deletion) where chat
+is high-volume and ephemeral; git-meta is public to the repo where DMs are private; and
+every message would be a commit + push. Building it would also turn an issue tracker
+into a second-rate messenger and dilute its focus.
+
+If ephemeral back-and-forth is needed, the L4 webhook sink **notifies into the tool
+people already use** (Slack/email) rather than rebuilding it. Three needs, no chat to
+maintain: tell a person → `@mention` on the relevant ticket; tell the team →
+`ti announce`; chatter → Slack via the sink.
+
+## 8. Layers
 
 Build order is bottom-up; each layer depends on the one below and delivers value
 standalone.
@@ -261,7 +294,7 @@ Built on diff-on-ingest.
 - **Notifications.** Built on L2 events — email/Slack sinks are webhook consumers,
   not a separate subsystem.
 
-## 8. Tech stack & code layout
+## 9. Tech stack & code layout
 
 - **Async/HTTP:** `axum` + `tokio`. New deps, confined to the server crate so the
   CLI and library stay synchronous and lean.
@@ -276,7 +309,7 @@ Built on diff-on-ingest.
   adding the async/HTTP stack; check the `gix`/`winnow` graph when introducing
   `axum`/`tokio`.
 
-## 9. Testing approach
+## 10. Testing approach
 
 Mirror the existing CLI integration suite (`crates/ticgit/tests/cli.rs`): each test
 builds a throwaway git repo in a tempdir, boots the server on an ephemeral port, and
@@ -296,7 +329,7 @@ drives real HTTP.
 - Keep the tempdir pattern for hermeticity; prefer end-to-end HTTP tests for anything
   user-observable.
 
-## 10. Build sequence
+## 11. Build sequence
 
 1. **L1** — shared engine (ingest loop, SQLite index, diff-on-ingest) + read/write
    API. The bottleneck everything else needs. Lands the cross-repo reference *format*
@@ -306,12 +339,13 @@ drives real HTTP.
    reference resolution, derived reverse edges, the multi-repo `ti deps` graph, and
    the cross-repo request inbox (a derived view).
 4. **L4** — auth, access control, notification sinks; gates cross-repo `accept` on a
-   writer token for the target repo.
+   writer token for the target repo. `@mention` and `ti announce` ride these
+   notification/event rails (section 7); no chat subsystem is built.
 
 Each layer is specced, planned, and built on its own before the next begins; L1–L3
 are useful standalone (internal/single-team) before L4's cost is paid.
 
-## 11. Open questions (resolve at per-layer spec time)
+## 12. Open questions (resolve at per-layer spec time)
 
 - `ti serve` subcommand vs. separate `ti-server` binary.
 - Index schema detail and migration strategy for `docs/schema/v1.json` extensions.
@@ -323,3 +357,5 @@ are useful standalone (internal/single-team) before L4's cost is paid.
   references without a server present.
 - Cross-repo request lifecycle beyond accept/reject: how a pending request is
   superseded or expires, and whether `reject` notifies the requester (via L2 events).
+- Whether `ti announce` is a special ticket kind or a distinct git-meta object, its
+  lifecycle (dismiss/expire), and `@mention` resolution to a notification target.
