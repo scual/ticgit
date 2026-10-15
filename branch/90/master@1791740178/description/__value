@@ -1,0 +1,24 @@
+## What to build
+
+The code-review record (create, approve, request changes, revision history with patch-id and change-id, merge, "all approved") becomes a lib module in the same way Writeups are. `ti review` and the TUI become thin callers of one interface. Calls to git and the `but` tool sit behind a small adapter so lib tests can use a fake.
+
+## Why
+
+The review feature (about 1.1k lines) lives in the CLI, and about 10 near-identical helpers are duplicated again inside the TUI. Both write review metadata directly through raw git-meta targets (about 42 direct calls in the TUI). Nothing about the review rules can be tested without driving the binary or a terminal; existing TUI tests only check formatting.
+
+## Acceptance criteria
+
+- [ ] Review rules (approvals, revision change history, all-approved) are covered by lib tests through the test store and a fake VCS adapter
+- [ ] The CLI review commands and the TUI review views call the lib; the duplicated helpers are deleted
+- [ ] No raw review metadata keys are written from the binary crate
+- [ ] A real adapter (git / `but`) and a fake adapter both exist, justifying the seam
+- [ ] Existing review CLI integration tests pass unchanged; `--json` output and schema are unchanged
+- [ ] TUI review behaviour is unchanged (manual check noted in the PR)
+
+## Blocked by
+
+None — can start immediately.
+
+## Notes
+
+No ADR conflict. Consider tackling in two steps (lib module with the CLI as the first caller, then the TUI) if it does not fit one context window.
