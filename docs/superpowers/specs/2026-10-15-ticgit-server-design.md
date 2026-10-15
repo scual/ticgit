@@ -225,7 +225,75 @@ people already use** (Slack/email) rather than rebuilding it. Three needs, no ch
 maintain: tell a person → `@mention` on the relevant ticket; tell the team →
 `ti announce`; chatter → Slack via the sink.
 
-## 8. Layers
+### Outbound notifications & channels
+
+The server's only outbound contract is the canonical L2 event stream. Delivery channels
+are *consumers* of that stream, never features baked into the daemon:
+
+- **Free today:** the L2 SSE stream (dashboard) and generic webhooks. Slack, Discord,
+  Teams — anything with an incoming-webhook URL — need **zero new code**; register a
+  hook.
+- **Optional adapters** (feature-gated, config-driven, consumer-only, never touch git):
+  Telegram, WhatsApp and similar are not plain webhooks — each needs a bot token and a
+  service-specific payload, so each is a thin "event → channel API" adapter. Kept
+  satellite to the core so the binary does not rot when a provider changes their API,
+  and a team compiles in only what it uses. WhatsApp specifically means the Business
+  API (templates, cost) — heavier, clearly optional.
+- **Push:** Web Push (VAPID) for the dashboard is reasonable since the dashboard is
+  ours; native mobile push needs an app and is out of scope for the self-hosted binary.
+- **Per-user routing** ("ping me on my assigned tickets via Telegram") is personal,
+  server-local config — the same non-derived, outside-git category as `session_state`
+  and webhook subscriptions, not git truth.
+
+Rejected: hard-wiring each third-party service into the core as a first-class feature —
+maintenance debt and dependency surface the event + webhook contract avoids.
+
+## 8. Derived capabilities (what git's history and graph unlock)
+
+The server's real superpower is derivation over data git already holds — its full
+history and the dependency graph. These features add **no stored truth**; they index
+and expose what is latent in git. This is where the git-native model *beats* a
+traditional tracker rather than imitating it.
+
+### History & audit (time-travel)
+
+git-meta's entire history is already in git. The server indexes it to offer:
+
+- `ti log <ticket>` — every status/field change, with author and commit.
+- `ti blame <ticket>` — who set a field (e.g. `blocked`) and when, read from the commit.
+- `ti stats --since …` — burndown / velocity from real history, not a separately
+  maintained activity log.
+
+Because the audit trail *is* git — and commits can be signed — it cannot be forged or
+retro-edited the way a tracker's own database can. This is the headline differentiator:
+"big company" features on a foundation the big companies structurally cannot match.
+
+### Issue ↔ code binding
+
+Commits reference a ticket UUID (a `Ticket: <uuid>` trailer or a branch name). The
+server, already watching the repo, **derives** the link — "this ticket's code landed in
+these commits / branches / PRs" — with nothing new stored. Closes the issue↔code loop
+git-natively.
+
+### Dependency-aware scheduling
+
+Over the cross-repo dependency graph (section 5):
+
+- `ti ready` — tickets whose dependencies are all closed (workable now).
+- `ti critical-path` — the chain gating a milestone.
+- `ti cycles` — dependency cycles, including cross-repo, surfaced as warnings.
+
+Pure derivation; uniquely enabled by the server's multi-repo view.
+
+### Non-goals in this space
+
+Real-time collaborative ticket editing (co-editing cursors) is rejected for the same
+reason as 1-to-1 chat (section 7): it fights git's append-only, pull-synced model.
+Workflow state-machines are allowed only if their *configuration* lives in git-meta
+(like saved views) and the server merely enforces it — the server never owns workflow
+truth.
+
+## 9. Layers
 
 Build order is bottom-up; each layer depends on the one below and delivers value
 standalone.
@@ -294,7 +362,7 @@ Built on diff-on-ingest.
 - **Notifications.** Built on L2 events — email/Slack sinks are webhook consumers,
   not a separate subsystem.
 
-## 9. Tech stack & code layout
+## 10. Tech stack & code layout
 
 - **Async/HTTP:** `axum` + `tokio`. New deps, confined to the server crate so the
   CLI and library stay synchronous and lean.
@@ -309,7 +377,7 @@ Built on diff-on-ingest.
   adding the async/HTTP stack; check the `gix`/`winnow` graph when introducing
   `axum`/`tokio`.
 
-## 10. Testing approach
+## 11. Testing approach
 
 Mirror the existing CLI integration suite (`crates/ticgit/tests/cli.rs`): each test
 builds a throwaway git repo in a tempdir, boots the server on an ephemeral port, and
@@ -326,26 +394,35 @@ drives real HTTP.
   leaves a pending reference; `accept` (with a target-repo writer token) writes the
   target git-meta and resolves the reference; `reject` writes nothing to the target;
   `accept` without the token is refused.
+- **History tests:** mutate a ticket across several commits; assert `ti log` / `ti
+  blame` report the right authors and commits and that historical stats reflect the
+  real timeline.
+- **Scheduling tests:** build a dependency graph; assert `ti ready` excludes tickets
+  with open dependencies and a cross-repo cycle is detected and surfaced.
 - Keep the tempdir pattern for hermeticity; prefer end-to-end HTTP tests for anything
   user-observable.
 
-## 11. Build sequence
+## 12. Build sequence
 
 1. **L1** — shared engine (ingest loop, SQLite index, diff-on-ingest) + read/write
    API. The bottleneck everything else needs. Lands the cross-repo reference *format*
-   (`keys.rs` layout + bare-UUID back-compat) so later layers resolve against it.
-2. **L2** — events/webhooks on the diff machinery.
-3. **L3** — dashboard (htmx+SSE) and portfolio aggregation, including cross-repo
-   reference resolution, derived reverse edges, the multi-repo `ti deps` graph, and
-   the cross-repo request inbox (a derived view).
-4. **L4** — auth, access control, notification sinks; gates cross-repo `accept` on a
-   writer token for the target repo. `@mention` and `ti announce` ride these
-   notification/event rails (section 7); no chat subsystem is built.
+   (`keys.rs` layout + bare-UUID back-compat) and indexes git-meta history for
+   `ti log` / `ti blame` / historical stats (section 8).
+2. **L2** — events/webhooks on the diff machinery; the canonical event stream that
+   every notification channel consumes (section 7).
+3. **L3** — dashboard (htmx+SSE) and portfolio aggregation: cross-repo reference
+   resolution, derived reverse edges, the multi-repo `ti deps` graph, the request
+   inbox, plus the derived scheduling (`ti ready` / `critical-path` / `cycles`) and
+   issue↔code binding views (section 8).
+4. **L4** — auth, access control, notification sinks and optional channel adapters
+   (Telegram/WhatsApp/push); gates cross-repo `accept` on a writer token for the target
+   repo. `@mention` and `ti announce` ride these rails (section 7); no chat subsystem is
+   built.
 
 Each layer is specced, planned, and built on its own before the next begins; L1–L3
 are useful standalone (internal/single-team) before L4's cost is paid.
 
-## 12. Open questions (resolve at per-layer spec time)
+## 13. Open questions (resolve at per-layer spec time)
 
 - `ti serve` subcommand vs. separate `ti-server` binary.
 - Index schema detail and migration strategy for `docs/schema/v1.json` extensions.
@@ -359,3 +436,9 @@ are useful standalone (internal/single-team) before L4's cost is paid.
   superseded or expires, and whether `reject` notifies the requester (via L2 events).
 - Whether `ti announce` is a special ticket kind or a distinct git-meta object, its
   lifecycle (dismiss/expire), and `@mention` resolution to a notification target.
+- Commit↔ticket binding convention (`Ticket:` trailer vs. branch name) and how PRs are
+  detected across hosting providers (section 8).
+- Which notification channel adapters ship in-tree vs. are left to an external bridge,
+  and the per-user routing config format (section 7).
+- History indexing strategy: full replay vs. incremental, and performance on large
+  git-meta histories (section 8).
