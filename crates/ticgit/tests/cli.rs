@@ -3834,6 +3834,58 @@ fn sync_from_stranded_store_self_heals_via_pull_reindex() {
     );
 }
 
+/// Every overwriting push first snapshots the prior remote tip to a local
+/// backup ref (outside refs/meta/* so reindex never replays it), and the
+/// snapshots are pruned to a fixed bound. This is what made the real incident
+/// recoverable — now the tool does it automatically.
+#[test]
+fn sync_snapshots_remote_tip_before_overwriting_and_prunes() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    let id = create_ticket(&repo, "snapshot me");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Many overwriting edit+sync cycles. Each pull refreshes the tracking ref
+    // to the current remote tip; the following push snapshots it before
+    // overwriting.
+    for i in 1..=14 {
+        repo.ti()
+            .args(["milestone", &format!("v{i}"), "-t", &id])
+            .assert()
+            .success();
+        repo.ti().arg("sync").assert().success();
+    }
+
+    let names = git_output(
+        repo.dir.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/ticgit-backup/"],
+    );
+    let count = names.lines().count();
+    assert!(count >= 1, "overwriting syncs must leave recoverable snapshots");
+    assert!(
+        count <= 10,
+        "snapshots must be pruned to the bound, got {count}: {names}"
+    );
+
+    // A snapshot is a real git-meta commit whose tree still holds the ticket —
+    // i.e. the prior remote state is genuinely recoverable from it.
+    let snap = names.lines().next().unwrap();
+    let tree = git_output(
+        repo.dir.path(),
+        &["ls-tree", "--name-only", &format!("{snap}:project/ticgit/tickets")],
+    );
+    assert!(
+        tree.contains(&id),
+        "snapshot {snap} must contain the ticket tree; got {tree}"
+    );
+}
+
 /// A real deletion still propagates when the operator opts in with
 /// --allow-deletes; without the flag the same push is refused.
 #[test]

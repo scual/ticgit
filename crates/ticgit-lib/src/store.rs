@@ -143,6 +143,10 @@ fn signing_key_from_env() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// How many pre-push remote-tip backup snapshots to retain per namespace;
+/// older ones are pruned so the backup refs cannot grow without bound.
+const MAX_BACKUP_SNAPSHOTS: usize = 10;
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -2341,7 +2345,110 @@ impl TicketStore {
                 return Err(Error::ImplicitDeletion(removed.into_iter().collect()));
             }
         }
+        // Defense in depth: snapshot the current remote tip to a local backup
+        // ref before overwriting it, so even a push that slips past the guard
+        // stays reversible.
+        self.snapshot_remote_ref()?;
         let _ = self.session.push_once(remote)?;
+        Ok(())
+    }
+
+    /// Root of the local pre-push backup refs for this namespace.
+    ///
+    /// Deliberately OUTSIDE `refs/{ns}/`: git-meta's `materialize(None)` (which
+    /// [`reindex`] drives) replays every non-local ref under `refs/{ns}/`, so a
+    /// backup kept there would resurrect deleted tickets on the next reindex.
+    fn backup_root(&self) -> String {
+        format!("refs/ticgit-backup/{}", self.session.namespace())
+    }
+
+    /// Snapshot the current remote meta tip to a local backup ref before an
+    /// overwriting push, pruning to the newest [`MAX_BACKUP_SNAPSHOTS`]. A no-op
+    /// when there is no remote tip yet (a first push has nothing to overwrite)
+    /// or when the current tip is already the latest snapshot.
+    ///
+    /// Restore the remote from a snapshot with:
+    /// `git push <remote> +<backup-ref>:refs/{ns}/main && ti reindex`.
+    fn snapshot_remote_ref(&self) -> Result<()> {
+        let ns = self.session.namespace().to_string();
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+
+        let Some(oid) = repo
+            .find_reference(&format!("refs/{ns}/remotes/main"))
+            .ok()
+            .and_then(|r| r.into_fully_peeled_id().ok())
+            .map(|id| id.detach())
+        else {
+            return Ok(());
+        };
+
+        let backup_root = self.backup_root();
+        // Don't let no-op pushes pile up identical snapshots.
+        if self
+            .backup_refs(&repo, &backup_root)?
+            .iter()
+            .any(|(_, o)| *o == oid)
+        {
+            return Ok(());
+        }
+
+        let ts = OffsetDateTime::now_utc().unix_timestamp();
+        let short: String = oid.to_string().chars().take(8).collect();
+        let name = format!("{backup_root}/{ts}-{short}");
+        repo.reference(
+            name,
+            oid,
+            gix::refs::transaction::PreviousValue::Any,
+            "ticgit: pre-push backup of remote meta tip",
+        )
+        .map_err(|e| Error::InvalidValue(format!("writing backup ref: {e}")))?;
+
+        self.prune_backups(&repo, &backup_root)?;
+        Ok(())
+    }
+
+    /// All backup refs under `backup_root` as `(full_ref_name, tip_oid)`.
+    fn backup_refs(
+        &self,
+        repo: &gix::Repository,
+        backup_root: &str,
+    ) -> Result<Vec<(String, gix::ObjectId)>> {
+        let prefix = format!("{backup_root}/");
+        let mut out = Vec::new();
+        for r in repo
+            .references()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .all()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .filter_map(std::result::Result::ok)
+        {
+            let name = r.name().as_bstr().to_string();
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            if let Ok(id) = r.into_fully_peeled_id() {
+                out.push((name, id.detach()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keep only the newest [`MAX_BACKUP_SNAPSHOTS`] backup refs. Names are
+    /// `<unix_ts>-<short>`, so a lexical sort on the full ref name is
+    /// chronological for the foreseeable future.
+    fn prune_backups(&self, repo: &gix::Repository, backup_root: &str) -> Result<()> {
+        let mut refs = self.backup_refs(repo, backup_root)?;
+        if refs.len() <= MAX_BACKUP_SNAPSHOTS {
+            return Ok(());
+        }
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
+        let drop_count = refs.len() - MAX_BACKUP_SNAPSHOTS;
+        for (name, _) in refs.into_iter().take(drop_count) {
+            if let Ok(reference) = repo.find_reference(&name) {
+                let _ = reference.delete();
+            }
+        }
         Ok(())
     }
 
