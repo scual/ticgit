@@ -316,8 +316,9 @@ fn pre_push(remote: Option<&str>) {
 fn sync_once() -> Result<String> {
     let store = super::open_store()?;
     // Auto-sync is fail-closed: never let a hook implicitly delete remote
-    // tickets from a stranded/incomplete store.
-    let outcome = super::sync::sync_tickets(&store, None, false)?;
+    // tickets from a stranded/incomplete store, and never push a store that
+    // fails integrity.
+    let outcome = super::sync::sync_tickets(&store, None, false, false)?;
     Ok(format!(
         "ti: synced tickets ({} pulled, {} pushed)",
         outcome.new_tickets.len(),

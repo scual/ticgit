@@ -24,6 +24,12 @@ pub struct Args {
     /// remote.
     #[arg(long = "allow-deletes")]
     pub allow_deletes: bool,
+
+    /// Skip the pre-push integrity check. Off by default: a store that fails
+    /// `ti verify` is not allowed to overwrite the remote. Use only for
+    /// intentional recovery flows.
+    #[arg(long = "no-verify")]
+    pub no_verify: bool,
 }
 
 pub fn run_sync(args: Args) -> Result<()> {
@@ -49,7 +55,7 @@ pub fn run_sync(args: Args) -> Result<()> {
     }
 
     let SyncOutcome { new_tickets, total } =
-        sync_tickets(&store, args.remote.as_deref(), args.allow_deletes)?;
+        sync_tickets(&store, args.remote.as_deref(), args.allow_deletes, args.no_verify)?;
 
     if args.json {
         let pulled: Vec<serde_json::Value> = new_tickets
@@ -99,6 +105,7 @@ pub(crate) fn sync_tickets(
     store: &ticgit_lib::TicketStore,
     remote: Option<&str>,
     allow_deletes: bool,
+    no_verify: bool,
 ) -> Result<SyncOutcome> {
     let before: BTreeMap<Uuid, String> = store
         .list()?
@@ -125,6 +132,28 @@ pub(crate) fn sync_tickets(
         .filter(|(id, _)| !before.contains_key(id))
         .map(|(id, title)| (*id, title.clone()))
         .collect();
+
+    // Gate the push on integrity: a store that cannot replay every ticket to a
+    // valid state must not overwrite the shared remote.
+    if !no_verify {
+        let report = store.verify()?;
+        let failed: Vec<_> = report.iter().filter(|o| !o.ok).collect();
+        if !failed.is_empty() {
+            let mut msg = format!(
+                "refusing to push: {} of {} ticket(s) failed `ti verify`:",
+                failed.len(),
+                report.len()
+            );
+            for o in &failed {
+                msg.push_str(&format!("\n  {}", o.short_id));
+                for issue in &o.issues {
+                    msg.push_str(&format!("\n    - {issue}"));
+                }
+            }
+            msg.push_str("\nFix the store (e.g. `ti reindex`) or re-run with --no-verify.");
+            anyhow::bail!(msg);
+        }
+    }
 
     store.push(remote, allow_deletes)?;
     Ok(SyncOutcome {

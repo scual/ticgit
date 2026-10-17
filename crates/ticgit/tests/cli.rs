@@ -3886,6 +3886,58 @@ fn sync_snapshots_remote_tip_before_overwriting_and_prunes() {
     );
 }
 
+/// `ti sync` runs `ti verify` before pushing and refuses a store that fails
+/// integrity, so a corrupt store can never overwrite the shared remote. The
+/// --no-verify escape hatch lets intentional recovery flows through.
+#[test]
+fn sync_refuses_to_push_a_store_that_fails_verify() {
+    use ticgit_lib::{Session, Target, TicketStore};
+
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    let id = create_ticket(&repo, "corruptible");
+    repo.ti().arg("push").assert().success();
+
+    // Corrupt an op in the store so it no longer replays to a valid state:
+    // overwrite one op key's value with an envelope whose id matches neither
+    // the key hash nor its own recomputed content-id.
+    {
+        let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+        let store = TicketStore::from_session(session).expect("from_session");
+        let p = store.session().target(&Target::project());
+        let pairs = p.get_all_values(Some("ticgit:tickets")).expect("scan");
+        let (key, _) = pairs
+            .into_iter()
+            .find(|(k, _)| k.contains(":ops:"))
+            .expect("an op key");
+        p.set(
+            &key,
+            "{\"id\":\"deadbeef\",\"lamport\":0,\"author\":\"x@y.z\",\
+             \"created_at\":\"1970-01-01T00:00:00Z\",\"format_version\":1,\
+             \"kind\":\"set-field\",\"payload\":{\"fields\":{\"title\":\"evil\"}}}",
+        )
+        .expect("tamper op");
+    }
+
+    // Sync refuses, naming verify and the offending ticket.
+    repo.ti()
+        .arg("sync")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("verify").and(predicate::str::contains(&id[..6])));
+
+    // The escape hatch lets it through.
+    repo.ti()
+        .args(["sync", "--no-verify"])
+        .assert()
+        .success();
+}
+
 /// A real deletion still propagates when the operator opts in with
 /// --allow-deletes; without the flag the same push is refused.
 #[test]
