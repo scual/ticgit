@@ -3754,10 +3754,12 @@ fn reindex_rebuilds_store_from_meta_refs() {
 // 81f1c6). Removal of remote data is allowed only via an explicit --allow-deletes.
 // ---------------------------------------------------------------------------
 
-/// A sync from a stranded store (tickets still in refs/meta/* but missing from
-/// the local projection) must refuse to push rather than clobber the remote.
+/// A bare `ti push` from a stranded store (tickets still in refs/meta/* but
+/// missing from the local projection) must refuse rather than clobber the
+/// remote. `ti push` does not pull first, so nothing heals the store before the
+/// push — the guard is the only thing standing between it and data loss.
 #[test]
-fn sync_from_stranded_store_refuses_to_clobber_remote_tickets() {
+fn push_from_stranded_store_refuses_to_clobber_remote_tickets() {
     let repo = TestRepo::new();
     let remote = tempfile::tempdir().expect("bare remote tempdir");
     git(remote.path(), &["init", "--bare", "--quiet"]);
@@ -3772,7 +3774,7 @@ fn sync_from_stranded_store_refuses_to_clobber_remote_tickets() {
     repo.ti().arg("sync").assert().success();
 
     // Strand the store: drop the local projection but keep refs/meta/* and the
-    // local serialization ref, so a pull short-circuits as "already up-to-date".
+    // local serialization ref, so a serialize sees an empty store.
     let git_dir = repo.dir.path().join(".git");
     for name in [
         "git-meta.sqlite",
@@ -3782,16 +3784,51 @@ fn sync_from_stranded_store_refuses_to_clobber_remote_tickets() {
         let _ = fs::remove_file(git_dir.join(name));
     }
 
-    // The buggy behavior: pull reports "no new tickets", then push serializes
-    // the empty store and deletes both remote tickets. The guard must abort.
+    // The buggy behavior: push serializes the empty store and deletes both
+    // remote tickets. The guard must abort.
     repo.ti()
-        .arg("sync")
+        .arg("push")
         .assert()
         .failure()
         .stderr(predicate::str::contains("reindex"));
 
     // Prove the remote data survived: reindex and both tickets reappear.
     repo.ti().arg("reindex").assert().success();
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("alpha ticket").and(predicate::str::contains("beta ticket")),
+    );
+}
+
+/// A `ti sync` from a stranded store self-heals: the pull notices the index is
+/// missing tickets that still live in refs/meta/* and reindexes them, instead
+/// of reporting "no new tickets" and then pushing an empty store. No abort, no
+/// data loss — the store is made honest.
+#[test]
+fn sync_from_stranded_store_self_heals_via_pull_reindex() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    create_ticket(&repo, "beta ticket");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Strand the store.
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    // Sync succeeds by recovering the stranded tickets during the pull.
+    repo.ti().arg("sync").assert().success();
     repo.ti().args(["list"]).assert().success().stdout(
         predicate::str::contains("alpha ticket").and(predicate::str::contains("beta ticket")),
     );

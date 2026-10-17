@@ -2309,6 +2309,21 @@ impl TicketStore {
 
     pub fn pull(&self, remote: Option<&str>) -> Result<()> {
         let _ = self.session.pull(remote)?;
+
+        // Honesty check: git-meta can treat the store as "already up-to-date"
+        // (because the local serialization ref is present) even when the index
+        // is missing tickets that live in refs/{ns}/*. Detect that — any remote
+        // ticket id absent from the index — and materialize the missing tickets
+        // via reindex instead of silently leaving the store stranded. A store
+        // that is genuinely complete skips the reindex and fast-paths.
+        let ns = self.session.namespace();
+        let remote_ids = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        if !remote_ids.is_empty() {
+            let local_ids: BTreeSet<Uuid> = self.list()?.into_iter().map(|t| t.id).collect();
+            if remote_ids.difference(&local_ids).next().is_some() {
+                self.reindex()?;
+            }
+        }
         Ok(())
     }
 
