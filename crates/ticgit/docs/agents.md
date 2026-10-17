@@ -267,6 +267,22 @@ ti push                       # push only
 ti pull <url-or-nickname>     # pull from a fork or remote URL
 ```
 
+> **Sync is safe by default.** `ti sync` is pull-then-push, hardened so a
+> stranded or damaged store can never silently delete tickets on the remote:
+>
+> - **Pull self-heals.** If the remote holds tickets missing from your local
+>   index, the pull reindexes them instead of reporting "no new tickets".
+> - **Push refuses implicit deletion.** A push that would drop remote tickets
+>   not removed by an explicit `ti delete` is rejected; pass `--allow-deletes`
+>   to remove them on purpose.
+> - **Backup before overwrite.** The prior remote tip is snapshotted to a local
+>   `refs/ticgit-backup/<ns>/` ref (newest 10 kept) before every overwriting push.
+> - **Verify gate.** A store that fails `ti verify` is not pushed; pass
+>   `--no-verify` only for intentional recovery.
+>
+> **Invariant:** a ticket leaves the remote only through an explicit deletion,
+> never as a side effect of serializing an incomplete local store.
+
 First-time setup on a repo (both idempotent):
 
 ```sh
@@ -304,6 +320,20 @@ to recover tickets that exist in `refs/meta/*` (e.g. synced from a since-removed
 worktree) but are missing from this checkout's store, or if the store file is
 lost. It re-applies the remote tracking ref and is non-destructive; run a sync
 first so the ref is present.
+
+### Recovering a stranded or damaged store
+
+- **Store missing tickets the remote has:** `ti reindex` rebuilds it from
+  `refs/meta/*`. A normal `ti sync` now does this automatically when it detects
+  the gap, so you rarely need to run it by hand.
+- **A bad push slipped through (or you forced one with `--allow-deletes`):**
+  restore the remote from the newest pre-push snapshot —
+  `git push <remote> +<backup-ref>:refs/meta/main && ti reindex`, where
+  `<backup-ref>` is the latest ref under `refs/ticgit-backup/<ns>/`
+  (list them with `git for-each-ref refs/ticgit-backup/`).
+- **`ti verify` fails:** it lists the offending tickets; fix them or `ti reindex`,
+  then sync. Use `ti sync --no-verify` only when you deliberately accept the
+  current state.
 
 Operations can be **signed** with your existing SSH key (git-signing style): set
 `TICGIT_SIGNING_KEY` to a private key path and new operations are signed with

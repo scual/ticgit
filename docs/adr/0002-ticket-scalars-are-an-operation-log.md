@@ -16,3 +16,16 @@ This is hard to undo: once operations are synced, every clone depends on the log
 - Reads project the log (plus the plain-key sets and comments), so a ticket is a hybrid of both stores.
 - Unknown operation kinds are skipped on replay so newer writers don't break older readers.
 - Unsigned operations are trusted by default and only warned about by `ti verify`.
+
+## Sync invariant: a ticket leaves the remote only by explicit deletion
+
+`ti sync` serializes the local store and overwrites `refs/{ns}/main`. A ticket must be removed from the remote **only** through an explicit deletion, never as a side effect of serializing an incomplete local store. Otherwise a stranded index (operations present in `refs/{ns}/*` but not materialized into the local `git-meta.sqlite`) silently deletes every ticket that lived only on the remote — a failure mode that cost 13 tickets in the field.
+
+Deletion today is represented by the *absence* of a ticket's keys (`ti delete` removes them), not by a tombstone operation, so a serialization of an incomplete store is indistinguishable from a mass delete by content alone. Until a delete tombstone op exists, sync enforces the invariant structurally, as defense in depth:
+
+- the pull self-heals — a remote ticket missing from the index triggers a reindex instead of a silent "no new tickets";
+- the push refuses to drop any remote ticket not removed by an explicit `ti delete`, unless `--allow-deletes` is passed;
+- the prior remote tip is snapshotted to `refs/ticgit-backup/{ns}/` before any overwriting push;
+- the push is gated on `ti verify`, so a store that cannot replay cleanly never overwrites the remote.
+
+A first-class delete tombstone operation would let the guard distinguish an intentional deletion from a stranded store precisely, folding this structural enforcement back into the op-log itself (see the op-log architecture work, ticket `0e7b124`).
