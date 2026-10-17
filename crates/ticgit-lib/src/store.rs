@@ -143,6 +143,10 @@ fn signing_key_from_env() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// How many pre-push remote-tip backup snapshots to retain per namespace;
+/// older ones are pruned so the backup refs cannot grow without bound.
+const MAX_BACKUP_SNAPSHOTS: usize = 10;
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -2309,12 +2313,190 @@ impl TicketStore {
 
     pub fn pull(&self, remote: Option<&str>) -> Result<()> {
         let _ = self.session.pull(remote)?;
+
+        // Honesty check: git-meta can treat the store as "already up-to-date"
+        // (because the local serialization ref is present) even when the index
+        // is missing tickets that live in refs/{ns}/*. Detect that — any remote
+        // ticket id absent from the index — and materialize the missing tickets
+        // via reindex instead of silently leaving the store stranded. A store
+        // that is genuinely complete skips the reindex and fast-paths.
+        let ns = self.session.namespace();
+        let remote_ids = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        if !remote_ids.is_empty() {
+            let local_ids: BTreeSet<Uuid> = self.list()?.into_iter().map(|t| t.id).collect();
+            if remote_ids.difference(&local_ids).next().is_some() {
+                self.reindex()?;
+            }
+        }
         Ok(())
     }
 
-    pub fn push(&self, remote: Option<&str>) -> Result<()> {
+    /// Push the local store to `remote`.
+    ///
+    /// Fail-closed against *implicit* deletion: unless `allow_deletes` is set,
+    /// the push is refused when it would remove tickets that are on the remote
+    /// but absent from the local store (the stranded/incomplete-index clobber).
+    /// A ticket is removed from the remote only when the operator opts in, never
+    /// as a side effect of serializing a partial local tree.
+    pub fn push(&self, remote: Option<&str>, allow_deletes: bool) -> Result<()> {
+        if !allow_deletes {
+            let removed = self.tickets_removed_by_push()?;
+            if !removed.is_empty() {
+                return Err(Error::ImplicitDeletion(removed.into_iter().collect()));
+            }
+        }
+        // Defense in depth: snapshot the current remote tip to a local backup
+        // ref before overwriting it, so even a push that slips past the guard
+        // stays reversible.
+        self.snapshot_remote_ref()?;
         let _ = self.session.push_once(remote)?;
         Ok(())
+    }
+
+    /// Root of the local pre-push backup refs for this namespace.
+    ///
+    /// Deliberately OUTSIDE `refs/{ns}/`: git-meta's `materialize(None)` (which
+    /// [`reindex`] drives) replays every non-local ref under `refs/{ns}/`, so a
+    /// backup kept there would resurrect deleted tickets on the next reindex.
+    fn backup_root(&self) -> String {
+        format!("refs/ticgit-backup/{}", self.session.namespace())
+    }
+
+    /// Snapshot the current remote meta tip to a local backup ref before an
+    /// overwriting push, pruning to the newest [`MAX_BACKUP_SNAPSHOTS`]. A no-op
+    /// when there is no remote tip yet (a first push has nothing to overwrite)
+    /// or when the current tip is already the latest snapshot.
+    ///
+    /// Restore the remote from a snapshot with:
+    /// `git push <remote> +<backup-ref>:refs/{ns}/main && ti reindex`.
+    fn snapshot_remote_ref(&self) -> Result<()> {
+        let ns = self.session.namespace().to_string();
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+
+        let Some(oid) = repo
+            .find_reference(&format!("refs/{ns}/remotes/main"))
+            .ok()
+            .and_then(|r| r.into_fully_peeled_id().ok())
+            .map(|id| id.detach())
+        else {
+            return Ok(());
+        };
+
+        let backup_root = self.backup_root();
+        // Don't let no-op pushes pile up identical snapshots.
+        if self
+            .backup_refs(&repo, &backup_root)?
+            .iter()
+            .any(|(_, o)| *o == oid)
+        {
+            return Ok(());
+        }
+
+        let ts = OffsetDateTime::now_utc().unix_timestamp();
+        let short: String = oid.to_string().chars().take(8).collect();
+        let name = format!("{backup_root}/{ts}-{short}");
+        repo.reference(
+            name,
+            oid,
+            gix::refs::transaction::PreviousValue::Any,
+            "ticgit: pre-push backup of remote meta tip",
+        )
+        .map_err(|e| Error::InvalidValue(format!("writing backup ref: {e}")))?;
+
+        self.prune_backups(&repo, &backup_root)?;
+        Ok(())
+    }
+
+    /// All backup refs under `backup_root` as `(full_ref_name, tip_oid)`.
+    fn backup_refs(
+        &self,
+        repo: &gix::Repository,
+        backup_root: &str,
+    ) -> Result<Vec<(String, gix::ObjectId)>> {
+        let prefix = format!("{backup_root}/");
+        let mut out = Vec::new();
+        for r in repo
+            .references()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .all()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .filter_map(std::result::Result::ok)
+        {
+            let name = r.name().as_bstr().to_string();
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            if let Ok(id) = r.into_fully_peeled_id() {
+                out.push((name, id.detach()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keep only the newest [`MAX_BACKUP_SNAPSHOTS`] backup refs. Names are
+    /// `<unix_ts>-<short>`, so a lexical sort on the full ref name is
+    /// chronological for the foreseeable future.
+    fn prune_backups(&self, repo: &gix::Repository, backup_root: &str) -> Result<()> {
+        let mut refs = self.backup_refs(repo, backup_root)?;
+        if refs.len() <= MAX_BACKUP_SNAPSHOTS {
+            return Ok(());
+        }
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
+        let drop_count = refs.len() - MAX_BACKUP_SNAPSHOTS;
+        for (name, _) in refs.into_iter().take(drop_count) {
+            if let Ok(reference) = repo.find_reference(&name) {
+                let _ = reference.delete();
+            }
+        }
+        Ok(())
+    }
+
+    /// Ticket ids that a push would remove from the remote: present on the
+    /// fetched remote tracking ref but absent from the freshly-serialized local
+    /// tree. A non-empty result means the push would implicitly delete those
+    /// remote tickets.
+    ///
+    /// Serializes first so the comparison reflects exactly what [`push`] will
+    /// write. Compares git trees by ticket-id directory, so it is faithful to
+    /// the push regardless of why the local index is incomplete.
+    pub fn tickets_removed_by_push(&self) -> Result<BTreeSet<Uuid>> {
+        self.serialize()?;
+        let ns = self.session.namespace();
+        let local = self.ticket_ids_in_ref(&format!("refs/{ns}/local/main"))?;
+        let remote = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        Ok(remote.difference(&local).copied().collect())
+    }
+
+    /// Ticket ids present under [`keys::tickets_tree_path`] in the git tree at
+    /// `ref_name`. Returns an empty set when the ref — or that subtree — does
+    /// not exist yet (e.g. a remote that has never received tickets).
+    fn ticket_ids_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
+        use gix::bstr::ByteSlice;
+
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let spec = format!("{ref_name}:{}", keys::tickets_tree_path());
+        let tree = match repo.rev_parse_single(spec.as_bytes()) {
+            Ok(id) => id
+                .object()
+                .map_err(|e| Error::InvalidValue(format!("reading {ref_name}: {e}")))?
+                .into_tree(),
+            // The ref or the tickets subtree is absent.
+            Err(_) => return Ok(BTreeSet::new()),
+        };
+
+        let mut ids = BTreeSet::new();
+        for entry in tree.iter() {
+            let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
+            if !entry.mode().is_tree() {
+                continue;
+            }
+            if let Ok(id) = Uuid::parse_str(&entry.filename().to_str_lossy()) {
+                ids.insert(id);
+            }
+        }
+        Ok(ids)
     }
 
     /// Rebuild the local store from the git-meta refs, returning the ticket
@@ -2365,8 +2547,34 @@ impl TicketStore {
                 .map_err(|e| Error::InvalidValue(format!("dropping {local_ref}: {e}")))?;
         }
 
-        // Re-project every remote tracking ref into the store.
-        let _ = self.session.materialize(None)?;
+        // Re-project every remote tracking ref into the store. On a blobless
+        // partial clone the referenced meta blobs may be absent; materialize
+        // can then either abort or silently skip the affected tickets. We hold
+        // the result and decide after a completeness check, so an incomplete
+        // rebuild always fails loudly instead of producing a partial store that
+        // looks whole.
+        let materialize_result = self.session.materialize(None);
+
+        // Completeness check: every ticket id present in the remote meta tree
+        // must have left at least one key in the store. A ticket that
+        // materialized but doesn't project (a legacy op-less "empty shell") is
+        // exempt — it has keys. One that materialize skipped entirely (its
+        // objects were missing) has none, and is the silent-under-count case we
+        // refuse to paper over.
+        let expected = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        let p = self.project_handle();
+        let mut missing = 0usize;
+        for id in &expected {
+            if p.get_all_values(Some(&keys::ticket_prefix(id)))?.is_empty() {
+                missing += 1;
+            }
+        }
+        if missing > 0 {
+            return Err(Error::IncompleteReindex { missing, ns });
+        }
+
+        // Nothing missing; surface any other materialize failure.
+        let _ = materialize_result?;
 
         Ok(self.list()?.len())
     }

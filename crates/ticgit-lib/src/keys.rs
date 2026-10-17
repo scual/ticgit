@@ -48,6 +48,17 @@ pub fn ticket_prefix(id: &Uuid) -> String {
     format!("{NS}:tickets:{id}")
 }
 
+/// Path, inside a serialized git-meta tree, of the directory that holds one
+/// subdirectory per ticket uuid (`project/ticgit/tickets`). The `project/`
+/// prefix is git-meta's tree base for the project target; the remaining
+/// segments are [`tickets_prefix`] with `:` turned into `/`. The sync
+/// push-guard walks this subtree to enumerate the ticket ids on a git ref
+/// without materializing the store.
+#[must_use]
+pub fn tickets_tree_path() -> String {
+    format!("project/{}", tickets_prefix().replace(':', "/"))
+}
+
 /// A specific field on a specific ticket, e.g. `ticgit:tickets:<uuid>:title`.
 #[must_use]
 pub fn ticket_field(id: &Uuid, field: &str) -> String {

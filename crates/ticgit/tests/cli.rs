@@ -3747,3 +3747,299 @@ fn reindex_rebuilds_store_from_meta_refs() {
         .success()
         .stdout(predicate::str::contains("durable ticket"));
 }
+
+/// `ti reindex` must never silently under-count. If a ticket referenced by the
+/// remote meta ref cannot be materialized because its objects are missing
+/// locally (the blobless-partial-clone failure mode), reindex fails loudly with
+/// an actionable backfill command instead of producing a store that looks
+/// complete but is missing tickets.
+#[test]
+fn reindex_fails_loudly_when_a_ticket_s_objects_are_missing() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    let b_id = create_ticket(&repo, "beta ticket");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Simulate a store whose meta objects for ticket B are absent locally:
+    // delete B's (loose) blob objects from the odb. A small fetch keeps objects
+    // loose by default (fetch.unpackLimit), so they are individually removable.
+    let listing = git_output(
+        repo.dir.path(),
+        &[
+            "ls-tree",
+            "-r",
+            &format!("refs/meta/remotes/main:project/ticgit/tickets/{b_id}"),
+        ],
+    );
+    let objects_dir = repo.dir.path().join(".git/objects");
+    let mut deleted = 0;
+    for line in listing.lines() {
+        // "<mode> blob <oid>\t<path>"
+        if let Some(oid) = line.split_whitespace().nth(2) {
+            let path = objects_dir.join(&oid[..2]).join(&oid[2..]);
+            if fs::remove_file(&path).is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+    assert!(deleted > 0, "test must delete at least one of B's objects");
+
+    // Lose the local projection so reindex rebuilds from refs/meta/* — where B
+    // now has missing objects.
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    // Reindex refuses, pointing at the backfill command, instead of silently
+    // dropping B.
+    repo.ti()
+        .arg("reindex")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--refetch").and(predicate::str::contains("blob:limit")));
+}
+
+// ---------------------------------------------------------------------------
+// Push guard: a push must never implicitly delete remote tickets as a side
+// effect of serializing an incomplete local store (ticket fe3981 / parent
+// 81f1c6). Removal of remote data is allowed only via an explicit --allow-deletes.
+// ---------------------------------------------------------------------------
+
+/// A bare `ti push` from a stranded store (tickets still in refs/meta/* but
+/// missing from the local projection) must refuse rather than clobber the
+/// remote. `ti push` does not pull first, so nothing heals the store before the
+/// push — the guard is the only thing standing between it and data loss.
+#[test]
+fn push_from_stranded_store_refuses_to_clobber_remote_tickets() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    create_ticket(&repo, "beta ticket");
+    // Seed the remote and fetch the tracking ref refs/meta/remotes/main.
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Strand the store: drop the local projection but keep refs/meta/* and the
+    // local serialization ref, so a serialize sees an empty store.
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    // The buggy behavior: push serializes the empty store and deletes both
+    // remote tickets. The guard must abort.
+    repo.ti()
+        .arg("push")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reindex"));
+
+    // Prove the remote data survived: reindex and both tickets reappear.
+    repo.ti().arg("reindex").assert().success();
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("alpha ticket").and(predicate::str::contains("beta ticket")),
+    );
+}
+
+/// A `ti sync` from a stranded store self-heals: the pull notices the index is
+/// missing tickets that still live in refs/meta/* and reindexes them, instead
+/// of reporting "no new tickets" and then pushing an empty store. No abort, no
+/// data loss — the store is made honest.
+#[test]
+fn sync_from_stranded_store_self_heals_via_pull_reindex() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    create_ticket(&repo, "beta ticket");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Strand the store.
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    // Sync succeeds by recovering the stranded tickets during the pull.
+    repo.ti().arg("sync").assert().success();
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("alpha ticket").and(predicate::str::contains("beta ticket")),
+    );
+}
+
+/// Every overwriting push first snapshots the prior remote tip to a local
+/// backup ref (outside refs/meta/* so reindex never replays it), and the
+/// snapshots are pruned to a fixed bound. This is what made the real incident
+/// recoverable — now the tool does it automatically.
+#[test]
+fn sync_snapshots_remote_tip_before_overwriting_and_prunes() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    let id = create_ticket(&repo, "snapshot me");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Many overwriting edit+sync cycles. Each pull refreshes the tracking ref
+    // to the current remote tip; the following push snapshots it before
+    // overwriting.
+    for i in 1..=14 {
+        repo.ti()
+            .args(["milestone", &format!("v{i}"), "-t", &id])
+            .assert()
+            .success();
+        repo.ti().arg("sync").assert().success();
+    }
+
+    let names = git_output(
+        repo.dir.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/ticgit-backup/"],
+    );
+    let count = names.lines().count();
+    assert!(
+        count >= 1,
+        "overwriting syncs must leave recoverable snapshots"
+    );
+    assert!(
+        count <= 10,
+        "snapshots must be pruned to the bound, got {count}: {names}"
+    );
+
+    // A snapshot is a real git-meta commit whose tree still holds the ticket —
+    // i.e. the prior remote state is genuinely recoverable from it.
+    let snap = names.lines().next().unwrap();
+    let tree = git_output(
+        repo.dir.path(),
+        &[
+            "ls-tree",
+            "--name-only",
+            &format!("{snap}:project/ticgit/tickets"),
+        ],
+    );
+    assert!(
+        tree.contains(&id),
+        "snapshot {snap} must contain the ticket tree; got {tree}"
+    );
+}
+
+/// `ti sync` runs `ti verify` before pushing and refuses a store that fails
+/// integrity, so a corrupt store can never overwrite the shared remote. The
+/// --no-verify escape hatch lets intentional recovery flows through.
+#[test]
+fn sync_refuses_to_push_a_store_that_fails_verify() {
+    use ticgit_lib::{Session, Target, TicketStore};
+
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    let id = create_ticket(&repo, "corruptible");
+    repo.ti().arg("push").assert().success();
+
+    // Corrupt an op in the store so it no longer replays to a valid state:
+    // overwrite one op key's value with an envelope whose id matches neither
+    // the key hash nor its own recomputed content-id.
+    {
+        let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+        let store = TicketStore::from_session(session).expect("from_session");
+        let p = store.session().target(&Target::project());
+        let pairs = p.get_all_values(Some("ticgit:tickets")).expect("scan");
+        let (key, _) = pairs
+            .into_iter()
+            .find(|(k, _)| k.contains(":ops:"))
+            .expect("an op key");
+        p.set(
+            &key,
+            "{\"id\":\"deadbeef\",\"lamport\":0,\"author\":\"x@y.z\",\
+             \"created_at\":\"1970-01-01T00:00:00Z\",\"format_version\":1,\
+             \"kind\":\"set-field\",\"payload\":{\"fields\":{\"title\":\"evil\"}}}",
+        )
+        .expect("tamper op");
+    }
+
+    // Sync refuses, naming verify and the offending ticket.
+    repo.ti()
+        .arg("sync")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("verify").and(predicate::str::contains(&id[..6])));
+
+    // The escape hatch lets it through.
+    repo.ti().args(["sync", "--no-verify"]).assert().success();
+}
+
+/// A real deletion still propagates when the operator opts in with
+/// --allow-deletes; without the flag the same push is refused.
+#[test]
+fn push_refuses_deletion_without_flag_but_allows_it_with_flag() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    // Clone A seeds two tickets on the remote.
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    create_ticket(&a, "keep me");
+    let doomed = create_ticket(&a, "delete me");
+    a.ti().arg("push").assert().success();
+    a.ti().arg("sync").assert().success();
+
+    // Delete one ticket locally. A plain push now looks like a deletion and is
+    // refused with actionable guidance.
+    a.ti().args(["delete", &doomed, "-y"]).assert().success();
+    a.ti()
+        .arg("push")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--allow-deletes"));
+
+    // With the opt-in flag the deletion propagates to the remote.
+    a.ti().args(["push", "--allow-deletes"]).assert().success();
+
+    // A fresh clone sees "keep me" but not "delete me".
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+    b.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("keep me").and(predicate::str::contains("delete me").not()),
+    );
+}

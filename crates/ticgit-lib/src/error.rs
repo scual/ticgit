@@ -61,6 +61,17 @@ pub enum Error {
 
     #[error("no review metadata found for `{0}`; run `ti review new` first")]
     ReviewNotFound(String),
+
+    #[error(
+        "refusing to push: {n} remote ticket(s) would be deleted but were not removed via an explicit delete \u{2014} the local store looks stranded or incomplete. Run `ti reindex` to rebuild from the remote and retry, or pass --allow-deletes to remove them intentionally.",
+        n = .0.len()
+    )]
+    ImplicitDeletion(Vec<Uuid>),
+
+    #[error(
+        "reindex is incomplete: {missing} ticket(s) referenced by the remote meta ref could not be materialized because their objects are missing locally (common on a blobless partial clone). Backfill the missing objects and retry:\n  git fetch --refetch <remote> '+refs/{ns}/main:refs/{ns}/remotes/main' --filter=blob:limit=5m"
+    )]
+    IncompleteReindex { missing: usize, ns: String },
 }
 
 impl Error {

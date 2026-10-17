@@ -156,6 +156,26 @@ ti migrate --write   # apply it (idempotent)
 Sets (`tags`, sub-issues, dependencies), comments, and arbitrary `meta:*` fields keep their
 own git-meta keys — they already merge cleanly — so the op-log carries exactly what needs it.
 
+## Safe sync
+
+`ti sync` is pull-then-push, and it is hardened so a stranded or damaged store can never
+silently delete tickets on the shared remote. **A ticket leaves the remote only through an
+explicit deletion, never as a side effect of serializing an incomplete local store.** The sync
+path enforces that with four guards:
+
+- **Self-healing pull** — a remote ticket missing from your index triggers a reindex instead
+  of a silent "no new tickets".
+- **Deletion guard** — a push that would drop remote tickets you did not `ti delete` is
+  refused; pass `--allow-deletes` to remove them deliberately.
+- **Pre-push backup** — the prior remote tip is snapshotted to `refs/ticgit-backup/<ns>/`
+  (newest 10 kept) before any overwriting push, so a bad push stays reversible.
+- **Verify gate** — a store that fails `ti verify` is not pushed; pass `--no-verify` only for
+  intentional recovery.
+
+Recovering a stranded store, restoring from a backup ref, and the `ti reindex` runbook are
+documented in the [agent workflow guide](docs/agents.md#recovering-a-stranded-or-damaged-store)
+and [ADR 0002](docs/adr/0002-ticket-scalars-are-an-operation-log.md).
+
 ## Machine output (agents & scripts)
 
 `--json` is a **stable interface** with a published schema at
