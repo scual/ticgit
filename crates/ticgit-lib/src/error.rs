@@ -67,6 +67,11 @@ pub enum Error {
         n = .0.len()
     )]
     ImplicitDeletion(Vec<Uuid>),
+
+    #[error(
+        "reindex is incomplete: {missing} ticket(s) referenced by the remote meta ref could not be materialized because their objects are missing locally (common on a blobless partial clone). Backfill the missing objects and retry:\n  git fetch --refetch <remote> '+refs/{ns}/main:refs/{ns}/remotes/main' --filter=blob:limit=5m"
+    )]
+    IncompleteReindex { missing: usize, ns: String },
 }
 
 impl Error {

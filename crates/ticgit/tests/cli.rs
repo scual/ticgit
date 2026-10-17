@@ -3748,6 +3748,69 @@ fn reindex_rebuilds_store_from_meta_refs() {
         .stdout(predicate::str::contains("durable ticket"));
 }
 
+/// `ti reindex` must never silently under-count. If a ticket referenced by the
+/// remote meta ref cannot be materialized because its objects are missing
+/// locally (the blobless-partial-clone failure mode), reindex fails loudly with
+/// an actionable backfill command instead of producing a store that looks
+/// complete but is missing tickets.
+#[test]
+fn reindex_fails_loudly_when_a_ticket_s_objects_are_missing() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    let b_id = create_ticket(&repo, "beta ticket");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Simulate a store whose meta objects for ticket B are absent locally:
+    // delete B's (loose) blob objects from the odb. A small fetch keeps objects
+    // loose by default (fetch.unpackLimit), so they are individually removable.
+    let listing = git_output(
+        repo.dir.path(),
+        &[
+            "ls-tree",
+            "-r",
+            &format!("refs/meta/remotes/main:project/ticgit/tickets/{b_id}"),
+        ],
+    );
+    let objects_dir = repo.dir.path().join(".git/objects");
+    let mut deleted = 0;
+    for line in listing.lines() {
+        // "<mode> blob <oid>\t<path>"
+        if let Some(oid) = line.split_whitespace().nth(2) {
+            let path = objects_dir.join(&oid[..2]).join(&oid[2..]);
+            if fs::remove_file(&path).is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+    assert!(deleted > 0, "test must delete at least one of B's objects");
+
+    // Lose the local projection so reindex rebuilds from refs/meta/* — where B
+    // now has missing objects.
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    // Reindex refuses, pointing at the backfill command, instead of silently
+    // dropping B.
+    repo.ti()
+        .arg("reindex")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--refetch").and(predicate::str::contains("blob:limit")));
+}
+
 // ---------------------------------------------------------------------------
 // Push guard: a push must never implicitly delete remote tickets as a side
 // effect of serializing an incomplete local store (ticket fe3981 / parent

@@ -2547,8 +2547,34 @@ impl TicketStore {
                 .map_err(|e| Error::InvalidValue(format!("dropping {local_ref}: {e}")))?;
         }
 
-        // Re-project every remote tracking ref into the store.
-        let _ = self.session.materialize(None)?;
+        // Re-project every remote tracking ref into the store. On a blobless
+        // partial clone the referenced meta blobs may be absent; materialize
+        // can then either abort or silently skip the affected tickets. We hold
+        // the result and decide after a completeness check, so an incomplete
+        // rebuild always fails loudly instead of producing a partial store that
+        // looks whole.
+        let materialize_result = self.session.materialize(None);
+
+        // Completeness check: every ticket id present in the remote meta tree
+        // must have left at least one key in the store. A ticket that
+        // materialized but doesn't project (a legacy op-less "empty shell") is
+        // exempt — it has keys. One that materialize skipped entirely (its
+        // objects were missing) has none, and is the silent-under-count case we
+        // refuse to paper over.
+        let expected = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        let p = self.project_handle();
+        let mut missing = 0usize;
+        for id in &expected {
+            if p.get_all_values(Some(&keys::ticket_prefix(id)))?.is_empty() {
+                missing += 1;
+            }
+        }
+        if missing > 0 {
+            return Err(Error::IncompleteReindex { missing, ns });
+        }
+
+        // Nothing missing; surface any other materialize failure.
+        let _ = materialize_result?;
 
         Ok(self.list()?.len())
     }
