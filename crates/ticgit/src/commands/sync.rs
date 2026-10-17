@@ -17,6 +17,13 @@ pub struct Args {
     /// Output the sync result as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Permit the push to delete remote tickets that are absent from the local
+    /// store. Off by default: a push that would remove remote tickets is
+    /// refused, guarding against a stranded/incomplete index clobbering the
+    /// remote.
+    #[arg(long = "allow-deletes")]
+    pub allow_deletes: bool,
 }
 
 pub fn run_sync(args: Args) -> Result<()> {
@@ -41,7 +48,8 @@ pub fn run_sync(args: Args) -> Result<()> {
         }
     }
 
-    let SyncOutcome { new_tickets, total } = sync_tickets(&store, args.remote.as_deref())?;
+    let SyncOutcome { new_tickets, total } =
+        sync_tickets(&store, args.remote.as_deref(), args.allow_deletes)?;
 
     if args.json {
         let pulled: Vec<serde_json::Value> = new_tickets
@@ -90,6 +98,7 @@ pub(crate) struct SyncOutcome {
 pub(crate) fn sync_tickets(
     store: &ticgit_lib::TicketStore,
     remote: Option<&str>,
+    allow_deletes: bool,
 ) -> Result<SyncOutcome> {
     let before: BTreeMap<Uuid, String> = store
         .list()?
@@ -117,7 +126,7 @@ pub(crate) fn sync_tickets(
         .map(|(id, title)| (*id, title.clone()))
         .collect();
 
-    store.push(remote)?;
+    store.push(remote, allow_deletes)?;
     Ok(SyncOutcome {
         new_tickets,
         total: after.len(),

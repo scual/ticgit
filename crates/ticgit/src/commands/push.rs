@@ -14,6 +14,13 @@ pub struct Args {
     /// Output the push result as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Permit the push to delete remote tickets that are absent from the local
+    /// store. Off by default: a push that would remove remote tickets is
+    /// refused, guarding against a stranded/incomplete index clobbering the
+    /// remote.
+    #[arg(long = "allow-deletes")]
+    pub allow_deletes: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -38,7 +45,7 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
 
-    store.push(args.remote.as_deref())?;
+    store.push(args.remote.as_deref(), args.allow_deletes)?;
     let total = store.list()?.len();
 
     if args.json {

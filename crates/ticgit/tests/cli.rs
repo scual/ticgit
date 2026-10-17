@@ -3747,3 +3747,91 @@ fn reindex_rebuilds_store_from_meta_refs() {
         .success()
         .stdout(predicate::str::contains("durable ticket"));
 }
+
+// ---------------------------------------------------------------------------
+// Push guard: a push must never implicitly delete remote tickets as a side
+// effect of serializing an incomplete local store (ticket fe3981 / parent
+// 81f1c6). Removal of remote data is allowed only via an explicit --allow-deletes.
+// ---------------------------------------------------------------------------
+
+/// A sync from a stranded store (tickets still in refs/meta/* but missing from
+/// the local projection) must refuse to push rather than clobber the remote.
+#[test]
+fn sync_from_stranded_store_refuses_to_clobber_remote_tickets() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    create_ticket(&repo, "beta ticket");
+    // Seed the remote and fetch the tracking ref refs/meta/remotes/main.
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Strand the store: drop the local projection but keep refs/meta/* and the
+    // local serialization ref, so a pull short-circuits as "already up-to-date".
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+
+    // The buggy behavior: pull reports "no new tickets", then push serializes
+    // the empty store and deletes both remote tickets. The guard must abort.
+    repo.ti()
+        .arg("sync")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reindex"));
+
+    // Prove the remote data survived: reindex and both tickets reappear.
+    repo.ti().arg("reindex").assert().success();
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("alpha ticket").and(predicate::str::contains("beta ticket")),
+    );
+}
+
+/// A real deletion still propagates when the operator opts in with
+/// --allow-deletes; without the flag the same push is refused.
+#[test]
+fn push_refuses_deletion_without_flag_but_allows_it_with_flag() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    // Clone A seeds two tickets on the remote.
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    create_ticket(&a, "keep me");
+    let doomed = create_ticket(&a, "delete me");
+    a.ti().arg("push").assert().success();
+    a.ti().arg("sync").assert().success();
+
+    // Delete one ticket locally. A plain push now looks like a deletion and is
+    // refused with actionable guidance.
+    a.ti().args(["delete", &doomed, "-y"]).assert().success();
+    a.ti()
+        .arg("push")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--allow-deletes"));
+
+    // With the opt-in flag the deletion propagates to the remote.
+    a.ti().args(["push", "--allow-deletes"]).assert().success();
+
+    // A fresh clone sees "keep me" but not "delete me".
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+    b.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("keep me").and(predicate::str::contains("delete me").not()),
+    );
+}

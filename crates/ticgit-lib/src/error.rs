@@ -61,6 +61,12 @@ pub enum Error {
 
     #[error("no review metadata found for `{0}`; run `ti review new` first")]
     ReviewNotFound(String),
+
+    #[error(
+        "refusing to push: {n} remote ticket(s) would be deleted but were not removed via an explicit delete \u{2014} the local store looks stranded or incomplete. Run `ti reindex` to rebuild from the remote and retry, or pass --allow-deletes to remove them intentionally.",
+        n = .0.len()
+    )]
+    ImplicitDeletion(Vec<Uuid>),
 }
 
 impl Error {

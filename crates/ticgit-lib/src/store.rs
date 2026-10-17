@@ -2312,9 +2312,69 @@ impl TicketStore {
         Ok(())
     }
 
-    pub fn push(&self, remote: Option<&str>) -> Result<()> {
+    /// Push the local store to `remote`.
+    ///
+    /// Fail-closed against *implicit* deletion: unless `allow_deletes` is set,
+    /// the push is refused when it would remove tickets that are on the remote
+    /// but absent from the local store (the stranded/incomplete-index clobber).
+    /// A ticket is removed from the remote only when the operator opts in, never
+    /// as a side effect of serializing a partial local tree.
+    pub fn push(&self, remote: Option<&str>, allow_deletes: bool) -> Result<()> {
+        if !allow_deletes {
+            let removed = self.tickets_removed_by_push()?;
+            if !removed.is_empty() {
+                return Err(Error::ImplicitDeletion(removed.into_iter().collect()));
+            }
+        }
         let _ = self.session.push_once(remote)?;
         Ok(())
+    }
+
+    /// Ticket ids that a push would remove from the remote: present on the
+    /// fetched remote tracking ref but absent from the freshly-serialized local
+    /// tree. A non-empty result means the push would implicitly delete those
+    /// remote tickets.
+    ///
+    /// Serializes first so the comparison reflects exactly what [`push`] will
+    /// write. Compares git trees by ticket-id directory, so it is faithful to
+    /// the push regardless of why the local index is incomplete.
+    pub fn tickets_removed_by_push(&self) -> Result<BTreeSet<Uuid>> {
+        self.serialize()?;
+        let ns = self.session.namespace();
+        let local = self.ticket_ids_in_ref(&format!("refs/{ns}/local/main"))?;
+        let remote = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        Ok(remote.difference(&local).copied().collect())
+    }
+
+    /// Ticket ids present under [`keys::tickets_tree_path`] in the git tree at
+    /// `ref_name`. Returns an empty set when the ref — or that subtree — does
+    /// not exist yet (e.g. a remote that has never received tickets).
+    fn ticket_ids_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
+        use gix::bstr::ByteSlice;
+
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let spec = format!("{ref_name}:{}", keys::tickets_tree_path());
+        let tree = match repo.rev_parse_single(spec.as_bytes()) {
+            Ok(id) => id
+                .object()
+                .map_err(|e| Error::InvalidValue(format!("reading {ref_name}: {e}")))?
+                .into_tree(),
+            // The ref or the tickets subtree is absent.
+            Err(_) => return Ok(BTreeSet::new()),
+        };
+
+        let mut ids = BTreeSet::new();
+        for entry in tree.iter() {
+            let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
+            if !entry.mode().is_tree() {
+                continue;
+            }
+            if let Ok(id) = Uuid::parse_str(&entry.filename().to_str_lossy()) {
+                ids.insert(id);
+            }
+        }
+        Ok(ids)
     }
 
     /// Rebuild the local store from the git-meta refs, returning the ticket
