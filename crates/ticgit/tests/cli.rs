@@ -3867,7 +3867,10 @@ fn sync_snapshots_remote_tip_before_overwriting_and_prunes() {
         &["for-each-ref", "--format=%(refname)", "refs/ticgit-backup/"],
     );
     let count = names.lines().count();
-    assert!(count >= 1, "overwriting syncs must leave recoverable snapshots");
+    assert!(
+        count >= 1,
+        "overwriting syncs must leave recoverable snapshots"
+    );
     assert!(
         count <= 10,
         "snapshots must be pruned to the bound, got {count}: {names}"
@@ -3878,7 +3881,11 @@ fn sync_snapshots_remote_tip_before_overwriting_and_prunes() {
     let snap = names.lines().next().unwrap();
     let tree = git_output(
         repo.dir.path(),
-        &["ls-tree", "--name-only", &format!("{snap}:project/ticgit/tickets")],
+        &[
+            "ls-tree",
+            "--name-only",
+            &format!("{snap}:project/ticgit/tickets"),
+        ],
     );
     assert!(
         tree.contains(&id),
@@ -3932,10 +3939,7 @@ fn sync_refuses_to_push_a_store_that_fails_verify() {
         .stderr(predicate::str::contains("verify").and(predicate::str::contains(&id[..6])));
 
     // The escape hatch lets it through.
-    repo.ti()
-        .args(["sync", "--no-verify"])
-        .assert()
-        .success();
+    repo.ti().args(["sync", "--no-verify"]).assert().success();
 }
 
 /// A real deletion still propagates when the operator opts in with

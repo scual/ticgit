@@ -54,8 +54,12 @@ pub fn run_sync(args: Args) -> Result<()> {
         }
     }
 
-    let SyncOutcome { new_tickets, total } =
-        sync_tickets(&store, args.remote.as_deref(), args.allow_deletes, args.no_verify)?;
+    let SyncOutcome { new_tickets, total } = sync_tickets(
+        &store,
+        args.remote.as_deref(),
+        args.allow_deletes,
+        args.no_verify,
+    )?;
 
     if args.json {
         let pulled: Vec<serde_json::Value> = new_tickets
