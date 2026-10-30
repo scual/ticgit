@@ -3,7 +3,9 @@ use clap::Parser;
 use serde_json::json;
 
 use crate::commands::open_store;
-use crate::commands::sync::{meta_namespace, remote_url, ssh_project_web_url, sync_remote};
+use crate::commands::sync::{
+    meta_namespace, remote_url, ssh_project_web_url, sync_remote, verify_before_push,
+};
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -21,6 +23,12 @@ pub struct Args {
     /// remote.
     #[arg(long = "allow-deletes")]
     pub allow_deletes: bool,
+
+    /// Skip the pre-push `ti verify` integrity gate. Off by default: a store
+    /// that fails verify is not allowed to overwrite the remote. Use only for
+    /// intentional recovery flows.
+    #[arg(long = "no-verify")]
+    pub no_verify: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -44,6 +52,10 @@ pub fn run(args: Args) -> Result<()> {
             println!("Web URL: {web_url}");
         }
     }
+
+    // Gate on integrity, identically to `ti sync`, so a plain `ti push` can
+    // never overwrite the shared remote with a store that fails `ti verify`.
+    verify_before_push(&store, args.no_verify)?;
 
     store.push(args.remote.as_deref(), args.allow_deletes)?;
     let total = store.list()?.len();

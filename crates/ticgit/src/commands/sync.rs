@@ -139,31 +139,45 @@ pub(crate) fn sync_tickets(
 
     // Gate the push on integrity: a store that cannot replay every ticket to a
     // valid state must not overwrite the shared remote.
-    if !no_verify {
-        let report = store.verify()?;
-        let failed: Vec<_> = report.iter().filter(|o| !o.ok).collect();
-        if !failed.is_empty() {
-            let mut msg = format!(
-                "refusing to push: {} of {} ticket(s) failed `ti verify`:",
-                failed.len(),
-                report.len()
-            );
-            for o in &failed {
-                msg.push_str(&format!("\n  {}", o.short_id));
-                for issue in &o.issues {
-                    msg.push_str(&format!("\n    - {issue}"));
-                }
-            }
-            msg.push_str("\nFix the store (e.g. `ti reindex`) or re-run with --no-verify.");
-            anyhow::bail!(msg);
-        }
-    }
+    verify_before_push(store, no_verify)?;
 
     store.push(remote, allow_deletes)?;
     Ok(SyncOutcome {
         new_tickets,
         total: after.len(),
     })
+}
+
+/// Refuse a push when the store fails `ti verify`: a store that cannot replay
+/// every ticket to a valid state must never overwrite the shared remote. This
+/// is the single integrity gate shared by `ti sync` and `ti push`, so neither
+/// command can push a corrupt store (a plain `ti push` used to bypass it). A
+/// no-op when `no_verify` is set, for intentional recovery flows.
+pub(crate) fn verify_before_push(
+    store: &ticgit_lib::TicketStore,
+    no_verify: bool,
+) -> Result<()> {
+    if no_verify {
+        return Ok(());
+    }
+    let report = store.verify()?;
+    let failed: Vec<_> = report.iter().filter(|o| !o.ok).collect();
+    if !failed.is_empty() {
+        let mut msg = format!(
+            "refusing to push: {} of {} ticket(s) failed `ti verify`:",
+            failed.len(),
+            report.len()
+        );
+        for o in &failed {
+            msg.push_str(&format!("\n  {}", o.short_id));
+            for issue in &o.issues {
+                msg.push_str(&format!("\n    - {issue}"));
+            }
+        }
+        msg.push_str("\nFix the store (e.g. `ti reindex`) or re-run with --no-verify.");
+        anyhow::bail!(msg);
+    }
+    Ok(())
 }
 
 pub(crate) fn sync_remote(explicit: Option<&str>) -> Result<Option<String>> {
