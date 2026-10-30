@@ -248,14 +248,17 @@ impl TicketStore {
             }
         }
 
-        // Scalar fields are born as a single `create` op — the synced source of
-        // truth. The format-version marker stays a plain key (same value on
-        // every clone, never a conflict) and gates old binaries off op-based
-        // tickets via the FormatTooNew guard.
-        p.set(
-            &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
-            CURRENT_TICKET_FORMAT.to_string().as_str(),
-        )?;
+        // Resolve and validate the assignee up front too, so a rejected nick or
+        // malformed email fails before anything is written and never leaves a
+        // half-created ticket behind (e.g. an op-less `format-version` shell).
+        let resolved_assigned = match opts.assigned.as_deref() {
+            Some(a) if !a.is_empty() => {
+                let resolved = self.resolve_user(a)?;
+                validate_email(&resolved)?;
+                Some(resolved)
+            }
+            _ => None,
+        };
 
         let mut fields = BTreeMap::new();
         fields.insert("title".to_string(), title.to_string());
@@ -267,21 +270,27 @@ impl TicketStore {
         fields.insert("created-at".to_string(), now_rfc.clone());
         fields.insert("created-by".to_string(), self.session.email().to_string());
 
-        if let Some(ref a) = opts.assigned {
-            if !a.is_empty() {
-                let resolved = self.resolve_user(a)?;
-                validate_email(&resolved)?;
-                fields.insert("assigned".to_string(), resolved);
-            }
+        if let Some(resolved) = resolved_assigned {
+            fields.insert("assigned".to_string(), resolved);
         }
 
         if let Some(parent_id) = opts.parent {
-            // Validate parent exists.
-            self.load(&parent_id)?;
             fields.insert("parent".to_string(), parent_id.to_string());
         }
 
+        // The create op is the synced source of truth and is written first:
+        // all fallible validation is already done, so this is the first write.
         self.append_op(&id, OpKind::Create { fields })?;
+
+        // Only now stamp the format-version marker. Writing it *after* the
+        // create op means no failure path can leave a ticket dir that has a
+        // marker but no create op. It stays a plain key (same value on every
+        // clone, never a conflict) and gates old binaries off op-based tickets
+        // via the FormatTooNew guard.
+        p.set(
+            &keys::ticket_field(&id, keys::FORMAT_VERSION_FIELD),
+            CURRENT_TICKET_FORMAT.to_string().as_str(),
+        )?;
 
         if let Some(parent_id) = opts.parent {
             // Denormalize: add child to parent's children set (stays a set key).
@@ -2225,7 +2234,26 @@ impl TicketStore {
 
             let projected = project_scalar_fields(fields, &ops);
             if build_ticket(id, projected).is_none() {
-                issues.push("does not project to a valid ticket state".to_string());
+                // Distinguish a genuinely corrupt ticket from deletion/creation
+                // residue. A live ticket is evidenced by a `create` op (v2
+                // format); a legacy ticket is evidenced by a `title` field and
+                // would have projected to `Some` above. A record with neither —
+                // a lone `format-version` marker, or an empty relation set left
+                // behind by reverse-reference cleanup — is not a ticket at all.
+                // Skip it (matching `list()`, which drops such records) so
+                // verify does not report already-dead residue as corruption and
+                // its ticket count matches the projected store.
+                let has_create = ops
+                    .iter()
+                    .any(|op| matches!(op.decoded(), Some(OpKind::Create { .. })));
+                if has_create {
+                    issues.push("does not project to a valid ticket state".to_string());
+                } else if issues.is_empty() {
+                    // No create op and no integrity problems: pure residue.
+                    continue;
+                }
+                // else: no create op but op-integrity issues exist — fall
+                // through and report those issues below.
             }
 
             out.push(VerifyOutcome {
@@ -2576,7 +2604,98 @@ impl TicketStore {
         // Nothing missing; surface any other materialize failure.
         let _ = materialize_result?;
 
+        // Materialize is additive: it re-applies the ref trees on top of the
+        // existing SQLite rows but never deletes rows for tickets that have
+        // since vanished from refs/{ns}/*. Drop that ghost residue now so
+        // reindex is a faithful projection of the refs — otherwise a ticket
+        // removed from the refs (e.g. by a history rewrite) survives in the
+        // store forever and keeps failing `verify`.
+        self.prune_orphan_tickets()?;
+
         Ok(self.list()?.len())
+    }
+
+    /// Remove ghost residue that the additive [`reindex`] materialize cannot:
+    /// ticket records present in the store but absent from **every**
+    /// `refs/{ns}/*` tree that also fail to project to a real ticket (no
+    /// `create` op and no legacy `title`). These are rewritten-away or
+    /// never-completed tickets — a lone `format-version` marker, or an empty
+    /// relation set left by reverse-reference cleanup.
+    ///
+    /// A record is kept when it is backed by a ref (someone else's live
+    /// ticket we just materialized) OR when it projects to a valid ticket (a
+    /// local-only ticket created but not yet pushed). Only unbacked,
+    /// non-projecting residue is removed.
+    fn prune_orphan_tickets(&self) -> Result<()> {
+        let ns = self.session.namespace().to_string();
+
+        // Ids backed by any meta ref: the local serialization ref plus every
+        // remote tracking ref under refs/{ns}/.
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let prefix = format!("refs/{ns}/");
+        let ref_names: Vec<String> = repo
+            .references()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .all()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .map(|r| r.name().as_bstr().to_string())
+            .filter(|n| n.starts_with(&prefix))
+            .collect();
+        let mut ref_ids: BTreeSet<Uuid> = BTreeSet::new();
+        for name in &ref_names {
+            ref_ids.extend(self.ticket_ids_in_ref(name)?);
+        }
+
+        // Group the store's ticket records by id (ops and scalar fields),
+        // mirroring `verify`'s enumeration so the same records are classified.
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut ops_by_id: BTreeMap<Uuid, Vec<Op>> = BTreeMap::new();
+        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    if let Ok(op) = serde_json::from_str::<Op>(&s) {
+                        ops_by_id.entry(id).or_default().push(op);
+                    }
+                }
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                fields_by_id
+                    .entry(id)
+                    .or_default()
+                    .push((field.to_string(), value));
+            }
+        }
+
+        let ids: BTreeSet<Uuid> = fields_by_id
+            .keys()
+            .chain(ops_by_id.keys())
+            .copied()
+            .collect();
+        for id in ids {
+            if ref_ids.contains(&id) {
+                continue; // backed by a ref — keep.
+            }
+            let ops = ops_by_id.remove(&id).unwrap_or_default();
+            let has_create = ops
+                .iter()
+                .any(|op| matches!(op.decoded(), Some(OpKind::Create { .. })));
+            if has_create {
+                continue; // a real (if unpushed) ticket — keep.
+            }
+            let fields = fields_by_id.remove(&id).unwrap_or_default();
+            let projected = project_scalar_fields(fields, &ops);
+            if build_ticket(id, projected).is_some() {
+                continue; // legacy ticket with a title — keep.
+            }
+            // Unbacked, non-projecting residue: remove every key under this id.
+            for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(&id)))? {
+                p.remove(&key)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3001,6 +3120,28 @@ mod tests {
 
         let again = store.load(&created.id).unwrap();
         assert_eq!(created, again);
+    }
+
+    #[test]
+    fn failed_create_leaves_no_residue() {
+        let (store, _td) = test_store();
+        // An unknown assignee nick makes `create` fail during validation.
+        let opts = NewTicketOpts {
+            assigned: Some("zzz-no-such-nick".into()),
+            ..Default::default()
+        };
+        assert!(store.create("ghosty", opts).is_err());
+
+        // The failure must leave nothing behind — no op-less `format-version`
+        // shell, no partial ticket keys at all.
+        let p = store.session().target(&Target::project());
+        let residue = p.get_all_values(Some(&keys::tickets_prefix())).unwrap();
+        assert!(residue.is_empty(), "failed create left residue: {residue:?}");
+        assert_eq!(store.list().unwrap().len(), 0);
+
+        // And the store is still healthy for a subsequent good create.
+        store.create("real", NewTicketOpts::default()).unwrap();
+        assert_eq!(store.list().unwrap().len(), 1);
     }
 
     #[test]

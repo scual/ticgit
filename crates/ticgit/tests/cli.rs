@@ -4043,3 +4043,73 @@ fn push_refuses_deletion_without_flag_but_allows_it_with_flag() {
         predicate::str::contains("keep me").and(predicate::str::contains("delete me").not()),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Residue tolerance: a `ti new` that fails after stamping the `format-version`
+// marker (e.g. an unknown assignee) leaves an op-less "shell" record in the
+// store. verify must treat that as deletion/creation residue, not corruption,
+// and reindex must prune it rather than letting it survive forever.
+// ---------------------------------------------------------------------------
+
+/// A create that aborts after writing `format-version` (here, an unknown
+/// assignee nick) leaves a shell ticket with no `create` op. `ti verify` must
+/// not flag it as corrupt — it is not a ticket — and the real ticket stays.
+#[test]
+fn verify_ignores_create_failure_residue() {
+    let repo = TestRepo::new();
+    repo.ti().arg("init").assert().success();
+    create_ticket(&repo, "real ticket");
+
+    // Fails after the format-version marker is written → shell record left.
+    repo.ti()
+        .args(["new", "-t", "ghosty", "-a", "zzz-no-such-nick"])
+        .assert()
+        .failure();
+
+    // The shell must not be reported as a verification failure.
+    repo.ti().arg("verify").assert().success();
+    repo.ti()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("real ticket").and(predicate::str::contains("ghosty").not()));
+}
+
+/// `ti reindex` is a projection of refs/meta/*: it must prune ghost residue
+/// that is absent from every meta ref and does not project to a real ticket
+/// (an additive materialize leaves such rows behind), while keeping both
+/// ref-backed tickets and valid local-only tickets that have not been pushed.
+#[test]
+fn reindex_prunes_unbacked_ghost_but_keeps_valid_local_ticket() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    // A pushed, ref-backed ticket and the tracking ref. Titles are kept short
+    // so the list table does not truncate them in the assertions below.
+    create_ticket(&repo, "backedtkt");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // A valid ticket created but never pushed (lives only in the local store).
+    create_ticket(&repo, "localtkt");
+
+    // A failed create leaves an op-less shell ghost in the store.
+    repo.ti()
+        .args(["new", "-t", "ghosty", "-a", "zzz-no-such-nick"])
+        .assert()
+        .failure();
+
+    repo.ti().arg("reindex").assert().success();
+
+    // The ghost is gone; both real tickets survive.
+    repo.ti().arg("verify").assert().success();
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("backedtkt")
+            .and(predicate::str::contains("localtkt"))
+            .and(predicate::str::contains("ghosty").not()),
+    );
+}
