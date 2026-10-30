@@ -2545,6 +2545,14 @@ impl TicketStore {
     /// (`refs/{ns}/remotes/*`). If none exists it returns an error without
     /// touching any ref, so the only serialized copy is never dropped when it
     /// cannot be rebuilt — run a sync first in that case.
+    ///
+    /// On a blobless partial clone some referenced meta blobs may be absent, so
+    /// a ticket cannot be materialized. reindex first tries to self-heal by
+    /// backfilling those blobs from the meta remote and re-materializing. Only
+    /// if that still leaves tickets unmaterializable does it fail loudly with
+    /// [`Error::IncompleteReindex`] — git-meta's materialize is all-or-nothing,
+    /// so a partial store cannot be produced safely; failing is better than
+    /// silently dropping tickets.
     pub fn reindex(&self) -> Result<usize> {
         let ns = self.session.namespace().to_string();
         let repo = gix::discover(".")
@@ -2576,29 +2584,38 @@ impl TicketStore {
         }
 
         // Re-project every remote tracking ref into the store. On a blobless
-        // partial clone the referenced meta blobs may be absent; materialize
-        // can then either abort or silently skip the affected tickets. We hold
-        // the result and decide after a completeness check, so an incomplete
-        // rebuild always fails loudly instead of producing a partial store that
-        // looks whole.
-        let materialize_result = self.session.materialize(None);
+        // partial clone the referenced meta blobs may be absent, so materialize
+        // can abort or skip the affected tickets. We hold the result and decide
+        // after a completeness check rather than failing eagerly.
+        let mut materialize_result = self.session.materialize(None);
 
-        // Completeness check: every ticket id present in the remote meta tree
-        // must have left at least one key in the store. A ticket that
-        // materialized but doesn't project (a legacy op-less "empty shell") is
-        // exempt — it has keys. One that materialize skipped entirely (its
-        // objects were missing) has none, and is the silent-under-count case we
-        // refuse to paper over.
+        // Completeness: every ticket id present in the remote meta tree must
+        // leave at least one key in the store. Ids that leave none are
+        // unmaterializable — typically because their meta blobs are absent on a
+        // blobless partial clone.
         let expected = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
-        let p = self.project_handle();
-        let mut missing = 0usize;
-        for id in &expected {
-            if p.get_all_values(Some(&keys::ticket_prefix(id)))?.is_empty() {
-                missing += 1;
-            }
+        let mut missing = self.unmaterialized_ids(&expected)?;
+
+        // Self-heal: backfill the missing blobs from the meta remote and
+        // re-materialize once, instead of making the operator run the fetch by
+        // hand. Best-effort — if there is no remote, or the fetch fails, we fall
+        // through with whatever is still missing. The re-materialize result
+        // supersedes the first one so a now-resolved failure is not surfaced.
+        if !missing.is_empty() && self.backfill_missing_blobs().is_ok() {
+            materialize_result = self.session.materialize(None);
+            missing = self.unmaterialized_ids(&expected)?;
         }
-        if missing > 0 {
-            return Err(Error::IncompleteReindex { missing, ns });
+
+        // Still missing after the backfill attempt: fail loudly. git-meta's
+        // materialize is all-or-nothing, so we cannot keep the healthy tickets
+        // and drop only the unrecoverable ones — the store would be empty.
+        // Failing (and pointing at the manual backfill) beats a silent
+        // under-count.
+        if !missing.is_empty() {
+            return Err(Error::IncompleteReindex {
+                missing: missing.len(),
+                ns,
+            });
         }
 
         // Nothing missing; surface any other materialize failure.
@@ -2613,6 +2630,48 @@ impl TicketStore {
         self.prune_orphan_tickets()?;
 
         Ok(self.list()?.len())
+    }
+
+    /// Ticket ids from `expected` that left no key in the store — i.e. the
+    /// remote meta tree references them but they could not be materialized
+    /// (their objects are absent locally).
+    fn unmaterialized_ids(&self, expected: &BTreeSet<Uuid>) -> Result<Vec<Uuid>> {
+        let p = self.project_handle();
+        let mut missing = Vec::new();
+        for id in expected {
+            if p.get_all_values(Some(&keys::ticket_prefix(id)))?.is_empty() {
+                missing.push(*id);
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Best-effort backfill of meta blobs absent on a blobless partial clone:
+    /// re-fetch the remote meta ref with a permissive blob filter so the
+    /// previously-filtered ticket objects are hydrated locally. Returns `Ok`
+    /// only when the fetch ran successfully; the caller re-checks completeness.
+    fn backfill_missing_blobs(&self) -> Result<()> {
+        let ns = self.session.namespace().to_string();
+        let remote = self
+            .session
+            .resolve_remote(None)
+            .map_err(|e| Error::InvalidValue(format!("no meta remote to backfill from: {e}")))?;
+        let repo = gix::discover(".")
+            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let refspec = format!("+refs/{ns}/main:refs/{ns}/remotes/main");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.git_dir())
+            .args(["fetch", "--refetch", &remote, &refspec, "--filter=blob:limit=5m"])
+            .status()
+            .map_err(|e| Error::InvalidValue(format!("running git fetch for backfill: {e}")))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(Error::InvalidValue(format!(
+                "backfill fetch from {remote} failed"
+            )))
+        }
     }
 
     /// Remove ghost residue that the additive [`reindex`] materialize cannot:

@@ -3748,13 +3748,13 @@ fn reindex_rebuilds_store_from_meta_refs() {
         .stdout(predicate::str::contains("durable ticket"));
 }
 
-/// `ti reindex` must never silently under-count. If a ticket referenced by the
-/// remote meta ref cannot be materialized because its objects are missing
-/// locally (the blobless-partial-clone failure mode), reindex fails loudly with
-/// an actionable backfill command instead of producing a store that looks
-/// complete but is missing tickets.
+/// `ti reindex` self-heals the blobless-partial-clone failure mode: when a
+/// ticket referenced by the remote meta ref cannot be materialized because its
+/// objects are missing locally, reindex backfills them from the meta remote and
+/// re-materializes, recovering the ticket instead of aborting. (It still never
+/// silently under-counts — anything it cannot recover is reported as skipped.)
 #[test]
-fn reindex_fails_loudly_when_a_ticket_s_objects_are_missing() {
+fn reindex_backfills_missing_objects_and_recovers_the_ticket() {
     let repo = TestRepo::new();
     let remote = tempfile::tempdir().expect("bare remote tempdir");
     git(remote.path(), &["init", "--bare", "--quiet"]);
@@ -3802,8 +3802,67 @@ fn reindex_fails_loudly_when_a_ticket_s_objects_are_missing() {
         let _ = fs::remove_file(git_dir.join(name));
     }
 
-    // Reindex refuses, pointing at the backfill command, instead of silently
-    // dropping B.
+    // Reindex now backfills B's objects from origin (the bare remote still has
+    // them) and re-materializes, so it succeeds and both tickets are present —
+    // no manual fetch, no abort.
+    repo.ti().arg("reindex").assert().success();
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("alpha ticket").and(predicate::str::contains("beta ticket")),
+    );
+}
+
+/// When a ticket's objects are missing AND cannot be backfilled (no reachable
+/// meta remote), `ti reindex` fails loudly pointing at the manual backfill
+/// command, rather than silently producing a store that under-counts. (It
+/// cannot keep only the healthy tickets — git-meta's materialize is
+/// all-or-nothing — so loud failure is the safe outcome.)
+#[test]
+fn reindex_fails_loudly_when_a_ticket_is_unrecoverable() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    create_ticket(&repo, "alpha ticket");
+    let b_id = create_ticket(&repo, "beta ticket");
+    repo.ti().arg("push").assert().success();
+    repo.ti().arg("sync").assert().success();
+
+    // Delete B's blob objects locally.
+    let listing = git_output(
+        repo.dir.path(),
+        &[
+            "ls-tree",
+            "-r",
+            &format!("refs/meta/remotes/main:project/ticgit/tickets/{b_id}"),
+        ],
+    );
+    let objects_dir = repo.dir.path().join(".git/objects");
+    let mut deleted = 0;
+    for line in listing.lines() {
+        if let Some(oid) = line.split_whitespace().nth(2) {
+            let path = objects_dir.join(&oid[..2]).join(&oid[2..]);
+            if fs::remove_file(&path).is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+    assert!(deleted > 0, "test must delete at least one of B's objects");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(repo.dir.path().join(".git").join(name));
+    }
+
+    // Remove the remote so no backfill source remains — B is unrecoverable.
+    git(repo.dir.path(), &["remote", "remove", "origin"]);
+
+    // With no way to recover B's objects, reindex fails loudly and points at
+    // the manual backfill command rather than silently dropping tickets.
     repo.ti()
         .arg("reindex")
         .assert()
