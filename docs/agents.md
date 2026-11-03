@@ -72,8 +72,7 @@ ti history -t <id> --markdown
 
 ## Create And Edit Tickets
 
-Create a ticket from a file. The first line is the title; the rest is the
-description:
+Create a ticket from a file. The first line is the title; the rest is the description:
 
 ```sh
 ti new -F /tmp/ticket.md --tags bug,parser --markdown
@@ -93,6 +92,8 @@ Edit title and description:
 ti edit <id>
 ti edit <id> -F /tmp/ticket.md
 ```
+
+`ti edit <id>` (the editor form) treats lines starting with `#` as comments and strips them on save, including Markdown headings, and it saves even when the editor changes nothing. For any description containing headings, write the full title and description to a file and use `ti edit <id> -F <file>`, which preserves them. Never run bare `ti edit` just to look at the format.
 
 ## Progress Notes
 
@@ -164,7 +165,7 @@ ti deps <id> --both --all    # both directions, including closed nodes (--json/-
 ```
 
 `ti next` skips tickets with open dependencies. `ti list --depends-on`/`--blocks`
-show only *direct* relations; `ti deps` walks the chain transitively and prints
+show only _direct_ relations; `ti deps` walks the chain transitively and prints
 it as a tree (closed tickets pruned unless `--all`).
 
 ## Picking The Next Ticket
@@ -178,7 +179,7 @@ Among the remaining tickets it orders by, in precedence:
 
 1. **Priority** — ascending (lower number = more important). Unprioritised
    (`none`) tickets always sort **last**: `none` is the least-important band, so
-   a numeric priority — even a large one like `100` — always ranks *above* the
+   a numeric priority — even a large one like `100` — always ranks _above_ the
    unprioritised pile. A number cannot sink a ticket below unprioritised ones.
 2. **State** — `in-progress`, then `assigned`, `review`, `new`, and finally
    `blocked` (blocked is demoted to the back but is not excluded).
