@@ -205,6 +205,11 @@ ti subissue -t <id> --clear
 `ti next` and `ti show --markdown` render a parent's open sub-issues as a
 recursive tree, so reading the parent shows the whole remaining subtree.
 
+`ti next` treats a parent as a container: while it has open sub-issues, `next`
+picks one of those (recursively, deepest first) instead of the parent. The
+parent becomes next only once all its sub-issues are closed. A sub-issue
+inherits its parent's `deferred`/`backlog` tag and open dependencies.
+
 ## Deleting
 
 `ti delete` removes tickets permanently. It takes explicit ids (it never falls

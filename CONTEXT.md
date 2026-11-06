@@ -88,7 +88,7 @@ Work parked out of the active queue, marked by the `deferred` or `backlog` tag. 
 _Avoid_: Using Blocked to mean deferred, or a large Priority number to shelve work
 
 **Next queue**:
-The ordering `ti next` uses to pick one ticket to work on. It excludes Closed tickets, Sub-issues, tickets with an unfinished Dependency, and Deferred tickets, then orders the rest by Priority (unprioritised last), then State (Blocked last), then oldest-created first.
+The ordering `ti next` uses to pick one ticket to work on. It excludes Closed tickets, parents that still have open Sub-issues (the Sub-issue is picked instead; it inherits its parent's Deferred and Dependency gating), tickets with an unfinished Dependency, and Deferred tickets, then orders the rest by Priority (unprioritised last), then State (Blocked last), then oldest-created first.
 
 ### Searching
 

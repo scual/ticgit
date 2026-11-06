@@ -8,7 +8,8 @@ use crate::session_state::State;
 
 /// Pick the next ticket to work on.
 ///
-/// Excludes closed tickets, sub-issues, tickets with unresolved dependencies,
+/// Excludes closed tickets, parents with open sub-issues (the sub-issue is
+/// picked instead), tickets with unresolved dependencies,
 /// and tickets tagged `deferred`/`backlog` (restore with `--include-deferred`).
 ///
 /// Ordering (first = work on next): priority ascending — lower is more

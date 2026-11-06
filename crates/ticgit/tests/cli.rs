@@ -3317,60 +3317,41 @@ fn next_blocked_sorts_after_actionable() {
 }
 
 #[test]
-fn next_skips_subissues() {
+fn next_prefers_open_subissue_over_parent() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
-    create_subissue(&repo, &parent, "child");
+    let child = create_subissue(&repo, &parent, "child");
 
-    // The child is a sub-issue and is skipped; the parent is picked.
-    assert_eq!(next_json(&repo)["id"], parent);
+    // The parent is a container: its open sub-issue is picked instead.
+    assert_eq!(next_json(&repo)["id"], child);
 }
 
 #[test]
-fn next_json_includes_recursive_subissues() {
+fn next_walks_subissues_then_returns_parent() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
     let grandchild = create_subissue(&repo, &child, "grandchild");
 
-    let v = next_json(&repo);
-    // Ticket object is unchanged; subissues is additive.
-    assert_eq!(v["id"], parent);
-    assert_eq!(v["subissues"][0]["id"], child);
-    assert_eq!(v["subissues"][0]["title"], "child");
-    assert_eq!(v["subissues"][0]["state"], "new");
-    assert_eq!(v["subissues"][0]["subissues"][0]["id"], grandchild);
+    assert_eq!(next_json(&repo)["id"], grandchild);
+    repo.ti().args(["close", &grandchild]).assert().success();
+    assert_eq!(next_json(&repo)["id"], child);
+    repo.ti().args(["close", &child]).assert().success();
+    // All sub-issues done: the parent itself is now workable.
+    assert_eq!(next_json(&repo)["id"], parent);
 }
 
 #[test]
-fn next_json_subissues_excludes_closed() {
+fn next_json_includes_recursive_subissues_of_leaf() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
     repo.ti().args(["close", &child]).assert().success();
 
+    // Parent is next again; closed sub-issues stay out of the tree.
     let v = next_json(&repo);
     assert_eq!(v["id"], parent);
     assert_eq!(v["subissues"], serde_json::json!([]));
-}
-
-#[test]
-fn next_text_shows_subissue_tree() {
-    let repo = TestRepo::new();
-    let parent = create_ticket(&repo, "parent");
-    create_subissue(&repo, &parent, "child");
-
-    let out = repo
-        .ti()
-        .arg("next")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("Sub-issues:"), "missing header in:\n{text}");
-    assert!(text.contains("child"), "missing child in:\n{text}");
 }
 
 #[test]

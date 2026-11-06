@@ -332,11 +332,15 @@ fn next_state_rank(s: TicketState) -> u8 {
 ///
 /// A ticket is **excluded** from the queue when any of these hold:
 /// - it is closed (`status == Closed`);
-/// - it is a sub-issue (has a `parent`);
+/// - it still has an open sub-issue (a parent is a container: its open
+///   sub-issues are picked instead, recursively, and the parent itself becomes
+///   workable only once they are all closed);
 /// - it has an unresolved dependency (a `depends_on` id whose ticket is not
 ///   closed, or is missing);
 /// - it is tagged with a [`DEFERRED_TAGS`] value, unless
-///   [`NextOptions::include_deferred`] is set.
+///   [`NextOptions::include_deferred`] is set;
+/// - any ancestor is deferred or has an unresolved dependency (a sub-issue
+///   inherits its parent's parking and gating).
 ///
 /// Plus the optional [`NextOptions::tag`] / [`NextOptions::assigned`] narrowing.
 ///
@@ -350,24 +354,52 @@ fn next_state_rank(s: TicketState) -> u8 {
 ///    (blocked sorts last but is not excluded).
 /// 3. **created_at** — oldest first.
 pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Ticket> {
+    let by_id: std::collections::HashMap<Uuid, &Ticket> =
+        tickets.iter().map(|t| (t.id, t)).collect();
     let closed_ids: std::collections::HashSet<Uuid> = tickets
         .iter()
         .filter(|t| t.status == TicketStatus::Closed)
         .map(|t| t.id)
         .collect();
+    // Parents that still have at least one open sub-issue.
+    let parents_with_open_children: std::collections::HashSet<Uuid> = tickets
+        .iter()
+        .filter(|t| t.status == TicketStatus::Open)
+        .filter_map(|t| t.parent)
+        .collect();
+
+    let is_deferred = |t: &Ticket| {
+        !opts.include_deferred
+            && t.tags
+                .iter()
+                .any(|tag| DEFERRED_TAGS.contains(&tag.as_str()))
+    };
+    let deps_resolved = |t: &Ticket| t.depends_on.iter().all(|dep| closed_ids.contains(dep));
+    // Walk up the parent chain (cycle-safe): an ancestor that is deferred or
+    // gated on an open dependency keeps all of its sub-issues out of the queue.
+    let ancestor_parks = |t: &Ticket| {
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = t.parent;
+        while let Some(pid) = cur {
+            if !seen.insert(pid) {
+                break;
+            }
+            let Some(p) = by_id.get(&pid) else { break };
+            if is_deferred(p) || !deps_resolved(p) {
+                return true;
+            }
+            cur = p.parent;
+        }
+        false
+    };
 
     let mut candidates: Vec<&Ticket> = tickets
         .iter()
         .filter(|t| t.status == TicketStatus::Open)
-        .filter(|t| t.parent.is_none())
-        .filter(|t| t.depends_on.iter().all(|dep| closed_ids.contains(dep)))
-        .filter(|t| {
-            opts.include_deferred
-                || !t
-                    .tags
-                    .iter()
-                    .any(|tag| DEFERRED_TAGS.contains(&tag.as_str()))
-        })
+        .filter(|t| !parents_with_open_children.contains(&t.id))
+        .filter(|t| deps_resolved(t))
+        .filter(|t| !is_deferred(t))
+        .filter(|t| !ancestor_parks(t))
         .filter(|t| match &opts.tag {
             Some(tag) => t.tags.contains(tag),
             None => true,
@@ -1395,16 +1427,85 @@ mod tests {
     }
 
     #[test]
-    fn next_excludes_subissues() {
-        let top = open("top", 1);
+    fn next_prefers_open_subissue_over_its_parent() {
+        let parent = open("parent", 1);
         let mut child = open("child", 2);
-        child.parent = Some(Uuid::new_v4());
+        child.parent = Some(parent.id);
 
-        let input = [top, child];
+        let input = [parent, child];
         let out = next_queue(&input, &NextOptions::default());
 
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].title, "top");
+        assert_eq!(out[0].title, "child");
+    }
+
+    #[test]
+    fn next_recurses_to_deepest_open_subissue() {
+        let parent = open("parent", 1);
+        let mut child = open("child", 2);
+        child.parent = Some(parent.id);
+        let mut grandchild = open("grandchild", 3);
+        grandchild.parent = Some(child.id);
+
+        let input = [parent, child, grandchild];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "grandchild");
+    }
+
+    #[test]
+    fn next_returns_parent_once_all_subissues_closed() {
+        let parent = open("parent", 1);
+        let mut child = t(
+            "child",
+            TicketStatus::Closed,
+            TicketState::Resolved,
+            None,
+            None,
+            2,
+        );
+        child.parent = Some(parent.id);
+
+        let input = [parent, child];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "parent");
+    }
+
+    #[test]
+    fn next_subissue_inherits_parent_deferred_and_dependencies() {
+        // Deferred parent parks its sub-issue (and the parent itself).
+        let deferred_parent = t(
+            "deferred-parent",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("deferred"),
+            None,
+            1,
+        );
+        let mut under_deferred = open("under-deferred", 2);
+        under_deferred.parent = Some(deferred_parent.id);
+
+        // Parent gated on an open dependency parks its sub-issue too.
+        let blocker = open("blocker", 3);
+        let mut gated_parent = open("gated-parent", 4);
+        gated_parent.depends_on.insert(blocker.id);
+        let mut under_gated = open("under-gated", 5);
+        under_gated.parent = Some(gated_parent.id);
+
+        let input = [
+            deferred_parent,
+            under_deferred,
+            blocker,
+            gated_parent,
+            under_gated,
+        ];
+        let out = next_queue(&input, &NextOptions::default());
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "blocker");
     }
 
     #[test]
