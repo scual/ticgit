@@ -285,6 +285,9 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 >   pull and your push, the push merges the newer remote tip and retries (you
 >   see "remote advanced during the push; merged and retried"). After five lost
 >   races it fails loudly instead of claiming success; run `ti sync` again.
+>   The Sync hook is the one place this failure blocks: a code push whose
+>   ticket sync lost the race window is refused, so push again. Every other
+>   sync problem in the hook stays a warning.
 >
 > **Invariant:** a ticket leaves the remote only through an explicit deletion,
 > never as a side effect of serializing an incomplete local store.

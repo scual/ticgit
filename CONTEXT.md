@@ -68,7 +68,7 @@ The interval between a Sync's pull and its push in which another clone can advan
 _Avoid_: Conflict (operations never conflict, they union), collision
 
 **Sync hook**:
-A git hook that runs a sync before code is pushed, so tickets travel with the code. It only acts when a branch is pushed to the remote that tickets sync with.
+A git hook that runs a Sync before code is pushed, so tickets travel with the code. It only acts when a branch is pushed to the remote that tickets sync with. A failed Sync only warns, except a Sync that lost the Race window, which stops the code push until it is retried.
 _Avoid_: Auto-sync, pre-push script
 
 ### Working context

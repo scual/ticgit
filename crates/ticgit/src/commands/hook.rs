@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use dialoguer::Select;
 
-use crate::render::{ANSI_PURPLE, ANSI_RESET, ANSI_YELLOW};
+use crate::render::{ANSI_PURPLE, ANSI_RED, ANSI_RESET, ANSI_YELLOW};
 
 /// Set while a Sync hook is syncing, so the push it triggers does not recurse.
 const GUARD_ENV: &str = "TI_SYNC_IN_PROGRESS";
@@ -74,10 +74,7 @@ pub fn run(args: Args) -> Result<()> {
         Command::Install(args) => install(args),
         Command::Check(args) => check(args),
         Command::Uninstall(args) => uninstall(args),
-        Command::Run(args) => {
-            run_hook(args);
-            Ok(())
-        }
+        Command::Run(args) => run_hook(args),
     }
 }
 
@@ -229,7 +226,7 @@ if ! command -v ti >/dev/null 2>&1 && [ -x "$HOME/.cargo/bin/ti" ]; then
   PATH="$HOME/.cargo/bin:$PATH"
 fi
 if command -v ti >/dev/null 2>&1; then
-  ti hook run pre-push "$@" || true
+  ti hook run pre-push "$@" || exit 1
 elif [ -f .git-meta ]; then
   echo "ti: not found, skipping ticket sync" >&2
 fi
@@ -278,16 +275,19 @@ fn remove_block(text: &str) -> Option<String> {
 
 // -- running the hook ------------------------------------------------------
 
-fn run_hook(args: RunArgs) {
+fn run_hook(args: RunArgs) -> Result<()> {
     match args.hook {
         HookName::PrePush => pre_push(args.remote.as_deref()),
     }
 }
 
-/// Never fails and never exits non-zero: sync problems become a warning.
-fn pre_push(remote: Option<&str>) {
+/// Sync problems become a warning and the code push goes ahead, with one
+/// exception: a push the remote kept refusing ([`SyncFailure::Block`]) fails
+/// the hook, and so the code push, because the remote is reachable and the
+/// tickets would otherwise silently stay behind the code.
+fn pre_push(remote: Option<&str>) -> Result<()> {
     if std::env::var_os(GUARD_ENV).is_some() {
-        return;
+        return Ok(());
     }
     let mut stdin = String::new();
     if !std::io::stdin().is_terminal() {
@@ -295,21 +295,62 @@ fn pre_push(remote: Option<&str>) {
     }
     let meta_remote = super::sync::sync_remote(None).ok().flatten();
     if !should_sync(&stdin, remote, meta_remote.as_deref()) {
-        return;
+        return Ok(());
     }
 
     // The sync pushes, which fires this hook again for the meta ref.
     std::env::set_var(GUARD_ENV, "1");
     match sync_once() {
-        Ok(line) => say(ANSI_PURPLE, &line),
+        Ok(line) => {
+            say(ANSI_PURPLE, &line);
+            Ok(())
+        }
         Err(err) => {
             let reason = format!("{err:#}");
-            let reason = reason.lines().next().unwrap_or_default();
-            say(
-                ANSI_YELLOW,
-                &format!("ti: ticket sync failed, tickets not pushed ({reason})"),
-            );
+            let reason = reason.lines().next().unwrap_or_default().to_string();
+            match classify(&err) {
+                SyncFailure::Warn => {
+                    say(
+                        ANSI_YELLOW,
+                        &format!("ti: ticket sync failed, tickets not pushed ({reason})"),
+                    );
+                    Ok(())
+                }
+                SyncFailure::Block => {
+                    say(
+                        ANSI_RED,
+                        &format!(
+                            "ti: ticket sync lost the race window, code push blocked ({reason})"
+                        ),
+                    );
+                    say(
+                        ANSI_RED,
+                        "ti: run `git push` again; the tickets merge and retry.",
+                    );
+                    bail!("ticket sync blocked the push")
+                }
+            }
         }
+    }
+}
+
+/// What the Sync hook does with a failed sync.
+#[derive(Debug, PartialEq, Eq)]
+enum SyncFailure {
+    /// Warn and let the code push through: offline, no meta remote, a store
+    /// that fails verify, an implicit deletion — none of these are fixed by
+    /// pushing again, and a ticket tracker must not hold code hostage.
+    Warn,
+    /// Fail the code push: the remote is reachable but kept advancing in the
+    /// race window, so the tickets are not on it while the code would be.
+    /// Pushing again resolves it.
+    Block,
+}
+
+fn classify(err: &anyhow::Error) -> SyncFailure {
+    match err.downcast_ref::<ticgit_lib::Error>() {
+        Some(ticgit_lib::Error::PushRejected { .. }) => SyncFailure::Block,
+        _ => SyncFailure::Warn,
     }
 }
 
@@ -372,6 +413,26 @@ mod tests {
 
     fn push_line(local_ref: &str, oid: &str, remote_ref: &str) -> String {
         format!("{local_ref} {oid} {remote_ref} {ZERO}\n")
+    }
+
+    #[test]
+    fn only_a_lost_race_window_blocks_the_code_push() {
+        let lost = anyhow::Error::from(ticgit_lib::Error::PushRejected {
+            remote: "origin".into(),
+            attempts: 5,
+        });
+        assert_eq!(classify(&lost), SyncFailure::Block);
+
+        let stranded = anyhow::Error::from(ticgit_lib::Error::ImplicitDeletion(vec![]));
+        assert_eq!(classify(&stranded), SyncFailure::Warn);
+        let offline = anyhow::anyhow!("fetch failed: could not resolve host");
+        assert_eq!(classify(&offline), SyncFailure::Warn);
+    }
+
+    #[test]
+    fn shim_propagates_the_hook_exit_status() {
+        assert!(block().contains("ti hook run pre-push \"$@\" || exit 1"));
+        assert!(!block().contains("|| true"));
     }
 
     #[test]

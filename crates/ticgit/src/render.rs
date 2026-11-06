@@ -285,6 +285,7 @@ const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_GREEN: &str = "\x1b[32m";
 pub(crate) const ANSI_PURPLE: &str = "\x1b[35m";
 pub(crate) const ANSI_YELLOW: &str = "\x1b[33m";
+pub(crate) const ANSI_RED: &str = "\x1b[31m";
 const ANSI_CYAN: &str = "\x1b[36m";
 
 /// Render a list of tickets as a compact table. `current` (if any) gets a `*`.

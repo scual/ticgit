@@ -3521,7 +3521,7 @@ fn hook_install_detects_husky_and_keeps_existing_steps() {
 }
 
 #[test]
-fn hook_run_never_fails_and_respects_the_recursion_guard() {
+fn hook_run_warns_without_failing_and_respects_the_recursion_guard() {
     let repo = TestRepo::new();
     let line = format!(
         "refs/heads/main {} refs/heads/main {}\n",
