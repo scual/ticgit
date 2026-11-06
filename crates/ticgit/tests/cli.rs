@@ -4175,11 +4175,9 @@ fn verify_ignores_create_failure_residue() {
 
     // The shell must not be reported as a verification failure.
     repo.ti().arg("verify").assert().success();
-    repo.ti()
-        .args(["list"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("real ticket").and(predicate::str::contains("ghosty").not()));
+    repo.ti().args(["list"]).assert().success().stdout(
+        predicate::str::contains("real ticket").and(predicate::str::contains("ghosty").not()),
+    );
 }
 
 /// `ti reindex` is a projection of refs/meta/*: it must prune ghost residue
@@ -4219,4 +4217,122 @@ fn reindex_prunes_unbacked_ghost_but_keeps_valid_local_ticket() {
             .and(predicate::str::contains("localtkt"))
             .and(predicate::str::contains("ghosty").not()),
     );
+}
+
+#[test]
+fn sync_retries_when_remote_advances_between_pull_and_push() {
+    // Concurrency regression: clone B pushes in the window between clone A's
+    // pull (fetch) and A's push. git rejects A's push as non-fast-forward.
+    // ticgit used to swallow that rejection and print "Push: N ticket(s)
+    // synced. Done." with exit 0, so A's edit never reached the remote and a
+    // third clone syncing afterwards never saw it. The push must instead
+    // merge the remote tip and retry, landing A's edit.
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    // A's pre-push hook runs inside A's `git push`, i.e. after A's pull has
+    // already fetched: that is exactly the race window. The first time it
+    // fires it makes B edit and sync, advancing the remote tip underneath A.
+    let ti_bin = assert_cmd::cargo::cargo_bin("ti");
+    let fired = a.dir.path().join("hook-fired");
+    let hook = format!(
+        "#!/usr/bin/env bash\n\
+         [ -e '{fired}' ] && exit 0\n\
+         touch '{fired}'\n\
+         cd '{b_dir}'\n\
+         export TICGIT_STATE_FILE='{b_state}'\n\
+         '{ti}' priority 2 -t {id} >/dev/null\n\
+         '{ti}' sync >/dev/null\n\
+         exit 0\n",
+        fired = fired.display(),
+        b_dir = b.dir.path().display(),
+        b_state = b.state_file.path().join("state.json").display(),
+        ti = ti_bin.display(),
+    );
+    executable_script(&a.dir.path().join(".git/hooks"), "pre-push", &hook);
+
+    a.ti()
+        .args(["state", "in-progress", "-t", &id])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+    assert!(fired.exists(), "the race hook must have fired");
+
+    // A's edit must be on the remote tip, merged with B's.
+    let c = TestRepo::new();
+    git(c.dir.path(), &["remote", "add", "origin", &remote_url]);
+    c.ti().arg("init").assert().success();
+    c.ti().arg("sync").assert().success();
+    let output = c
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["state"], "in-progress",
+        "A's edit was lost by the race"
+    );
+    assert_eq!(json["priority"], 2, "B's edit was clobbered by the retry");
+}
+
+#[test]
+fn push_with_stale_tracking_ref_merges_instead_of_silently_failing() {
+    // `ti push` against a remote that moved since the last fetch: the push
+    // must land the local edit (merged), never report success while git
+    // rejected it as non-fast-forward.
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+    b.ti().args(["priority", "2", "-t", &id]).assert().success();
+    b.ti().arg("sync").assert().success();
+
+    // A's tracking ref is now behind the remote.
+    a.ti()
+        .args(["state", "in-progress", "-t", &id])
+        .assert()
+        .success();
+    a.ti().arg("push").assert().success();
+
+    b.ti().arg("sync").assert().success();
+    let output = b
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["state"], "in-progress",
+        "A's push was silently rejected"
+    );
+    assert_eq!(json["priority"], 2);
 }

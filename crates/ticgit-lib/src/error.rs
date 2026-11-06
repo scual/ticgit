@@ -69,6 +69,11 @@ pub enum Error {
     ImplicitDeletion(Vec<Uuid>),
 
     #[error(
+        "push to {remote} rejected as non-fast-forward after {attempts} attempt(s): the remote meta ref kept advancing under us. Nothing was lost locally; run `ti sync` again."
+    )]
+    PushRejected { remote: String, attempts: usize },
+
+    #[error(
         "reindex is incomplete: {missing} ticket(s) referenced by the remote meta ref could not be materialized because their objects are missing locally (common on a blobless partial clone). Backfill the missing objects and retry:\n  git fetch --refetch <remote> '+refs/{ns}/main:refs/{ns}/remotes/main' --filter=blob:limit=5m"
     )]
     IncompleteReindex { missing: usize, ns: String },
