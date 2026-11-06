@@ -26,6 +26,7 @@ Deletion today is represented by the *absence* of a ticket's keys (`ti delete` r
 - the pull self-heals — a remote ticket missing from the index triggers a reindex instead of a silent "no new tickets";
 - the push refuses to drop any remote ticket not removed by an explicit `ti delete`, unless `--allow-deletes` is passed;
 - the prior remote tip is snapshotted to `refs/ticgit-backup/{ns}/` before any overwriting push;
-- the push is gated on `ti verify`, so a store that cannot replay cleanly never overwrites the remote.
+- the push is gated on `ti verify`, so a store that cannot replay cleanly never overwrites the remote;
+- a push the remote rejects as non-fast-forward (another clone pushed in the race window between our pull and our push) is never reported as success: the push merges the newer remote tip, re-runs every guard above, and retries, up to five times, then fails loudly. git-meta leaves this retry loop to the caller; before it existed, `ti sync` printed "Done." on a rejected push and the edit stayed invisible to every other clone until the next sync.
 
 A first-class delete tombstone operation would let the guard distinguish an intentional deletion from a stranded store precisely, folding this structural enforcement back into the op-log itself (see the op-log architecture work, ticket `0e7b124`).

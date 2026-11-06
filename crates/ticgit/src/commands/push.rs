@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::commands::open_store;
 use crate::commands::sync::{
-    meta_namespace, remote_url, ssh_project_web_url, sync_remote, verify_before_push,
+    meta_namespace, print_push_retries, remote_url, ssh_project_web_url, sync_remote,
 };
 
 #[derive(Debug, Parser)]
@@ -53,11 +53,10 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
 
-    // Gate on integrity, identically to `ti sync`, so a plain `ti push` can
-    // never overwrite the shared remote with a store that fails `ti verify`.
-    verify_before_push(&store, args.no_verify)?;
-
-    store.push(args.remote.as_deref(), args.allow_deletes)?;
+    // The store's push gates on `ti verify` and on implicit deletion, identically
+    // to `ti sync`, and merges and retries if the remote advanced since the
+    // last fetch.
+    let push_retries = store.push(args.remote.as_deref(), args.allow_deletes, args.no_verify)?;
     let total = store.list()?.len();
 
     if args.json {
@@ -67,9 +66,11 @@ pub fn run(args: Args) -> Result<()> {
             "url": url,
             "web_url": web_url,
             "pushed_total": total,
+            "push_retries": push_retries,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
+        print_push_retries(push_retries);
         println!("Push: {total} ticket(s) synced.");
         println!("Done.");
     }

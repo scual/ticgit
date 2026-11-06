@@ -2363,7 +2363,8 @@ impl TicketStore {
         Ok(())
     }
 
-    /// Push the local store to `remote`.
+    /// Push the local store to `remote`, returning how many times the push
+    /// had to be retried because the remote advanced underneath it.
     ///
     /// Fail-closed against *implicit* deletion: unless `allow_deletes` is set,
     /// the push is refused when it would remove tickets that are on the remote
@@ -2371,44 +2372,79 @@ impl TicketStore {
     /// A ticket is removed from the remote only when the operator opts in, never
     /// as a side effect of serializing a partial local tree.
     ///
-    /// Concurrency: the remote may advance between our last fetch and the
+    /// Integrity gate: unless `skip_verify` is set, a store that fails
+    /// [`verify`](Self::verify) is refused with [`Error::VerifyFailed`]; the
+    /// shared remote is never overwritten by a store that cannot replay every
+    /// ticket to a valid state.
+    ///
+    /// Race window: the remote may advance between our last fetch and the
     /// push (another clone syncing in that window), in which case git rejects
     /// the push as non-fast-forward. That rejection is never swallowed: the
     /// remote tip is fetched and merged into the local store, the store is
     /// re-serialized on top of it, and the push is retried, up to
-    /// [`MAX_PUSH_ATTEMPTS`] times. If the remote keeps moving the push fails
-    /// loudly with [`Error::PushRejected`] rather than reporting success for
-    /// a change that never left this clone.
-    pub fn push(&self, remote: Option<&str>, allow_deletes: bool) -> Result<()> {
-        for _ in 0..MAX_PUSH_ATTEMPTS {
+    /// [`MAX_PUSH_ATTEMPTS`] times. Both guards above re-run on every attempt,
+    /// since the merge changes what will be pushed. If the remote keeps moving
+    /// the push fails loudly with [`Error::PushRejected`] rather than reporting
+    /// success for a change that never left this clone.
+    pub fn push(
+        &self,
+        remote: Option<&str>,
+        allow_deletes: bool,
+        skip_verify: bool,
+    ) -> Result<usize> {
+        for attempt in 0..MAX_PUSH_ATTEMPTS {
             if !allow_deletes {
                 let removed = self.tickets_removed_by_push()?;
                 if !removed.is_empty() {
                     return Err(Error::ImplicitDeletion(removed.into_iter().collect()));
                 }
             }
+            if !skip_verify {
+                self.verify_gate()?;
+            }
             // Defense in depth: snapshot the current remote tip to a local
             // backup ref before overwriting it, so even a push that slips past
-            // the guard stays reversible.
+            // the guards stays reversible.
             self.snapshot_remote_ref()?;
             let out = self.session.push_once(remote)?;
             if out.success {
-                return Ok(());
+                return Ok(attempt);
             }
             if !out.non_fast_forward {
                 return Err(Error::PushRejected {
                     remote: out.remote_name,
-                    attempts: 1,
+                    attempts: attempt + 1,
                 });
             }
             // Somebody pushed since we fetched: merge their tip into the local
-            // store, re-serialize onto it, and go around again. The deletion
-            // guard above re-runs against the freshly fetched tracking ref.
+            // store, re-serialize onto it, and go around again.
             self.session.resolve_push_conflict(remote)?;
         }
         Err(Error::PushRejected {
             remote: remote.unwrap_or("<meta remote>").to_string(),
             attempts: MAX_PUSH_ATTEMPTS,
+        })
+    }
+
+    /// The integrity gate behind [`push`](Self::push): [`Error::VerifyFailed`]
+    /// listing every ticket that fails [`verify`](Self::verify), else `Ok`.
+    pub fn verify_gate(&self) -> Result<()> {
+        let report = self.verify()?;
+        let failed: Vec<_> = report.iter().filter(|o| !o.ok).collect();
+        if failed.is_empty() {
+            return Ok(());
+        }
+        let mut details = String::new();
+        for o in &failed {
+            details.push_str(&format!("\n  {}", o.short_id));
+            for issue in &o.issues {
+                details.push_str(&format!("\n    - {issue}"));
+            }
+        }
+        Err(Error::VerifyFailed {
+            failed: failed.len(),
+            total: report.len(),
+            details,
         })
     }
 

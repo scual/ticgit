@@ -59,6 +59,14 @@ _Avoid_: Convert, publish
 
 ### Syncing
 
+**Sync**:
+Pulling the remote's tickets, merging them into the local store, then pushing the merged store back. A Sync that reports success guarantees every local operation is on the remote; a Sync never overwrites remote operations it has not merged.
+_Avoid_: Upload, publish, force push
+
+**Race window**:
+The interval between a Sync's pull and its push in which another clone can advance the remote. A Sync caught in it merges the newer remote tip and pushes again; it never reports success for a push the remote refused, and gives up loudly if the remote keeps moving.
+_Avoid_: Conflict (operations never conflict, they union), collision
+
 **Sync hook**:
 A git hook that runs a sync before code is pushed, so tickets travel with the code. It only acts when a branch is pushed to the remote that tickets sync with.
 _Avoid_: Auto-sync, pre-push script

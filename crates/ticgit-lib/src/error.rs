@@ -73,6 +73,13 @@ pub enum Error {
     )]
     PushRejected { remote: String, attempts: usize },
 
+    #[error("refusing to push: {failed} of {total} ticket(s) failed `ti verify`:{details}\nFix the store (e.g. `ti reindex`) or re-run with --no-verify.")]
+    VerifyFailed {
+        failed: usize,
+        total: usize,
+        details: String,
+    },
+
     #[error(
         "reindex is incomplete: {missing} ticket(s) referenced by the remote meta ref could not be materialized because their objects are missing locally (common on a blobless partial clone). Backfill the missing objects and retry:\n  git fetch --refetch <remote> '+refs/{ns}/main:refs/{ns}/remotes/main' --filter=blob:limit=5m"
     )]

@@ -320,9 +320,15 @@ fn sync_once() -> Result<String> {
     // fails integrity.
     let outcome = super::sync::sync_tickets(&store, None, false, false)?;
     Ok(format!(
-        "ti: synced tickets ({} pulled, {} pushed)",
+        "ti: synced tickets ({} pulled, {} updated, {} pushed{})",
         outcome.new_tickets.len(),
-        outcome.total
+        outcome.updated_tickets.len(),
+        outcome.total,
+        if outcome.push_retries > 0 {
+            format!(", merged a remote that advanced {}x", outcome.push_retries)
+        } else {
+            String::new()
+        }
     ))
 }
 

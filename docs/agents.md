@@ -272,7 +272,8 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 > stranded or damaged store can never silently delete tickets on the remote:
 >
 > - **Pull self-heals.** If the remote holds tickets missing from your local
->   index, the pull reindexes them instead of reporting "no new tickets".
+>   index, the pull reindexes them instead of reporting "no new or updated
+>   tickets". Changes to tickets you already have are listed as updated.
 > - **Push refuses implicit deletion.** A push that would drop remote tickets
 >   not removed by an explicit `ti delete` is rejected; pass `--allow-deletes`
 >   to remove them on purpose.
@@ -280,6 +281,10 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 >   `refs/ticgit-backup/<ns>/` ref (newest 10 kept) before every overwriting push.
 > - **Verify gate.** A store that fails `ti verify` is not pushed; pass
 >   `--no-verify` only for intentional recovery.
+> - **Race window is merged, never lost.** If another clone pushed between your
+>   pull and your push, the push merges the newer remote tip and retries (you
+>   see "remote advanced during the push; merged and retried"). After five lost
+>   races it fails loudly instead of claiming success; run `ti sync` again.
 >
 > **Invariant:** a ticket leaves the remote only through an explicit deletion,
 > never as a side effect of serializing an incomplete local store.

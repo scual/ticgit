@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use ticgit_lib::Ticket;
 use uuid::Uuid;
 
 use crate::commands::open_store;
@@ -54,7 +55,12 @@ pub fn run_sync(args: Args) -> Result<()> {
         }
     }
 
-    let SyncOutcome { new_tickets, total } = sync_tickets(
+    let SyncOutcome {
+        new_tickets,
+        updated_tickets,
+        total,
+        push_retries,
+    } = sync_tickets(
         &store,
         args.remote.as_deref(),
         args.allow_deletes,
@@ -62,46 +68,73 @@ pub fn run_sync(args: Args) -> Result<()> {
     )?;
 
     if args.json {
-        let pulled: Vec<serde_json::Value> = new_tickets
-            .iter()
-            .map(|(id, title)| serde_json::json!({ "id": id.to_string(), "title": title }))
-            .collect();
         let out = serde_json::json!({
             "remote": remote,
             "ref": format!("refs/{namespace}/main"),
             "url": url,
             "web_url": web_url,
-            "pulled": pulled,
+            "pulled": ticket_refs_json(&new_tickets),
+            "updated": ticket_refs_json(&updated_tickets),
             "pushed_total": total,
+            "push_retries": push_retries,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
 
-    if new_tickets.is_empty() {
-        println!("Pull: no new tickets.");
-    } else {
+    if new_tickets.is_empty() && updated_tickets.is_empty() {
+        println!("Pull: no new or updated tickets.");
+    }
+    if !new_tickets.is_empty() {
         println!("Pull: {} new ticket(s):", new_tickets.len());
-        for (id, title) in new_tickets.iter().take(5) {
-            let short: String = id.to_string().chars().take(6).collect();
-            println!("  {short}  {title}");
-        }
-        if new_tickets.len() > 5 {
-            println!("  ... and {} more", new_tickets.len() - 5);
-        }
+        print_ticket_refs(&new_tickets);
+    }
+    if !updated_tickets.is_empty() {
+        println!("Pull: {} updated ticket(s):", updated_tickets.len());
+        print_ticket_refs(&updated_tickets);
     }
 
+    print_push_retries(push_retries);
     println!("Push: {total} ticket(s) synced.");
     println!("Done.");
     Ok(())
+}
+
+fn ticket_refs_json(tickets: &[(Uuid, String)]) -> Vec<serde_json::Value> {
+    tickets
+        .iter()
+        .map(|(id, title)| serde_json::json!({ "id": id.to_string(), "title": title }))
+        .collect()
+}
+
+fn print_ticket_refs(tickets: &[(Uuid, String)]) {
+    for (id, title) in tickets.iter().take(5) {
+        let short: String = id.to_string().chars().take(6).collect();
+        println!("  {short}  {title}");
+    }
+    if tickets.len() > 5 {
+        println!("  ... and {} more", tickets.len() - 5);
+    }
+}
+
+/// Tell the operator when the push hit the race window: the remote advanced
+/// after the pull, so the push merged the remote tip and retried.
+pub(crate) fn print_push_retries(push_retries: usize) {
+    if push_retries > 0 {
+        println!("Push: remote advanced during the push; merged and retried ({push_retries}x).");
+    }
 }
 
 /// Result of one pull-then-push round.
 pub(crate) struct SyncOutcome {
     /// Tickets that appeared during the pull.
     pub new_tickets: Vec<(Uuid, String)>,
+    /// Tickets already known locally that the pull changed.
+    pub updated_tickets: Vec<(Uuid, String)>,
     /// Ticket count after the sync.
     pub total: usize,
+    /// How many times the push merged a remote that advanced after the pull.
+    pub push_retries: usize,
 }
 
 /// Pull from then push to `remote`, reporting which tickets arrived.
@@ -111,11 +144,7 @@ pub(crate) fn sync_tickets(
     allow_deletes: bool,
     no_verify: bool,
 ) -> Result<SyncOutcome> {
-    let before: BTreeMap<Uuid, String> = store
-        .list()?
-        .into_iter()
-        .map(|t| (t.id, t.title.clone()))
-        .collect();
+    let before: BTreeMap<Uuid, Ticket> = store.list()?.into_iter().map(|t| (t.id, t)).collect();
 
     // A remote that has never received tickets has no meta ref to pull yet;
     // the push below creates it.
@@ -125,59 +154,28 @@ pub(crate) fn sync_tickets(
         }
     }
 
-    let after: BTreeMap<Uuid, String> = store
-        .list()?
-        .into_iter()
-        .map(|t| (t.id, t.title.clone()))
-        .collect();
+    let after: BTreeMap<Uuid, Ticket> = store.list()?.into_iter().map(|t| (t.id, t)).collect();
 
     let new_tickets = after
         .iter()
         .filter(|(id, _)| !before.contains_key(id))
-        .map(|(id, title)| (*id, title.clone()))
+        .map(|(id, t)| (*id, t.title.clone()))
+        .collect();
+    let updated_tickets = after
+        .iter()
+        .filter(|(id, t)| before.get(id).is_some_and(|b| b != *t))
+        .map(|(id, t)| (*id, t.title.clone()))
         .collect();
 
-    // Gate the push on integrity: a store that cannot replay every ticket to a
-    // valid state must not overwrite the shared remote.
-    verify_before_push(store, no_verify)?;
-
-    store.push(remote, allow_deletes)?;
+    // The push gates on integrity (`ti verify`) and on implicit deletion, and
+    // merges and retries if the remote advanced after the pull.
+    let push_retries = store.push(remote, allow_deletes, no_verify)?;
     Ok(SyncOutcome {
         new_tickets,
+        updated_tickets,
         total: after.len(),
+        push_retries,
     })
-}
-
-/// Refuse a push when the store fails `ti verify`: a store that cannot replay
-/// every ticket to a valid state must never overwrite the shared remote. This
-/// is the single integrity gate shared by `ti sync` and `ti push`, so neither
-/// command can push a corrupt store (a plain `ti push` used to bypass it). A
-/// no-op when `no_verify` is set, for intentional recovery flows.
-pub(crate) fn verify_before_push(
-    store: &ticgit_lib::TicketStore,
-    no_verify: bool,
-) -> Result<()> {
-    if no_verify {
-        return Ok(());
-    }
-    let report = store.verify()?;
-    let failed: Vec<_> = report.iter().filter(|o| !o.ok).collect();
-    if !failed.is_empty() {
-        let mut msg = format!(
-            "refusing to push: {} of {} ticket(s) failed `ti verify`:",
-            failed.len(),
-            report.len()
-        );
-        for o in &failed {
-            msg.push_str(&format!("\n  {}", o.short_id));
-            for issue in &o.issues {
-                msg.push_str(&format!("\n    - {issue}"));
-            }
-        }
-        msg.push_str("\nFix the store (e.g. `ti reindex`) or re-run with --no-verify.");
-        anyhow::bail!(msg);
-    }
-    Ok(())
 }
 
 pub(crate) fn sync_remote(explicit: Option<&str>) -> Result<Option<String>> {

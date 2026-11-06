@@ -4267,7 +4267,13 @@ fn sync_retries_when_remote_advances_between_pull_and_push() {
         .args(["state", "in-progress", "-t", &id])
         .assert()
         .success();
-    a.ti().arg("sync").assert().success();
+    a.ti()
+        .arg("sync")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "remote advanced during the push; merged and retried (1x)",
+        ));
     assert!(fired.exists(), "the race hook must have fired");
 
     // A's edit must be on the remote tip, merged with B's.
@@ -4318,9 +4324,33 @@ fn push_with_stale_tracking_ref_merges_instead_of_silently_failing() {
         .args(["state", "in-progress", "-t", &id])
         .assert()
         .success();
-    a.ti().arg("push").assert().success();
+    let output = a
+        .ti()
+        .args(["push", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["push_retries"], 1,
+        "the push must report the merge+retry"
+    );
 
-    b.ti().arg("sync").assert().success();
+    // B's pull reports the existing ticket as updated, not "no new tickets".
+    let output = b
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["pulled"].as_array().unwrap().len(), 0);
+    assert_eq!(json["updated"][0]["id"], id);
+    assert_eq!(json["push_retries"], 0);
     let output = b
         .ti()
         .args(["show", &id, "--json"])
