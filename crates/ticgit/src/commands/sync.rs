@@ -153,8 +153,9 @@ pub(crate) struct SyncOutcome {
     pub total: usize,
     /// How many times the push merged a remote that advanced after the pull.
     pub push_retries: usize,
-    /// What the pull merged that the user should know about, such as edits
-    /// that landed on a ticket deleted locally.
+    /// What the pull, or a push retry's merge, brought in that the user
+    /// should know about, such as edits that landed on a ticket deleted
+    /// locally.
     pub warnings: Vec<SyncWarning>,
 }
 
@@ -177,7 +178,6 @@ pub(crate) fn sync_tickets(
     }
 
     let after: BTreeMap<Uuid, Ticket> = store.list()?.into_iter().map(|t| (t.id, t)).collect();
-    let warnings = store.edits_on_deleted(&deleted_before)?;
 
     let new_tickets = after
         .iter()
@@ -193,6 +193,9 @@ pub(crate) fn sync_tickets(
     // The push gates on integrity (`ti verify`) and on implicit deletion, and
     // merges and retries if the remote advanced after the pull.
     let push_retries = store.push(remote, allow_deletes, no_verify)?;
+    // Only now: a push caught in the Race window merged the newer remote tip,
+    // and what that merge brought in is reported like what the pull did.
+    let warnings = store.edits_on_deleted(&deleted_before)?;
     Ok(SyncOutcome {
         new_tickets,
         updated_tickets,

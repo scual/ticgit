@@ -5503,6 +5503,68 @@ fn sync_warns_about_edits_written_before_the_deletion_but_merged_after_it() {
     );
 }
 
+/// An edit another clone pushes in the Race window reaches this clone through
+/// the push's merge-and-retry, not the pull, and is reported all the same.
+#[test]
+fn sync_warns_about_edits_merged_during_the_race_window_retry() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "doomed ticket");
+    let other = create_ticket(&a, "bystander");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+
+    // A's pre-push hook runs after A's pull: B, not yet aware of the
+    // Deletion, comments on the ticket and syncs inside that window.
+    let ti_bin = assert_cmd::cargo::cargo_bin("ti");
+    let fired = a.dir.path().join("hook-fired");
+    let hook = format!(
+        "#!/usr/bin/env bash\n\
+         [ -e '{fired}' ] && exit 0\n\
+         touch '{fired}'\n\
+         cd '{b_dir}'\n\
+         export TICGIT_STATE_FILE='{b_state}'\n\
+         '{ti}' comment -t {id} 'written in the race window' >/dev/null\n\
+         '{ti}' sync >/dev/null\n\
+         exit 0\n",
+        fired = fired.display(),
+        b_dir = b.dir.path().display(),
+        b_state = b.state_file.path().join("state.json").display(),
+        ti = ti_bin.display(),
+    );
+    executable_script(&a.dir.path().join(".git/hooks"), "pre-push", &hook);
+
+    a.ti()
+        .args(["priority", "1", "-t", &other])
+        .assert()
+        .success();
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    assert!(fired.exists(), "the race hook must have fired");
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["push_retries"], 1);
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 1 }])
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `ti reindex` is additive; `--reset` is guarded (ticket 812cdf, ADR 0003)
 // ---------------------------------------------------------------------------
