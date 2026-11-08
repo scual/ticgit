@@ -62,7 +62,10 @@ pub mod test_support;
 
 pub use error::{Error, Result};
 pub use history::{HistoryAction, HistoryEntry};
-pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
+pub use oplog::{
+    canonical_json, content_id, project_deletion, replay, Lamport, Op, OpId, OpKind,
+    CURRENT_OP_FORMAT,
+};
 pub use query::{
     dependency_tree, matches_tags, next_queue, priority_rank, DepDirection, DepNode, Filter,
     NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
