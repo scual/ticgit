@@ -53,7 +53,7 @@ pub fn by_id_map(all: &[Ticket]) -> HashMap<Uuid, &Ticket> {
 }
 
 fn short_hex(id: &Uuid) -> String {
-    id.to_string().chars().take(6).collect()
+    Ticket::short_hex(id)
 }
 
 /// Format related ticket ids as a comma-separated list. With a lookup each

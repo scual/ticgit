@@ -386,7 +386,7 @@ ti verify                     # check op-log integrity + signatures (--json/--ma
 ti verify --json              # non-zero exit if any ticket fails
 ti migrate                    # dry-run plan to roll tickets to the current format
 ti migrate --write            # apply it (idempotent); needed after upgrading ti
-ti reindex                    # fetch, then add what the store lacks from refs/meta/* (--json)
+ti reindex                    # fetch, then add what the store lacks from refs/meta/* (--json, --markdown)
 ti reindex --reset            # replace the store with the remote; refuses while unsynced changes exist
 ```
 

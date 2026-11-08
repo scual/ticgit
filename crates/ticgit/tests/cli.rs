@@ -816,6 +816,85 @@ fn sync_json_emits_result_object() {
 }
 
 #[test]
+fn sync_markdown_summarises_the_sync() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "synced ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    let out = b
+        .ti()
+        .args(["sync", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let md = String::from_utf8(out).unwrap();
+    assert!(md.starts_with("## Sync\n"), "{md}");
+    assert!(md.contains("- Ref: `refs/meta/main`"), "{md}");
+    assert!(md.contains("- Pushed: 1 ticket(s)"), "{md}");
+    assert!(md.contains(&format!("- **{short}** synced ticket")), "{md}");
+    assert!(!md.contains("\x1b["), "markdown carries no ANSI color");
+}
+
+#[test]
+fn reindex_json_matches_the_schema_and_markdown_summarises_it() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    let repo = clone_of(&remote_url);
+    create_ticket(&repo, "indexed ticket");
+    repo.ti().arg("sync").assert().success();
+
+    let out = repo
+        .ti()
+        .args(["reindex", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("reindex json");
+    assert_eq!(
+        json,
+        serde_json::json!({ "tickets": 1, "fetched": true, "reset": false })
+    );
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let result = &schema["$defs"]["reindexResult"];
+    assert_eq!(result["additionalProperties"], false);
+    let documented: BTreeSet<String> = result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    assert!(schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "$ref": "#/$defs/reindexResult" })));
+
+    let out = repo
+        .ti()
+        .args(["reindex", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "## Reindex\n\n- Mode: additive\n- Fetched the meta remote: yes\n- Tickets: 1\n"
+    );
+}
+
+#[test]
 fn new_show_and_list_round_trip() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "first bug");

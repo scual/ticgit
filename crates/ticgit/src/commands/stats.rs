@@ -3,7 +3,7 @@ use clap::Parser;
 use crossterm::terminal;
 use time::OffsetDateTime;
 
-use ticgit_lib::TicketStats;
+use ticgit_lib::{Ticket, TicketStats};
 
 use crate::commands::open_store;
 
@@ -56,16 +56,15 @@ pub fn run(args: Args) -> Result<()> {
         }
         return Ok(());
     }
-    let short = |id: &uuid::Uuid| id.to_string().chars().take(6).collect::<String>();
     let recently_opened: Vec<(String, String)> = stats
         .recently_opened
         .iter()
-        .map(|(id, title)| (short(id), title.clone()))
+        .map(|(id, title)| (Ticket::short_hex(id), title.clone()))
         .collect();
     let recently_closed: Vec<(String, String)> = stats
         .recently_closed
         .iter()
-        .map(|(id, _, title)| (short(id), title.clone()))
+        .map(|(id, _, title)| (Ticket::short_hex(id), title.clone()))
         .collect();
     let TicketStats {
         open,

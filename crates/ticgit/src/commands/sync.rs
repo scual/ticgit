@@ -19,6 +19,10 @@ pub struct Args {
     #[arg(long = "json")]
     pub json: bool,
 
+    /// Output the sync result as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
+
     /// Permit the push to delete remote tickets that are absent from the local
     /// store. Off by default: a push that would remove remote tickets is
     /// refused, guarding against a stranded/incomplete index clobbering the
@@ -44,7 +48,7 @@ pub fn run_sync(args: Args) -> Result<()> {
         .unwrap_or_else(|| "(none)".to_string());
     let web_url = ssh_project_web_url(&url);
 
-    if !args.json {
+    if !args.json && !args.markdown {
         if let Some(remote) = &remote {
             println!("Remote: {remote}");
         }
@@ -86,6 +90,21 @@ pub fn run_sync(args: Args) -> Result<()> {
         return Ok(());
     }
 
+    if args.markdown {
+        let summary = SyncSummary {
+            remote: remote.as_deref(),
+            reference: &format!("refs/{namespace}/main"),
+            url: &url,
+            new_tickets: &new_tickets,
+            updated_tickets: &updated_tickets,
+            total,
+            push_retries,
+            warnings: &warnings,
+        };
+        print!("{}", summary.markdown());
+        return Ok(());
+    }
+
     if new_tickets.is_empty() && updated_tickets.is_empty() {
         println!("Pull: no new or updated tickets.");
     }
@@ -104,6 +123,59 @@ pub fn run_sync(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// What `ti sync --markdown` reports.
+struct SyncSummary<'a> {
+    remote: Option<&'a str>,
+    reference: &'a str,
+    url: &'a str,
+    new_tickets: &'a [(Uuid, String)],
+    updated_tickets: &'a [(Uuid, String)],
+    total: usize,
+    push_retries: usize,
+    warnings: &'a [SyncWarning],
+}
+
+impl SyncSummary<'_> {
+    fn markdown(&self) -> String {
+        let mut out = String::from("## Sync\n\n");
+        out.push_str(&format!("- Remote: {}\n", self.remote.unwrap_or("(none)")));
+        out.push_str(&format!("- Ref: `{}`\n", self.reference));
+        out.push_str(&format!("- URL: {}\n", self.url));
+        out.push_str(&format!(
+            "- Pulled: {} new, {} updated\n",
+            self.new_tickets.len(),
+            self.updated_tickets.len()
+        ));
+        out.push_str(&format!("- Pushed: {} ticket(s)", self.total));
+        if self.push_retries > 0 {
+            out.push_str(&format!(
+                " (remote advanced during the push; merged and retried {}x)",
+                self.push_retries
+            ));
+        }
+        out.push('\n');
+        for (heading, tickets) in [
+            ("New tickets", self.new_tickets),
+            ("Updated tickets", self.updated_tickets),
+        ] {
+            if tickets.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n### {heading}\n\n"));
+            for (id, title) in tickets {
+                out.push_str(&format!("- **{}** {title}\n", Ticket::short_hex(id)));
+            }
+        }
+        if !self.warnings.is_empty() {
+            out.push_str("\n### Warnings\n\n");
+            for warning in self.warnings {
+                out.push_str(&format!("- {}\n", warning_text(warning)));
+            }
+        }
+        out
+    }
+}
+
 fn ticket_refs_json(tickets: &[(Uuid, String)]) -> Vec<serde_json::Value> {
     tickets
         .iter()
@@ -113,8 +185,7 @@ fn ticket_refs_json(tickets: &[(Uuid, String)]) -> Vec<serde_json::Value> {
 
 fn print_ticket_refs(tickets: &[(Uuid, String)]) {
     for (id, title) in tickets.iter().take(5) {
-        let short: String = id.to_string().chars().take(6).collect();
-        println!("  {short}  {title}");
+        println!("  {}  {title}", Ticket::short_hex(id));
     }
     if tickets.len() > 5 {
         println!("  ... and {} more", tickets.len() - 5);
@@ -132,13 +203,18 @@ pub(crate) fn print_push_retries(push_retries: usize) {
 /// One stderr line per warning; stdout (and `--json`) stays clean.
 pub(crate) fn print_sync_warnings(warnings: &[SyncWarning]) {
     for warning in warnings {
-        match warning {
-            SyncWarning::EditOnDeleted { ticket, count } => {
-                let short: String = ticket.to_string().chars().take(6).collect();
-                eprintln!(
-                    "warning: {count} edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
-                );
-            }
+        eprintln!("warning: {}", warning_text(warning));
+    }
+}
+
+/// A warning as one line of prose, without the `warning: ` prefix.
+fn warning_text(warning: &SyncWarning) -> String {
+    match warning {
+        SyncWarning::EditOnDeleted { ticket, count } => {
+            let short = Ticket::short_hex(ticket);
+            format!(
+                "{count} edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
+            )
         }
     }
 }

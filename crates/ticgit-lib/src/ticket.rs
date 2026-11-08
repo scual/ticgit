@@ -256,8 +256,14 @@ impl Ticket {
     /// human-friendly handle (e.g. `d7f2d8`).
     #[must_use]
     pub fn short_id(&self) -> String {
-        let s = self.id.to_string();
-        s.chars().take(6).collect()
+        Self::short_hex(&self.id)
+    }
+
+    /// The short display form of any ticket id: its first six hex digits,
+    /// as [`Self::short_id`] gives for a loaded ticket.
+    #[must_use]
+    pub fn short_hex(id: &Uuid) -> String {
+        id.to_string().chars().take(6).collect()
     }
 
     /// The "@user" portion of an email-style assigned handle, or the

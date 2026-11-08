@@ -17,6 +17,10 @@ pub struct Args {
     /// Output the result as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output the result as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -54,10 +58,20 @@ pub fn run(args: Args) -> Result<()> {
             "{}",
             serde_json::json!({ "tickets": tickets, "fetched": fetched, "reset": args.reset })
         );
+    } else if args.markdown {
+        print!("{}", reindex_markdown(tickets, fetched, args.reset));
     } else if args.reset {
         println!("Reset store from refs/meta/*: {tickets} ticket(s).");
     } else {
         println!("Reindexed store from refs/meta/*: {tickets} ticket(s).");
     }
     Ok(())
+}
+
+fn reindex_markdown(tickets: usize, fetched: bool, reset: bool) -> String {
+    format!(
+        "## Reindex\n\n- Mode: {}\n- Fetched the meta remote: {}\n- Tickets: {tickets}\n",
+        if reset { "reset" } else { "additive" },
+        if fetched { "yes" } else { "no" },
+    )
 }

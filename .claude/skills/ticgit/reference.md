@@ -376,6 +376,7 @@ with code: any `git fetch`/`pull`/`push` should be paired with a `ti sync`.
 ```
 -r, --remote <REMOTE>      Remote to sync. Default: git-meta's first meta remote.
     --json                 Result object (schema `syncResult`).
+    --markdown             Short Markdown summary.
 ```
 If the sync merged edits into a ticket deleted locally before it (operations
 that follow the delete operation in Lamport order, comments, set members or
@@ -389,8 +390,10 @@ when none).
 ```
 <SOURCE>                   URL or saved nickname to pull from.
 [NICKNAME]                 Save the URL under this nickname for reuse.
-    --json / --markdown
+    --json / --markdown    --json: result object (schema `pullResult`), with the
+                           same `warnings` array as `ti sync`.
 ```
+A ticket deleted on the fork arrives deleted; its Undeletion arrives too.
 
 ### `ti push` — push ticket metadata
 ```
@@ -403,6 +406,8 @@ Use once to seed a fresh remote, then `ti sync` afterward.
     --reset                Replace the store with the remote tree instead.
     --force                With --reset: go ahead despite unsynced changes.
     --json                 {"tickets": N, "fetched": bool, "reset": bool}
+                           (schema `reindexResult`).
+    --markdown             Short Markdown summary.
 ```
 Fetches the meta remote (best-effort; offline it uses the last fetched refs),
 then adds tickets and keys the store lacks. Additive: never removes or rewrites
