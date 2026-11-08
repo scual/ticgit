@@ -4708,3 +4708,96 @@ fn checkout_refuses_a_deleted_ticket() {
         .failure()
         .stderr(predicate::str::contains("none checked out"));
 }
+
+#[test]
+fn delete_writes_no_set_changes_on_parent_or_dependency_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    repo.ti()
+        .args(["depends", "-t", &child, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["depends", "-t", &dependent, &child])
+        .assert()
+        .success();
+    let before: Vec<Value> = [&parent, &blocker, &dependent]
+        .iter()
+        .map(|id| show_json(&repo, id))
+        .collect();
+
+    repo.ti().args(["delete", &child, "--yes"]).assert().success();
+
+    let after: Vec<Value> = [&parent, &blocker, &dependent]
+        .iter()
+        .map(|id| show_json(&repo, id))
+        .collect();
+    // `subissues` is a derived, open-only view; the stored sets must not move.
+    for (b, a) in before.iter().zip(&after) {
+        for field in ["children", "depends_on", "blocks", "parent", "deleted"] {
+            assert_eq!(b[field], a[field], "{field} of {} changed", b["title"]);
+        }
+    }
+}
+
+#[test]
+fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let blocker = create_ticket(&repo, "blocker");
+    repo.ti()
+        .args(["depends", "-t", &child, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &child, "keep this note"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &child, "important"])
+        .assert()
+        .success();
+    let before = show_json(&repo, &child);
+
+    repo.ti().args(["delete", &child, "--yes"]).assert().success();
+    let out = repo
+        .ti()
+        .args(["undelete", &child, "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let restored: Value = serde_json::from_slice(&out).expect("undelete json");
+    assert_eq!(restored["id"], child.as_str());
+    assert!(restored["deleted"].is_null());
+
+    let after = show_json(&repo, &child);
+    assert_eq!(after, before);
+    assert_eq!(after["comments"][0]["body"], "keep this note");
+    assert_eq!(json_strings(&after["tags"]), vec!["important".to_string()]);
+    assert_eq!(after["parent"], parent.as_str());
+    assert_eq!(json_strings(&after["depends_on"]), vec![blocker.clone()]);
+    assert_eq!(
+        json_strings(&show_json(&repo, &parent)["children"]),
+        vec![child.clone()]
+    );
+    assert_eq!(
+        json_strings(&show_json(&repo, &blocker)["blocks"]),
+        vec![child.clone()]
+    );
+    assert!(list_ids(&repo, &["--subissues"]).contains(&child));
+
+    // Undeleting a live ticket is refused (a stray undelete would outrank a
+    // concurrent delete from another clone).
+    repo.ti()
+        .args(["undelete", &child])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not deleted"));
+}
