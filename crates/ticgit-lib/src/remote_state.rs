@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use gix::bstr::BString;
 
 use crate::error::{Error, Result};
+use crate::keys;
 use crate::store::TicketStore;
 
 impl TicketStore {
@@ -29,13 +30,23 @@ impl TicketStore {
             return Ok(false);
         }
         let remote = self.session().resolve_remote(None)?;
-        let ns = self.session().namespace();
-        let refspec = format!("+refs/{ns}/main:refs/{ns}/remotes/main");
-        git_utils::run_git(repo, &["fetch", "--quiet", &remote, &refspec])?;
+        self.fetch_meta_tip(&remote, &["--quiet"])?;
         // A blobless clone fetches trees only; read the tip's blobs now so the
         // reindex does not have to backfill them one ticket at a time.
-        git_utils::hydrate_tip_blobs(repo, &remote, &format!("{ns}/remotes/main"))?;
+        let tracking = keys::meta_tracking_ref(self.session().namespace());
+        git_utils::hydrate_tip_blobs(repo, &remote, &tracking)?;
         Ok(true)
+    }
+
+    /// Force-fetch `remote`'s meta tip into the tracking ref
+    /// ([`keys::meta_fetch_refspec`]), passing `options` to `git fetch`.
+    pub(crate) fn fetch_meta_tip(&self, remote: &str, options: &[&str]) -> Result<()> {
+        let refspec = keys::meta_fetch_refspec(self.session().namespace());
+        let mut args = vec!["fetch"];
+        args.extend_from_slice(options);
+        args.extend([remote, refspec.as_str()]);
+        git_meta_lib::git_utils::run_git(self.session().repo(), &args)?;
+        Ok(())
     }
 
     /// How many changes the local store holds that the remote tracking tree
@@ -76,7 +87,10 @@ impl TicketStore {
             &set_tombstones,
             &list_tombstones,
         )?;
-        let spec = format!("refs/{}/remotes/main^{{tree}}", self.session().namespace());
+        let spec = format!(
+            "{}^{{tree}}",
+            keys::meta_tracking_ref(self.session().namespace())
+        );
         let remote = repo
             .rev_parse_single(spec.as_str())
             .ok()

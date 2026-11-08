@@ -144,7 +144,7 @@ fn fetch_remote_tickets(url: &str) -> Result<Vec<(Ticket, Vec<Op>)>> {
     // Configure a remote with git-meta refspecs so session.pull() works.
     git_at(path, &["remote", "add", "origin", url])?;
     let namespace = meta_namespace()?;
-    let fetch_refspec = format!("+refs/{namespace}/main:refs/{namespace}/remotes/main");
+    let fetch_refspec = ticgit_lib::keys::meta_fetch_refspec(&namespace);
     git_at(
         path,
         &["config", "--add", "remote.origin.fetch", &fetch_refspec],

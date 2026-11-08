@@ -148,6 +148,20 @@ pub fn parse_ticket_op(key: &str) -> Option<(Uuid, u64, &str)> {
     Some((uuid, lamport, hash))
 }
 
+/// The remote tracking ref a meta fetch updates, `refs/<ns>/remotes/main`
+/// for git-meta namespace `ns`: what the remote held at the last fetch.
+#[must_use]
+pub fn meta_tracking_ref(ns: &str) -> String {
+    format!("refs/{ns}/remotes/main")
+}
+
+/// The forced refspec that fetches the meta remote's tip into
+/// [`meta_tracking_ref`]: `+refs/<ns>/main:refs/<ns>/remotes/main`.
+#[must_use]
+pub fn meta_fetch_refspec(ns: &str) -> String {
+    format!("+refs/{ns}/main:{}", meta_tracking_ref(ns))
+}
+
 /// Identity key mapping an email to its published SSH public key, e.g.
 /// `ticgit:identities:a@b.c`. Lets other clones verify op signatures (step 5).
 #[must_use]
@@ -276,6 +290,15 @@ mod tests {
 
     fn fixed_uuid() -> Uuid {
         Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+    }
+
+    #[test]
+    fn meta_fetch_refspec_forces_the_tip_into_the_tracking_ref() {
+        assert_eq!(meta_tracking_ref("meta"), "refs/meta/remotes/main");
+        assert_eq!(
+            meta_fetch_refspec("meta"),
+            "+refs/meta/main:refs/meta/remotes/main"
+        );
     }
 
     #[test]

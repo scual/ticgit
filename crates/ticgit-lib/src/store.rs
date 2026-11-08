@@ -3039,32 +3039,11 @@ impl TicketStore {
     /// previously-filtered ticket objects are hydrated locally. Returns `Ok`
     /// only when the fetch ran successfully; the caller re-checks completeness.
     fn backfill_missing_blobs(&self) -> Result<()> {
-        let ns = self.session.namespace().to_string();
         let remote = self
             .session
             .resolve_remote(None)
             .map_err(|e| Error::InvalidValue(format!("no meta remote to backfill from: {e}")))?;
-        let repo = self.session.repo();
-        let refspec = format!("+refs/{ns}/main:refs/{ns}/remotes/main");
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.git_dir())
-            .args([
-                "fetch",
-                "--refetch",
-                &remote,
-                &refspec,
-                "--filter=blob:limit=5m",
-            ])
-            .status()
-            .map_err(|e| Error::InvalidValue(format!("running git fetch for backfill: {e}")))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Error::InvalidValue(format!(
-                "backfill fetch from {remote} failed"
-            )))
-        }
+        self.fetch_meta_tip(&remote, &["--refetch", "--filter=blob:limit=5m"])
     }
 
     /// Remove ghost residue that the [`reindex_reset`](Self::reindex_reset)
