@@ -5458,3 +5458,46 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
             "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)"
         )));
 }
+
+// ---------------------------------------------------------------------------
+// `ti reindex` is additive; `--reset` is guarded (ticket 812cdf, ADR 0003)
+// ---------------------------------------------------------------------------
+
+/// `ti reindex` fetches the meta remote first, then adds what the index
+/// lacks: a ticket another clone pushed since this clone's last sync and a
+/// ticket this clone's index lost both appear, and an unsynced local comment
+/// is kept.
+#[test]
+fn reindex_fetches_the_remote_and_adds_tickets_while_keeping_unsynced_edits() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let kept = create_ticket(&a, "kepttkt");
+    let lost = create_ticket(&a, "losttkt");
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    let from_b = create_ticket(&b, "frombtkt");
+    b.ti().arg("sync").assert().success();
+
+    a.ti()
+        .args(["comment", "-t", &kept, "unsynced comment"])
+        .assert()
+        .success();
+    strand_ticket(&a, &lost);
+
+    a.ti().arg("reindex").assert().success();
+
+    assert_eq!(
+        list_ids(&a, &[]),
+        BTreeSet::from([kept.clone(), lost, from_b])
+    );
+    assert_eq!(
+        comment_bodies(&show_json(&a, &kept)),
+        vec!["unsynced comment"]
+    );
+    a.ti().arg("verify").assert().success();
+}

@@ -12,10 +12,24 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
+    // Best-effort: reindex from what the remote holds now. Offline, or with
+    // no meta remote, it reads the refs the last sync fetched.
+    let fetched = match store.fetch_remote_tip() {
+        Ok(fetched) => fetched,
+        Err(e) => {
+            eprintln!(
+                "warning: could not fetch the meta remote ({e}); using the last fetched refs"
+            );
+            false
+        }
+    };
     let tickets = store.reindex()?;
 
     if args.json {
-        println!("{}", serde_json::json!({ "tickets": tickets }));
+        println!(
+            "{}",
+            serde_json::json!({ "tickets": tickets, "fetched": fetched })
+        );
     } else {
         println!("Reindexed store from refs/meta/*: {tickets} ticket(s).");
     }
