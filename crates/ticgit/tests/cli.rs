@@ -4945,7 +4945,11 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
     assert_eq!(json["warnings"], serde_json::json!([]));
 
     // A picks up B's edits on its deleted ticket: one stderr line, exit 0.
-    a.ti().arg("sync").assert().success().stderr(predicate::eq(format!(
+    a.ti()
+        .arg("sync")
+        .assert()
+        .success()
+        .stderr(predicate::eq(format!(
         "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
     )));
     // The edits are kept on the hidden ticket.

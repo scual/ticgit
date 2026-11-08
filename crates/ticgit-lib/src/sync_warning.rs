@@ -159,8 +159,5 @@ impl TicketStore {
 }
 
 fn is_lifecycle(op: &Op) -> bool {
-    matches!(
-        op.decoded(),
-        Some(OpKind::Delete { .. } | OpKind::Undelete)
-    )
+    matches!(op.decoded(), Some(OpKind::Delete { .. } | OpKind::Undelete))
 }
