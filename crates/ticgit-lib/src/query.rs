@@ -572,7 +572,9 @@ pub struct DepNode {
 /// `Dependents` follows `blocks` edges ("what finishing `root` unblocks").
 /// When `include_closed` is false, a closed ticket is omitted along with the
 /// whole subtree beneath it. Cycles on the active path are cut by a visited
-/// set, so the walk always terminates. An unknown `root` yields an empty tree.
+/// set, so the walk always terminates. A deleted ticket is always omitted with
+/// its subtree (an edge to it counts as absent). An unknown `root` yields an
+/// empty tree.
 #[must_use]
 pub fn dependency_tree(
     tickets: &[Ticket],
@@ -602,7 +604,8 @@ fn build_dep_nodes(
     };
     let mut nodes = Vec::new();
     for edge_id in edges {
-        let Some(next) = by_id.get(edge_id) else {
+        // An edge to a deleted ticket is absent, whatever `include_closed` says.
+        let Some(next) = by_id.get(edge_id).filter(|t| !t.is_deleted()) else {
             continue;
         };
         if !include_closed && next.status == TicketStatus::Closed {

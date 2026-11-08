@@ -5063,3 +5063,25 @@ fn search_list_filters_and_saved_views_leave_out_deleted_tickets() {
         BTreeSet::from([gone.clone()])
     );
 }
+
+#[test]
+fn deps_tree_drops_a_deleted_blocker_even_with_all() {
+    let repo = TestRepo::new();
+    let (a, b, _c) = deps_chain(&repo);
+    repo.ti().args(["delete", &b, "--yes"]).assert().success();
+
+    for extra in [&[][..], &["--all"][..]] {
+        let mut args = vec!["deps", a.as_str(), "--json"];
+        args.extend_from_slice(extra);
+        let out = repo
+            .ti()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let tree: Value = serde_json::from_slice(&out).unwrap();
+        assert!(tree["nodes"].as_array().unwrap().is_empty(), "{tree}");
+    }
+}
