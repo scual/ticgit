@@ -5091,7 +5091,10 @@ fn recent_leaves_out_deleted_tickets() {
     let repo = TestRepo::new();
     let live = create_ticket(&repo, "still here");
     let gone = create_ticket(&repo, "recently deleted");
-    repo.ti().args(["delete", &gone, "--yes"]).assert().success();
+    repo.ti()
+        .args(["delete", &gone, "--yes"])
+        .assert()
+        .success();
     let out = repo
         .ti()
         .args(["recent", "--json"])
