@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ticgit.dev/schema/v1.json",
   "title": "TicGit machine output schema v1",
-  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree). Every ticket object carries `deleted`: `{ at, by }` for a deleted ticket, `null` otherwise. `ti sync --json` emits a sync result object; its `warnings` array reports edits that landed on a ticket deleted locally.",
+  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree). Every ticket object carries `deleted`: `{ at, by }` for a deleted ticket, `null` otherwise. `ti sync --json` emits a sync result object and `ti pull <url> --json` a pull result object; the `warnings` array of each reports edits that landed on a ticket deleted locally. `ti reindex --json` emits a reindex result object.",
   "oneOf": [
     {
       "$ref": "#/$defs/ticket"
@@ -15,6 +15,12 @@
     },
     {
       "$ref": "#/$defs/syncResult"
+    },
+    {
+      "$ref": "#/$defs/pullResult"
+    },
+    {
+      "$ref": "#/$defs/reindexResult"
     }
   ],
   "$defs": {
@@ -353,7 +359,7 @@
         "kind": {
           "type": "string",
           "enum": ["edit-on-deleted"],
-          "description": "`edit-on-deleted`: operations, comments or set members newer than the ticket's delete operation arrived for a ticket that is deleted locally. They are kept on the hidden ticket; `ti undelete <ticket>` shows them. Later versions may add kinds; ignore kinds you do not know."
+          "description": "`edit-on-deleted`: operations that follow the ticket's delete operation in Lamport order, or comments, set members or custom fields, arrived for a ticket that was deleted locally before the merge and still is. They are kept on the hidden ticket; `ti undelete <ticket>` shows them. Later versions may add kinds; ignore kinds you do not know."
         },
         "ticket": {
           "type": "string",
@@ -364,6 +370,78 @@
           "type": "integer",
           "minimum": 1,
           "description": "How many items arrived."
+        }
+      }
+    },
+    "pullResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Emitted by `ti pull <url> --json` (a fork pull).",
+      "required": [
+        "source",
+        "imported",
+        "updated",
+        "imported_tickets",
+        "updated_tickets"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "URL pulled from (a saved nickname is resolved to its URL)."
+        },
+        "imported": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many tickets were new to this clone."
+        },
+        "updated": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many known tickets the fork changed."
+        },
+        "imported_tickets": {
+          "type": "array",
+          "description": "The fork's state of each imported ticket. A ticket deleted on the fork imports deleted.",
+          "items": {
+            "$ref": "#/$defs/ticket"
+          }
+        },
+        "updated_tickets": {
+          "type": "array",
+          "description": "The fork's state of each updated ticket.",
+          "items": {
+            "$ref": "#/$defs/ticket"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "description": "As in a sync result. Always emitted by current binaries (empty when there is nothing to report); absent from older ones.",
+          "items": {
+            "$ref": "#/$defs/syncWarning"
+          }
+        }
+      }
+    },
+    "reindexResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Emitted by `ti reindex --json`.",
+      "required": [
+        "tickets"
+      ],
+      "properties": {
+        "tickets": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Ticket count after the reindex, deleted tickets included."
+        },
+        "fetched": {
+          "type": "boolean",
+          "description": "Whether the meta remote was fetched first. False when no meta remote is configured or it could not be reached; the reindex then reads the refs the last sync fetched. Always emitted by current binaries."
+        },
+        "reset": {
+          "type": "boolean",
+          "description": "Whether this was the guarded wholesale `--reset` rather than the additive reindex. Always emitted by current binaries."
         }
       }
     },

@@ -3198,6 +3198,73 @@ fn pull_applies_fork_parent_change_to_op_based_ticket() {
     assert_eq!(json["ok"], true);
 }
 
+/// A fork's Deletion reaches the pulling clone (the ticket arrives deleted,
+/// not live), and an edit the fork made to a ticket deleted locally is
+/// reported the way `ti sync` reports it.
+#[test]
+fn pull_carries_fork_deletions_and_warns_about_edits_on_deleted_tickets() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let gone = create_ticket(&a, "deleted on the fork");
+    let ours = create_ticket(&a, "deleted here");
+    let short: String = ours.chars().take(6).collect();
+    a.ti().arg("push").assert().success();
+
+    let b = TestRepo::new();
+    b.ti().arg("init").assert().success();
+    b.ti().args(["pull", &remote_url]).assert().success();
+
+    a.ti().args(["delete", &gone, "--yes"]).assert().success();
+    a.ti()
+        .args(["comment", "-t", &ours, "the fork kept working"])
+        .assert()
+        .success();
+    a.ti().arg("push").assert().success();
+    b.ti().args(["delete", &ours, "--yes"]).assert().success();
+
+    let out = b
+        .ti()
+        .args(["pull", &remote_url, "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("pull json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": ours, "count": 1 }])
+    );
+    assert!(show_json(&b, &gone)["deleted"].is_object());
+    assert!(!list_ids(&b, &[]).contains(&gone));
+    let hidden = show_json(&b, &ours);
+    assert!(hidden["deleted"].is_object());
+    assert_eq!(comment_bodies(&hidden), vec!["the fork kept working"]);
+
+    // The published schema documents exactly the keys `ti pull --json` emits.
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let pull_result = &schema["$defs"]["pullResult"];
+    assert_eq!(pull_result["additionalProperties"], false);
+    let documented: BTreeSet<String> = pull_result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    assert_eq!(
+        pull_result["properties"]["warnings"]["items"]["$ref"],
+        "#/$defs/syncWarning"
+    );
+}
+
 #[test]
 fn history_shows_readable_entries_without_raw_ops() {
     let repo = TestRepo::new();

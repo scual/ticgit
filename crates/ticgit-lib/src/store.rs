@@ -2049,24 +2049,62 @@ impl TicketStore {
     // Fork merge (`ti pull`)
     // -------------------------------------------------------------------
 
-    /// Fold a ticket read from a fork into this store. An unknown ticket is
-    /// imported under its original id as a `create` op carrying the fork's
-    /// scalars; a known one gets a single op for the scalars where the fork
-    /// differs (the fork wins, except that a missing parent never clears a
-    /// local one), plus the union of tags and children, the fork's `meta:*`
-    /// values, and any comments not already present.
+    /// Fold a ticket read from a fork into this store. `remote_ops` is the
+    /// fork's operation log for the ticket. An unknown ticket is imported
+    /// under its original id as a `create` op carrying the fork's scalars; a
+    /// known one gets a single op for the scalars where the fork differs (the
+    /// fork wins, except that a missing parent never clears a local one), plus
+    /// the union of tags and children, the fork's `meta:*` values, and any
+    /// comments not already present.
+    ///
+    /// Deletion is not a scalar the fork overrides: every `del` and `undel`
+    /// operation in `remote_ops` this store lacks is copied as is (same id and
+    /// Lamport clock, without the fork's signature, whose key this store may
+    /// not hold), so the Deletion projects from the union of both logs like
+    /// any merge. A ticket deleted on the fork imports deleted, and a local
+    /// Deletion the fork never saw stays.
     ///
     /// The fork is authoritative here, so the open sub-issue and open
     /// dependency close guards are not applied: mirroring a close never fails.
-    pub fn merge_fork_ticket(&self, remote: &Ticket) -> Result<ForkMerge> {
+    pub fn merge_fork_ticket(&self, remote: &Ticket, remote_ops: &[Op]) -> Result<ForkMerge> {
         match self.load(&remote.id) {
-            Ok(local) => self.merge_fork_into(&local, remote),
+            Ok(local) => {
+                let merged = self.merge_fork_into(&local, remote)?;
+                let copied = self.copy_fork_lifecycle_ops(&remote.id, remote_ops)?;
+                Ok(if copied { ForkMerge::Updated } else { merged })
+            }
             Err(Error::NotFound(_)) => {
                 self.import_fork_ticket(remote)?;
+                self.copy_fork_lifecycle_ops(&remote.id, remote_ops)?;
                 Ok(ForkMerge::Imported)
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Copy the `del`/`undel` operations of `remote_ops` that ticket `id`
+    /// lacks (see [`Self::merge_fork_ticket`]). Returns whether any was copied.
+    fn copy_fork_lifecycle_ops(&self, id: &Uuid, remote_ops: &[Op]) -> Result<bool> {
+        let have: BTreeSet<String> = self.load_ops(id)?.into_iter().map(|op| op.id).collect();
+        let p = self.project_handle();
+        let mut copied = false;
+        for op in remote_ops {
+            let lifecycle = matches!(op.decoded(), Some(OpKind::Delete { .. } | OpKind::Undelete));
+            if !lifecycle || have.contains(&op.id) {
+                continue;
+            }
+            let op = Op {
+                signature: None,
+                signer: None,
+                ..op.clone()
+            };
+            p.set(
+                &keys::ticket_op(id, op.lamport, &op.id),
+                serde_json::to_string(&op)?.as_str(),
+            )?;
+            copied = true;
+        }
+        Ok(copied)
     }
 
     fn import_fork_ticket(&self, remote: &Ticket) -> Result<()> {
@@ -4636,6 +4674,14 @@ mod tests {
         assert!(store.load(&b.id).unwrap().blocks.is_empty());
     }
 
+    /// Merge the fork's current state of ticket `id` into `local`, the way
+    /// `ti pull <url>` does.
+    fn fork_merge(local: &TicketStore, fork: &TicketStore, id: &Uuid) -> ForkMerge {
+        local
+            .merge_fork_ticket(&fork.load(id).unwrap(), &fork.load_ops(id).unwrap())
+            .unwrap()
+    }
+
     fn assert_verifies(store: &TicketStore) {
         for outcome in store.verify().unwrap() {
             assert!(outcome.ok, "{}: {:?}", outcome.short_id, outcome.issues);
@@ -4663,11 +4709,11 @@ mod tests {
 
         let parent = fork.load(&parent.id).unwrap();
         assert_eq!(
-            local.merge_fork_ticket(&parent).unwrap(),
+            fork_merge(&local, &fork, &parent.id),
             ForkMerge::Imported
         );
         assert_eq!(
-            local.merge_fork_ticket(&child).unwrap(),
+            fork_merge(&local, &fork, &child.id),
             ForkMerge::Imported
         );
 
@@ -4686,6 +4732,47 @@ mod tests {
     }
 
     #[test]
+    fn fork_merge_carries_deletion_and_undeletion_operations() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let gone = fork.create("deleted on the fork", NewTicketOpts::default()).unwrap();
+        let kept = fork.create("live on the fork", NewTicketOpts::default()).unwrap();
+        fork.delete_ticket(&gone.id, Some("dup")).unwrap();
+
+        // A ticket the fork deleted imports deleted, not live.
+        assert_eq!(fork_merge(&local, &fork, &gone.id), ForkMerge::Imported);
+        assert!(local.load(&gone.id).unwrap().is_deleted());
+
+        // A Deletion the fork makes later reaches a ticket already imported.
+        fork_merge(&local, &fork, &kept.id);
+        fork.delete_ticket(&kept.id, None).unwrap();
+        assert_eq!(fork_merge(&local, &fork, &kept.id), ForkMerge::Updated);
+        assert!(local.load(&kept.id).unwrap().is_deleted());
+        assert_eq!(fork_merge(&local, &fork, &kept.id), ForkMerge::Unchanged);
+
+        // So does the fork's Undeletion.
+        fork.undelete_ticket(&gone.id).unwrap();
+        assert_eq!(fork_merge(&local, &fork, &gone.id), ForkMerge::Updated);
+        assert!(!local.load(&gone.id).unwrap().is_deleted());
+        assert_verifies(&local);
+    }
+
+    #[test]
+    fn fork_merge_keeps_a_local_deletion_the_fork_never_saw() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let t = fork.create("shared", NewTicketOpts::default()).unwrap();
+        fork_merge(&local, &fork, &t.id);
+        local.delete_ticket(&t.id, None).unwrap();
+
+        fork.add_comment(&t.id, "the fork still works on it").unwrap();
+        assert_eq!(fork_merge(&local, &fork, &t.id), ForkMerge::Updated);
+        let after = local.load(&t.id).unwrap();
+        assert!(after.is_deleted());
+        assert_eq!(after.comments.len(), 1);
+    }
+
+    #[test]
     fn fork_merge_applies_parent_change_to_op_based_ticket() {
         let (fork, _fork_td) = test_store();
         let (local, _local_td) = test_store();
@@ -4701,15 +4788,13 @@ mod tests {
             )
             .unwrap();
         for t in [&first, &second, &child] {
-            local.merge_fork_ticket(&fork.load(&t.id).unwrap()).unwrap();
+            fork_merge(&local, &fork, &t.id);
         }
         // A local edit so the ticket has ops of its own.
         local.set_priority(&child.id, Some(3)).unwrap();
 
         fork.set_parent(&child.id, &second.id).unwrap();
-        let merged = local
-            .merge_fork_ticket(&fork.load(&child.id).unwrap())
-            .unwrap();
+        let merged = fork_merge(&local, &fork, &child.id);
 
         assert_eq!(merged, ForkMerge::Updated);
         let after = local.load(&child.id).unwrap();
@@ -4721,9 +4806,7 @@ mod tests {
 
         // Merging the same fork state again is a no-op.
         assert_eq!(
-            local
-                .merge_fork_ticket(&fork.load(&child.id).unwrap())
-                .unwrap(),
+            fork_merge(&local, &fork, &child.id),
             ForkMerge::Unchanged
         );
     }
@@ -4743,12 +4826,10 @@ mod tests {
             )
             .unwrap();
         for t in [&parent, &child] {
-            local.merge_fork_ticket(&fork.load(&t.id).unwrap()).unwrap();
+            fork_merge(&local, &fork, &t.id);
         }
         fork.clear_parent(&child.id).unwrap();
-        local
-            .merge_fork_ticket(&fork.load(&child.id).unwrap())
-            .unwrap();
+        fork_merge(&local, &fork, &child.id);
         assert_eq!(local.load(&child.id).unwrap().parent, Some(parent.id));
     }
 
@@ -4757,7 +4838,7 @@ mod tests {
         let (fork, _fork_td) = test_store();
         let (local, _local_td) = test_store();
         let parent = fork.create("parent", NewTicketOpts::default()).unwrap();
-        local.merge_fork_ticket(&parent).unwrap();
+        fork_merge(&local, &fork, &parent.id);
         // Locally the parent has an open sub-issue the fork does not know about.
         let child = local
             .create(
@@ -4775,9 +4856,7 @@ mod tests {
         fork.add_tag(&parent.id, "fork-tag").unwrap();
         fork.add_comment(&parent.id, "from the fork").unwrap();
         assert_eq!(
-            local
-                .merge_fork_ticket(&fork.load(&parent.id).unwrap())
-                .unwrap(),
+            fork_merge(&local, &fork, &parent.id),
             ForkMerge::Updated
         );
 
