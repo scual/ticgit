@@ -4865,3 +4865,48 @@ fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
         assert_eq!(t["comments"][0]["body"], "written before B synced");
     }
 }
+
+#[test]
+fn show_omits_a_deleted_sub_issue_until_it_is_undeleted() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let kept = create_subissue(&repo, &parent, "kept child");
+    let doomed = create_subissue(&repo, &parent, "doomed child");
+    repo.ti()
+        .args(["delete", &doomed, "--yes"])
+        .assert()
+        .success();
+
+    let subissue_ids = |repo: &TestRepo| -> Vec<String> {
+        show_json(repo, &parent)["subissues"]
+            .as_array()
+            .expect("subissues array")
+            .iter()
+            .map(|n| n["id"].as_str().expect("id").to_string())
+            .collect()
+    };
+    assert_eq!(subissue_ids(&repo), vec![kept.clone()]);
+    for args in [
+        vec!["show", parent.as_str()],
+        vec!["show", parent.as_str(), "--markdown"],
+    ] {
+        repo.ti()
+            .args(&args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("kept child"))
+            .stdout(predicate::str::contains("doomed child").not());
+    }
+
+    repo.ti().args(["undelete", &doomed]).assert().success();
+    let mut ids = subissue_ids(&repo);
+    ids.sort();
+    let mut want = vec![kept, doomed];
+    want.sort();
+    assert_eq!(ids, want);
+    repo.ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doomed child"));
+}

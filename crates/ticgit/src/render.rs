@@ -21,6 +21,9 @@ pub type NickMap = HashMap<String, String>;
 pub struct RelSummary {
     pub title: String,
     pub status: String,
+    /// The related ticket is deleted: a deleted child is left out of the
+    /// Children line, any other relation is shown greyed as "(deleted)".
+    pub deleted: bool,
 }
 
 /// Lookup from ticket id to its [`RelSummary`], built from the full ticket list.
@@ -37,6 +40,7 @@ pub fn build_rel_lookup(tickets: &[Ticket]) -> RelLookup {
                 RelSummary {
                     title: t.title.clone(),
                     status: t.status.as_str().to_string(),
+                    deleted: t.is_deleted(),
                 },
             )
         })
@@ -66,6 +70,20 @@ fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLook
     .join(", ")
 }
 
+/// `t`'s children minus the deleted ones: a deleted sub-issue is not live work,
+/// so it drops out of its parent's Children line (the stored set keeps it, and
+/// it reappears once undeleted).
+fn live_children<'a>(t: &'a Ticket, rels: Option<&RelLookup>) -> Vec<&'a Uuid> {
+    t.children
+        .iter()
+        .filter(|id| {
+            !rels
+                .and_then(|r| r.get(id))
+                .is_some_and(|info| info.deleted)
+        })
+        .collect()
+}
+
 /// A node in the recursive, open-only sub-issue tree. Each node carries a
 /// child's id, title, specific state, and its own sub-issues.
 pub struct SubissueNode {
@@ -76,7 +94,7 @@ pub struct SubissueNode {
 }
 
 /// Build the recursive sub-issue tree for `root`, using `by_id` to resolve child
-/// ids. Closed sub-issues (and their whole subtree) are omitted; a visited set
+/// ids. Closed and deleted sub-issues (and their whole subtree) are omitted; a visited set
 /// guards against cycles, and ids absent from `by_id` are skipped.
 pub fn build_subissue_tree(root: &Ticket, by_id: &HashMap<Uuid, &Ticket>) -> Vec<SubissueNode> {
     let mut visited = HashSet::new();
@@ -97,7 +115,7 @@ fn build_subissue_nodes(
         let Some(child) = by_id.get(id) else {
             continue;
         };
-        if child.status == TicketStatus::Closed {
+        if child.status == TicketStatus::Closed || child.is_deleted() {
             continue;
         }
         visited.insert(*id);
@@ -722,8 +740,9 @@ pub fn ticket_detail(
         let value = format_related(std::iter::once(parent_id), rels);
         out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &value)));
     }
-    if !t.children.is_empty() {
-        let value = format_related(t.children.iter(), rels);
+    let children = live_children(t, rels);
+    if !children.is_empty() {
+        let value = format_related(children.into_iter(), rels);
         out.push_str(&detail_field("Children", &ansi(ANSI_CYAN, &value)));
     }
     if !t.depends_on.is_empty() {
@@ -1006,8 +1025,9 @@ fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
         let value = format_related(std::iter::once(parent_id), rels);
         writeln!(out, "- Parent: {}", markdown_inline(&value)).unwrap();
     }
-    if !t.children.is_empty() {
-        let value = format_related(t.children.iter(), rels);
+    let children = live_children(t, rels);
+    if !children.is_empty() {
+        let value = format_related(children.into_iter(), rels);
         writeln!(out, "- Children: {}", markdown_inline(&value)).unwrap();
     }
     if !t.depends_on.is_empty() {
