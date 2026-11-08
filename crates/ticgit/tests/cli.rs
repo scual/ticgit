@@ -5085,3 +5085,27 @@ fn deps_tree_drops_a_deleted_blocker_even_with_all() {
         assert!(tree["nodes"].as_array().unwrap().is_empty(), "{tree}");
     }
 }
+
+#[test]
+fn recent_leaves_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    let live = create_ticket(&repo, "still here");
+    let gone = create_ticket(&repo, "recently deleted");
+    repo.ti().args(["delete", &gone, "--yes"]).assert().success();
+    let out = repo
+        .ti()
+        .args(["recent", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![live.as_str()]);
+}
