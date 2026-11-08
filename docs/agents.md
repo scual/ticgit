@@ -385,7 +385,8 @@ ti verify                     # check op-log integrity + signatures (--json/--ma
 ti verify --json              # non-zero exit if any ticket fails
 ti migrate                    # dry-run plan to roll tickets to the current format
 ti migrate --write            # apply it (idempotent); needed after upgrading ti
-ti reindex                    # add tickets missing from the store from refs/meta/* (--json)
+ti reindex                    # fetch, then add what the store lacks from refs/meta/* (--json)
+ti reindex --reset            # replace the store with the remote; refuses while unsynced changes exist
 ```
 
 `ti verify` recomputes every operation's content id, confirms it matches the
@@ -399,13 +400,27 @@ tickets and is not reported. Because the push gate runs `ti verify`, a reported
 asymmetry also stops `ti sync` / `ti push` until it is repaired. Unsigned
 operations are trusted by default and reported as warnings, not failures.
 
-`ti reindex` adds to the local `git-meta.sqlite` what the fetched remote
-tracking refs (`refs/meta/remotes/*`) hold and the store lacks: every key of a
-ticket the store has lost entirely (e.g. synced from a since-removed worktree, or
-a lost store file), and any whole key a ticket it holds is missing. It is
-additive: it never removes or rewrites a key, comment, Sub-issue, Dependency or
-Deletion the store holds, so it is safe at any time, and every `ti sync` runs it
-after the merge. Run a sync first so the tracking ref is present.
+`ti reindex` first fetches the meta remote's tip into the tracking ref
+`refs/meta/remotes/main` (without merging it), then adds to the local
+`git-meta.sqlite` what the remote tracking refs (`refs/meta/remotes/*`) hold and
+the store lacks: every key of a ticket the store has lost entirely (e.g. synced
+from a since-removed worktree, or a lost store file), and any whole key a ticket
+it holds is missing. It is additive: it never removes or rewrites a key,
+comment, Sub-issue, Dependency or Deletion the store holds, so it is safe at any
+time and exits 0 with unsynced work in place, and every `ti sync` runs it after
+the merge. The fetch is best-effort: with no meta remote it is skipped, and if
+the remote cannot be reached it warns on stderr and uses the refs the last sync
+fetched (a clone that has never synced has none, and the reindex fails). `--json`
+prints `{"tickets": N, "fetched": bool, "reset": bool}`.
+
+`ti reindex --reset` is the wholesale rebuild: it replaces the store with the
+remote tree, so unsynced comments, set members and removals on tickets the
+remote holds are lost, and ghost records no ref holds that project to no ticket
+are pruned (valid tickets never pushed are kept). Before it touches anything it
+serializes the store in full and compares it with the fetched remote tree; if
+the store holds changes the remote lacks it refuses with a non-zero exit, names
+how many on stderr, and leaves the store alone. Run `ti sync` first to publish
+them, or pass `--reset --force` to discard them.
 
 ### Recovering a stranded or damaged store
 
@@ -416,7 +431,11 @@ after the merge. Run a sync first so the tracking ref is present.
   restore the remote from the newest pre-push snapshot —
   `git push <remote> +<backup-ref>:refs/meta/main && ti reindex`, where
   `<backup-ref>` is the latest ref under `refs/ticgit-backup/<ns>/`
-  (list them with `git for-each-ref refs/ticgit-backup/`).
+  (list them with `git for-each-ref refs/ticgit-backup/`). The reindex fetches
+  the restored tip and adds back what the store lacks.
+- **Store holds bad data the remote does not:** `ti sync` to publish what you
+  want kept, then `ti reindex --reset` to replace the store with the remote
+  (`--force` only when you mean to drop unsynced changes).
 - **`ti verify` fails:** it lists the offending tickets; fix them or `ti reindex`,
   then sync. To repair a Sub-issue asymmetry, run `ti subissue <parent> -t
   <sub-issue>` with the parent named in the issue so both sides agree, then

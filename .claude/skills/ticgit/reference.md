@@ -20,7 +20,7 @@ Two conventions repeat almost everywhere, so they're stated once here:
 - [Ticket fields](#ticket-fields) — `tag` `assign` `priority` `points` `milestone` `subissue` `code` `depends`/`dep` `spec` `meta`
 - [Views & import](#views--import) — `views` `writeup` `review` `stats` `import`
 - [Team](#team) — `users` `mine`
-- [Sync & setup](#sync--setup) — `sync` `pull` `push` `init` `setup` `update`
+- [Sync & setup](#sync--setup) — `sync` `pull` `push` `reindex` `init` `setup` `update`
 - [Agents](#agents) — `agent`
 
 ---
@@ -396,6 +396,19 @@ when none).
 -r, --remote <REMOTE>      Remote to push to. Default: git-meta's first meta remote.
 ```
 Use once to seed a fresh remote, then `ti sync` afterward.
+
+### `ti reindex` — add what the local store lacks from the remote
+```
+    --reset                Replace the store with the remote tree instead.
+    --force                With --reset: go ahead despite unsynced changes.
+    --json                 {"tickets": N, "fetched": bool, "reset": bool}
+```
+Fetches the meta remote (best-effort; offline it uses the last fetched refs),
+then adds tickets and keys the store lacks. Additive: never removes or rewrites
+anything, so unsynced work survives and it always exits 0 when the refs are
+readable. `--reset` drops unsynced changes and prunes ghost records, so it
+refuses (non-zero, count on stderr) while the store holds changes the remote
+lacks: `ti sync` first, or add `--force`.
 
 ### `ti init` — initialise ticgit metadata (idempotent)
 No options. Sets up ticgit on the current repo.
