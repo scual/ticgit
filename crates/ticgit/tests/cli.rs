@@ -5459,6 +5459,50 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         )));
 }
 
+/// A comment's time is the wall clock of the clone that wrote it, so a
+/// comment written before the Deletion but merged after it still landed on
+/// a deleted ticket: it is reported, like the tag written with it.
+#[test]
+fn sync_warns_about_edits_written_before_the_deletion_but_merged_after_it() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "doomed ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    // B edits first; A deletes later and syncs first.
+    b.ti()
+        .args(["comment", "-t", &id, "written before the delete"])
+        .assert()
+        .success();
+    b.ti().args(["tag", "-t", &id, "early"]).assert().success();
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 2 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 2 }])
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `ti reindex` is additive; `--reset` is guarded (ticket 812cdf, ADR 0003)
 // ---------------------------------------------------------------------------

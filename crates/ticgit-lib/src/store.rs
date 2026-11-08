@@ -220,6 +220,14 @@ fn collect_key_dirs(
     Ok(())
 }
 
+/// One ticket's stored keys as read by [`TicketStore::ticket_records`]: its
+/// non-operation fields (`(field, value)`) and its operations, unordered.
+#[derive(Debug, Default)]
+pub(crate) struct TicketRecord {
+    pub fields: Vec<(String, MetaValue)>,
+    pub ops: Vec<Op>,
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -386,41 +394,37 @@ impl TicketStore {
 
     /// Load every ticket in the project in a single round-trip.
     pub fn list(&self) -> Result<Vec<Ticket>> {
-        let p = self.session.target(&Target::project());
-        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
-        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
-        let mut ops_by_id: BTreeMap<Uuid, Vec<Op>> = BTreeMap::new();
-        for (key, value) in pairs {
-            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
-                if let MetaValue::String(s) = value {
-                    ops_by_id
-                        .entry(id)
-                        .or_default()
-                        .push(serde_json::from_str::<Op>(&s)?);
-                }
-            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
-                fields_by_id
-                    .entry(id)
-                    .or_default()
-                    .push((field.to_string(), value));
-            }
-        }
-
-        let ids: BTreeSet<Uuid> = fields_by_id
-            .keys()
-            .chain(ops_by_id.keys())
-            .copied()
-            .collect();
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            let fields = fields_by_id.remove(&id).unwrap_or_default();
-            let ops = ops_by_id.remove(&id).unwrap_or_default();
-            read_format_version(id, &fields)?;
-            if let Some(t) = project_ticket(id, fields, &ops) {
+        let mut out = Vec::new();
+        for (id, record) in self.ticket_records()? {
+            read_format_version(id, &record.fields)?;
+            if let Some(t) = project_ticket(id, record.fields, &record.ops) {
                 out.push(t);
             }
         }
         Ok(out)
+    }
+
+    /// Every ticket record's raw fields and parsed operations, from one
+    /// prefix scan: the loader behind [`Self::list`] and the Sync warnings.
+    pub(crate) fn ticket_records(&self) -> Result<BTreeMap<Uuid, TicketRecord>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut records: BTreeMap<Uuid, TicketRecord> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    let op = serde_json::from_str::<Op>(&s)?;
+                    records.entry(id).or_default().ops.push(op);
+                }
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                records
+                    .entry(id)
+                    .or_default()
+                    .fields
+                    .push((field.to_string(), value));
+            }
+        }
+        Ok(records)
     }
 
     /// Load a single ticket by exact UUID.
