@@ -167,6 +167,59 @@ const MAX_BACKUP_SNAPSHOTS: usize = 10;
 /// rejection (merging the remote tip in between) before giving up loudly.
 const MAX_PUSH_ATTEMPTS: usize = 5;
 
+/// What one additive reindex pass gained.
+#[derive(Debug, Default)]
+struct GainOutcome {
+    /// Keys applied to the index.
+    keys: usize,
+    /// Tickets skipped because a blob of a key to gain could not be read.
+    unreadable: BTreeSet<Uuid>,
+}
+
+/// Current time in milliseconds, git-meta's timestamp unit.
+fn now_millis() -> i64 {
+    i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
+}
+
+/// Collect every key directory under a ticket's serialized tree as
+/// `(key segments below the ticket, directory oid)`. A directory is a key when
+/// it holds a value marker (`__value`, `__list`, `__set`); any other
+/// subdirectory, except git-meta's own `__`-prefixed ones, is a further key
+/// segment. Reads trees only, never blobs.
+fn collect_key_dirs(
+    repo: &gix::Repository,
+    dir: gix::ObjectId,
+    segments: &mut Vec<String>,
+    out: &mut Vec<(Vec<String>, gix::ObjectId)>,
+) -> Result<()> {
+    use gix::bstr::ByteSlice;
+
+    let tree = repo
+        .find_tree(dir)
+        .map_err(|e| Error::InvalidValue(format!("reading ticket tree: {e}")))?;
+    let mut is_key = false;
+    let mut children = Vec::new();
+    for entry in tree.iter() {
+        let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
+        let name = entry.filename().to_str_lossy().to_string();
+        match name.as_str() {
+            "__value" | "__list" | "__set" => is_key = true,
+            _ if name.starts_with("__") => {}
+            _ if entry.mode().is_tree() => children.push((name, entry.object_id())),
+            _ => {}
+        }
+    }
+    if is_key && !segments.is_empty() {
+        out.push((segments.clone(), dir));
+    }
+    for (name, oid) in children {
+        segments.push(name);
+        collect_key_dirs(repo, oid, segments, out)?;
+        segments.pop();
+    }
+    Ok(())
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -2373,23 +2426,21 @@ impl TicketStore {
         Ok(())
     }
 
+    /// Fetch and merge the remote meta ref, then run the additive
+    /// [`reindex`](Self::reindex) against the fetched tip.
+    ///
+    /// git-meta's three-way merge treats a key the index lacks as removed
+    /// locally, and it can report the store "already up-to-date" while the
+    /// index is missing tickets that live in the fetched tree (a Stranded
+    /// index). The additive reindex puts those back: it only adds keys the
+    /// index lacks and never removed, so it is safe to run after every merge
+    /// and needs no guess about whether the index is stranded. Unsynced local
+    /// comments, Sub-issues, Dependencies and Deletions are never touched, and
+    /// the local serialization ref is never dropped (ADR 0003).
     pub fn pull(&self, remote: Option<&str>) -> Result<()> {
         let _ = self.session.pull(remote)?;
-
-        // Honesty check: git-meta can treat the store as "already up-to-date"
-        // (because the local serialization ref is present) even when the index
-        // is missing tickets that live in refs/{ns}/*. Detect that — any remote
-        // ticket id absent from the index — and materialize the missing tickets
-        // via reindex instead of silently leaving the store stranded. A store
-        // that is genuinely complete skips the reindex and fast-paths.
-        let ns = self.session.namespace();
-        let remote_ids = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
-        if !remote_ids.is_empty() {
-            let local_ids: BTreeSet<Uuid> = self.list()?.into_iter().map(|t| t.id).collect();
-            if remote_ids.difference(&local_ids).next().is_some() {
-                self.reindex()?;
-            }
-        }
+        let ns = self.session.namespace().to_string();
+        self.gain_from_refs(&[format!("refs/{ns}/remotes/main")])?;
         Ok(())
     }
 
@@ -2481,8 +2532,10 @@ impl TicketStore {
     /// Root of the local pre-push backup refs for this namespace.
     ///
     /// Deliberately OUTSIDE `refs/{ns}/`: git-meta's `materialize(None)` (which
-    /// [`reindex`] drives) replays every non-local ref under `refs/{ns}/`, so a
-    /// backup kept there would resurrect deleted tickets on the next reindex.
+    /// [`reindex_reset`](Self::reindex_reset) drives) replays every non-local
+    /// ref under `refs/{ns}/`, so a backup kept there would be replayed into
+    /// the store; the additive [`reindex`](Self::reindex) reads only
+    /// `refs/{ns}/remotes/*`.
     fn backup_root(&self) -> String {
         format!("refs/ticgit-backup/{}", self.session.namespace())
     }
@@ -2624,19 +2677,216 @@ impl TicketStore {
         Ok(ids)
     }
 
-    /// Rebuild the local store from the git-meta refs, returning the ticket
-    /// count afterwards.
+    /// Additive reindex: gain from the fetched remote tracking refs
+    /// (`refs/{ns}/remotes/*`) every ticket key the index lacks, returning the
+    /// ticket count afterwards. This is what `ti reindex` runs, and what every
+    /// [`pull`](Self::pull) runs after its merge.
     ///
-    /// Recovers tickets that live in `refs/{ns}/*` but are missing from the
-    /// local `git-meta.sqlite` — e.g. ops that were serialized and pushed from
-    /// a since-removed worktree yet never materialized into this checkout's
-    /// store, or a store file that was lost entirely.
+    /// Recovers tickets that live in the refs but are missing from the local
+    /// `git-meta.sqlite` (a Stranded index: the store file was lost, or ops
+    /// were serialized and pushed from a since-removed worktree yet never
+    /// materialized here). It only adds; it never removes or rewrites a key,
+    /// a set member or a list entry the index holds:
+    ///
+    /// - a ticket the index has no keys for gains all of its keys;
+    /// - a ticket the index holds gains only the whole keys it lacks, e.g. the
+    ///   earlier operations and comments of a ticket the index had lost when
+    ///   the merge brought in only what the remote appended since. Keys it
+    ///   holds are left exactly as they are (no member or entry is added to
+    ///   them), and legacy scalar keys `ti migrate` removed stay removed.
+    ///
+    /// Nothing else in ticgit removes a ticket key, so a lost key is gained
+    /// even when git-meta's merge recorded its loss as a local removal (a key
+    /// tombstone). Deleted tickets keep their keys (Deletion is an
+    /// Operation), so they never qualify. After gaining anything the store is serialized in
+    /// full so the local ref carries the gained keys. The wholesale rebuild
+    /// that replaces the index with the remote tree is
+    /// [`reindex_reset`](Self::reindex_reset).
+    ///
+    /// Requires at least one fetched remote tracking ref; run a sync first.
+    ///
+    /// On a blobless partial clone a ticket's meta blobs may be absent. Those
+    /// are backfilled from the meta remote and the gain runs again; if a
+    /// ticket stays unreadable it fails with [`Error::IncompleteReindex`]
+    /// (every readable ticket is still gained).
+    pub fn reindex(&self) -> Result<usize> {
+        let refs = self.tracking_refs()?;
+        if refs.is_empty() {
+            let ns = self.session.namespace();
+            return Err(Error::InvalidValue(format!(
+                "reindex needs a fetched meta ref (refs/{ns}/remotes/*); run a sync first"
+            )));
+        }
+        self.gain_from_refs(&refs)?;
+        Ok(self.list()?.len())
+    }
+
+    /// Every fetched remote tracking ref under `refs/{ns}/remotes/`.
+    fn tracking_refs(&self) -> Result<Vec<String>> {
+        let prefix = format!("refs/{}/remotes/", self.session.namespace());
+        Ok(self
+            .session
+            .repo()
+            .references()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .all()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .map(|r| r.name().as_bstr().to_string())
+            .filter(|n| n.starts_with(&prefix))
+            .collect())
+    }
+
+    /// Gain the keys the index lacks from each of `refs` (see
+    /// [`reindex`](Self::reindex)), backfilling blobs once when a ticket's
+    /// objects are missing, then serialize in full if anything was gained.
+    fn gain_from_refs(&self, refs: &[String]) -> Result<()> {
+        let gain_all = || -> Result<GainOutcome> {
+            let mut total = GainOutcome::default();
+            for r in refs {
+                let g = self.gain_from_ref(r)?;
+                total.keys += g.keys;
+                total.unreadable.extend(g.unreadable);
+            }
+            Ok(total)
+        };
+        let mut outcome = gain_all()?;
+        if !outcome.unreadable.is_empty() && self.backfill_missing_blobs().is_ok() {
+            let retry = gain_all()?;
+            outcome = GainOutcome {
+                keys: outcome.keys + retry.keys,
+                unreadable: retry.unreadable,
+            };
+        }
+        if outcome.keys > 0 {
+            let _ = self.session.serialize_full()?;
+        }
+        if !outcome.unreadable.is_empty() {
+            return Err(Error::IncompleteReindex {
+                missing: outcome.unreadable.len(),
+                ns: self.session.namespace().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// One additive pass over the tickets in `ref_name`'s tree: apply every
+    /// ticket key the index lacks (see [`reindex`](Self::reindex) for the one
+    /// exception). A ticket with an unreadable blob is skipped whole and
+    /// reported in `unreadable`.
+    fn gain_from_ref(&self, ref_name: &str) -> Result<GainOutcome> {
+        use git_meta_lib::tree::format::parse_tree;
+        use git_meta_lib::tree::model::ParsedTree;
+        use gix::bstr::ByteSlice;
+
+        let mut outcome = GainOutcome::default();
+        let repo = self.session.repo();
+        let tickets_path = keys::tickets_tree_path();
+        let spec = format!("{ref_name}:{tickets_path}");
+        let Ok(tickets_tree) = repo.rev_parse_single(spec.as_bytes()) else {
+            return Ok(outcome); // no such ref, or no tickets in it
+        };
+        let tickets_tree = tickets_tree
+            .object()
+            .map_err(|e| Error::InvalidValue(format!("reading {ref_name}: {e}")))?
+            .into_tree();
+
+        let held: BTreeSet<String> = self
+            .project_handle()
+            .get_all_values(Some(&keys::tickets_prefix()))?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let indexed: BTreeSet<Uuid> = held
+            .iter()
+            .filter_map(|k| keys::parse_ticket_field(k).map(|(id, _)| id))
+            .collect();
+
+        let mut ticket_dirs = Vec::new();
+        for entry in tickets_tree.iter() {
+            let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
+            if !entry.mode().is_tree() {
+                continue;
+            }
+            if let Ok(id) = Uuid::parse_str(&entry.filename().to_str_lossy()) {
+                ticket_dirs.push((id, entry.object_id()));
+            }
+        }
+
+        for (id, dir) in ticket_dirs {
+            let mut key_dirs = Vec::new();
+            collect_key_dirs(repo, dir, &mut Vec::new(), &mut key_dirs)?;
+
+            // Read every wanted key before applying any, so a ticket with an
+            // unreadable blob is skipped whole rather than half-gained.
+            let mut gain = ParsedTree::default();
+            let mut readable = true;
+            for (segments, oid) in key_dirs {
+                let key = format!("{}:{}", keys::ticket_prefix(&id), segments.join(":"));
+                // `ti migrate` removes legacy scalar keys from a ticket it has
+                // converted to operations; never put those back.
+                let migrated_away = indexed.contains(&id)
+                    && keys::parse_ticket_field(&key)
+                        .is_some_and(|(_, field)| is_op_managed_scalar(field));
+                if held.contains(&key) || migrated_away {
+                    continue;
+                }
+                let path = format!("{tickets_path}/{id}/{}", segments.join("/"));
+                let Ok(parsed) = parse_tree(repo, oid, &path) else {
+                    readable = false;
+                    break;
+                };
+                // A key directory can hold deeper keys (`meta` next to
+                // `meta:branch`); take only this key, never its neighbours.
+                gain.values
+                    .extend(parsed.values.into_iter().filter(|(k, _)| k.key == key));
+                gain.set_tombstones.extend(
+                    parsed
+                        .set_tombstones
+                        .into_iter()
+                        .filter(|((k, _), _)| k.key == key),
+                );
+                gain.list_tombstones.extend(
+                    parsed
+                        .list_tombstones
+                        .into_iter()
+                        .filter(|((k, _), _)| k.key == key),
+                );
+            }
+            if !readable {
+                outcome.unreadable.insert(id);
+                continue;
+            }
+            if gain.values.is_empty() {
+                continue;
+            }
+
+            // The remote's member and entry tombstones only filter which
+            // members of a gained value show; no key tombstone is applied.
+            self.session.store().apply_tree(
+                &gain.values,
+                &BTreeMap::new(),
+                &gain.set_tombstones,
+                &gain.list_tombstones,
+                self.session.email(),
+                now_millis(),
+            )?;
+            outcome.keys += gain.values.len();
+        }
+        Ok(outcome)
+    }
+
+    /// Replace the index with the fetched remote tree, returning the ticket
+    /// count afterwards. **Destructive**: unlike the additive
+    /// [`reindex`](Self::reindex) it drops unsynced local work and brings
+    /// back keys removed locally, so it is never part of a sync; it is the
+    /// wholesale rebuild meant for a guarded `ti reindex --reset`.
     ///
     /// It drops the local serialization ref (`refs/{ns}/local/main`) so
-    /// git-meta cannot treat the store as already up-to-date, then
-    /// materializes every remote tracking ref, which re-applies the full
-    /// remote tree into the store. This is non-destructive: existing rows are
-    /// re-applied and nothing local is deleted.
+    /// git-meta materializes every remote tracking ref as a fast-forward,
+    /// overwriting each key with the remote tree's value (lists and sets are
+    /// rebuilt from the tree, so local-only entries and members are lost),
+    /// then removes ghost residue with `prune_orphan_tickets`.
     ///
     /// Requires at least one fetched remote tracking ref
     /// (`refs/{ns}/remotes/*`). If none exists it returns an error without
@@ -2650,7 +2900,7 @@ impl TicketStore {
     /// [`Error::IncompleteReindex`] — git-meta's materialize is all-or-nothing,
     /// so a partial store cannot be produced safely; failing is better than
     /// silently dropping tickets.
-    pub fn reindex(&self) -> Result<usize> {
+    pub fn reindex_reset(&self) -> Result<usize> {
         let ns = self.session.namespace().to_string();
         let repo = gix::discover(".")
             .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
@@ -2718,10 +2968,9 @@ impl TicketStore {
         // Nothing missing; surface any other materialize failure.
         let _ = materialize_result?;
 
-        // Materialize is additive: it re-applies the ref trees on top of the
-        // existing SQLite rows but never deletes rows for tickets that have
-        // since vanished from refs/{ns}/*. Drop that ghost residue now so
-        // reindex is a faithful projection of the refs — otherwise a ticket
+        // Materialize never deletes rows for tickets that have since vanished
+        // from refs/{ns}/*. Drop that ghost residue now so the reset is a
+        // faithful projection of the refs — otherwise a ticket
         // removed from the refs (e.g. by a history rewrite) survives in the
         // store forever and keeps failing `verify`.
         self.prune_orphan_tickets()?;
@@ -2777,7 +3026,8 @@ impl TicketStore {
         }
     }
 
-    /// Remove ghost residue that the additive [`reindex`] materialize cannot:
+    /// Remove ghost residue that the [`reindex_reset`](Self::reindex_reset)
+    /// materialize cannot:
     /// ticket records present in the store but absent from **every**
     /// `refs/{ns}/*` tree that also fail to project to a real ticket (no
     /// `create` op and no legacy `title`). These are rewritten-away or
