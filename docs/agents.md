@@ -331,9 +331,12 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 > **Sync is safe by default.** `ti sync` is pull-then-push, hardened so a
 > stranded or damaged store can never silently delete tickets on the remote:
 >
-> - **Pull self-heals.** If the remote holds tickets missing from your local
->   index, the pull reindexes them instead of reporting "no new or updated
->   tickets". Changes to tickets you already have are listed as updated.
+> - **Pull keeps local work and self-heals.** The pull merges the remote into
+>   your store, then runs the additive `ti reindex`: tickets (or ticket keys)
+>   the remote holds and your index lacks are added back, and nothing the
+>   index holds is dropped or rewritten, so unsynced comments, Sub-issues,
+>   Dependencies and Deletions survive. Changes to tickets you already have
+>   are listed as updated.
 > - **Push refuses implicit deletion.** A push that would drop remote ticket
 >   keys is rejected; pass `--allow-deletes` to remove them on purpose. `ti
 >   delete` keeps keys (it writes a delete Operation), so it never trips this
@@ -382,7 +385,7 @@ ti verify                     # check op-log integrity + signatures (--json/--ma
 ti verify --json              # non-zero exit if any ticket fails
 ti migrate                    # dry-run plan to roll tickets to the current format
 ti migrate --write            # apply it (idempotent); needed after upgrading ti
-ti reindex                    # rebuild the local store from refs/meta/* (--json)
+ti reindex                    # add tickets missing from the store from refs/meta/* (--json)
 ```
 
 `ti verify` recomputes every operation's content id, confirms it matches the
@@ -396,17 +399,19 @@ tickets and is not reported. Because the push gate runs `ti verify`, a reported
 asymmetry also stops `ti sync` / `ti push` until it is repaired. Unsigned
 operations are trusted by default and reported as warnings, not failures.
 
-`ti reindex` rebuilds the local `git-meta.sqlite` from the git-meta refs. Use it
-to recover tickets that exist in `refs/meta/*` (e.g. synced from a since-removed
-worktree) but are missing from this checkout's store, or if the store file is
-lost. It re-applies the remote tracking ref and is non-destructive; run a sync
-first so the ref is present.
+`ti reindex` adds to the local `git-meta.sqlite` what the fetched remote
+tracking refs (`refs/meta/remotes/*`) hold and the store lacks: every key of a
+ticket the store has lost entirely (e.g. synced from a since-removed worktree, or
+a lost store file), and any whole key a ticket it holds is missing. It is
+additive: it never removes or rewrites a key, comment, Sub-issue, Dependency or
+Deletion the store holds, so it is safe at any time, and every `ti sync` runs it
+after the merge. Run a sync first so the tracking ref is present.
 
 ### Recovering a stranded or damaged store
 
-- **Store missing tickets the remote has:** `ti reindex` rebuilds it from
-  `refs/meta/*`. A normal `ti sync` now does this automatically when it detects
-  the gap, so you rarely need to run it by hand.
+- **Store missing tickets the remote has:** `ti reindex` adds them back from
+  `refs/meta/*`. Every `ti sync` does this after its merge, so you rarely need
+  to run it by hand.
 - **A bad push slipped through (or you forced one with `--allow-deletes`):**
   restore the remote from the newest pre-push snapshot —
   `git push <remote> +<backup-ref>:refs/meta/main && ti reindex`, where

@@ -47,5 +47,6 @@ uuid        = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+rusqlite   = { workspace = true }
 tempfile   = { workspace = true }
 ticgit-lib = { version = "0.4.0", path = "../ticgit-lib", features = ["test-support"] }

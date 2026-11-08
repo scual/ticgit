@@ -4242,42 +4242,44 @@ fn verify_ignores_create_failure_residue() {
     );
 }
 
-/// `ti reindex` is a projection of refs/meta/*: it must prune ghost residue
-/// that is absent from every meta ref and does not project to a real ticket
-/// (an additive materialize leaves such rows behind), while keeping both
-/// ref-backed tickets and valid local-only tickets that have not been pushed.
+/// `ti reindex` is additive (ADR 0003): it gains a ticket the index lost from
+/// refs/meta/* and leaves everything the index holds alone, so a valid
+/// local-only ticket and an unsynced comment on a pushed ticket survive it.
+/// (Pruning ghost residue belongs to the wholesale `reindex_reset`.)
 #[test]
-fn reindex_prunes_unbacked_ghost_but_keeps_valid_local_ticket() {
-    let repo = TestRepo::new();
+fn reindex_gains_lost_tickets_and_keeps_unsynced_local_work() {
     let remote = tempfile::tempdir().expect("bare remote tempdir");
     git(remote.path(), &["init", "--bare", "--quiet"]);
     let remote_url = remote.path().to_string_lossy().to_string();
-    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
-    repo.ti().arg("init").assert().success();
+    let repo = clone_of(&remote_url);
 
-    // A pushed, ref-backed ticket and the tracking ref. Titles are kept short
-    // so the list table does not truncate them in the assertions below.
-    create_ticket(&repo, "backedtkt");
-    repo.ti().arg("push").assert().success();
+    // Titles are kept short so the list table does not truncate them.
+    let backed = create_ticket(&repo, "backedtkt");
+    repo.ti()
+        .args(["comment", "-t", &backed, "pushed comment"])
+        .assert()
+        .success();
+    let lost = create_ticket(&repo, "losttkt");
     repo.ti().arg("sync").assert().success();
 
-    // A valid ticket created but never pushed (lives only in the local store).
     create_ticket(&repo, "localtkt");
-
-    // A failed create leaves an op-less shell ghost in the store.
     repo.ti()
-        .args(["new", "-t", "ghosty", "-a", "zzz-no-such-nick"])
+        .args(["comment", "-t", &backed, "unsynced comment"])
         .assert()
-        .failure();
+        .success();
+    strand_ticket(&repo, &lost);
 
     repo.ti().arg("reindex").assert().success();
 
-    // The ghost is gone; both real tickets survive.
     repo.ti().arg("verify").assert().success();
     repo.ti().args(["list"]).assert().success().stdout(
         predicate::str::contains("backedtkt")
-            .and(predicate::str::contains("localtkt"))
-            .and(predicate::str::contains("ghosty").not()),
+            .and(predicate::str::contains("losttkt"))
+            .and(predicate::str::contains("localtkt")),
+    );
+    assert_eq!(
+        comment_bodies(&show_json(&repo, &backed)),
+        vec!["pushed comment", "unsynced comment"]
     );
 }
 
@@ -4897,6 +4899,204 @@ fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
         let t = show_json(clone, &id);
         assert!(t["deleted"].is_null());
         assert_eq!(t["comments"][0]["body"], "written before B synced");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pull self-heal is additive (ticket f4ceb3, incident 215ee3, ADR 0003)
+// ---------------------------------------------------------------------------
+
+/// A fresh clone with `origin` pointing at `remote_url` and `ti init` run.
+fn clone_of(remote_url: &str) -> TestRepo {
+    let repo = TestRepo::new();
+    git(repo.dir.path(), &["remote", "add", "origin", remote_url]);
+    repo.ti().arg("init").assert().success();
+    repo
+}
+
+/// Drop every index row of ticket `id` from `repo`'s `git-meta.sqlite`, the
+/// way a lost or partially rebuilt index loses it: no tombstone, no log entry,
+/// and `refs/meta/*` untouched.
+fn strand_ticket(repo: &TestRepo, id: &str) {
+    let db = rusqlite::Connection::open(repo.dir.path().join(".git/git-meta.sqlite"))
+        .expect("open git-meta.sqlite");
+    let pattern = format!("ticgit:tickets:{id}:%");
+    let rows = "SELECT rowid FROM metadata WHERE key LIKE ?1";
+    db.execute(
+        &format!("DELETE FROM list_values WHERE metadata_id IN ({rows})"),
+        [&pattern],
+    )
+    .expect("drop list rows");
+    db.execute(
+        &format!("DELETE FROM set_values WHERE metadata_id IN ({rows})"),
+        [&pattern],
+    )
+    .expect("drop set rows");
+    let dropped = db
+        .execute("DELETE FROM metadata WHERE key LIKE ?1", [&pattern])
+        .expect("drop metadata rows");
+    assert!(dropped > 0, "ticket {id} had no index rows");
+}
+
+fn comment_bodies(ticket: &Value) -> Vec<String> {
+    ticket["comments"]
+        .as_array()
+        .expect("comments array")
+        .iter()
+        .map(|c| c["body"].as_str().expect("body").to_string())
+        .collect()
+}
+
+/// Incident 215ee3: a clone with unsynced comments, Sub-issues, Dependencies
+/// and Deletions runs `ti sync` against a remote that still holds the state of
+/// its previous sync, while its index has lost a ticket the remote holds, so
+/// the pull's stranded-index self-heal runs. Nothing local may be dropped, no
+/// deleted ticket may come back, and the stranded ticket is recovered, on this
+/// clone and on the next one to sync.
+#[test]
+fn sync_keeps_every_unsynced_local_change_from_the_incident() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let map = create_ticket(&a, "map ticket");
+    let old_sub = create_subissue(&a, &map, "old sub-issue");
+    let talked = create_ticket(&a, "talked about");
+    a.ti()
+        .args(["comment", "-t", &talked, "first remote comment"])
+        .assert()
+        .success();
+    let dependent = create_ticket(&a, "dependent");
+    let blocker = create_ticket(&a, "blocker");
+    let doomed_one = create_ticket(&a, "doomed one");
+    let doomed_two = create_ticket(&a, "doomed two");
+    let stranded = create_ticket(&a, "stranded");
+    a.ti()
+        .args(["comment", "-t", &stranded, "kept by the remote"])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    // Unsynced work in A.
+    a.ti()
+        .args(["comment", "-t", &talked, "second, local-only comment"])
+        .assert()
+        .success();
+    let new_sub_one = create_subissue(&a, &map, "new sub-issue one");
+    let new_sub_two = create_subissue(&a, &map, "new sub-issue two");
+    a.ti()
+        .args(["depends", "-t", &dependent, &blocker])
+        .assert()
+        .success();
+    a.ti()
+        .args(["depends", "-t", &talked, &blocker])
+        .assert()
+        .success();
+    a.ti()
+        .args(["delete", &doomed_one, &doomed_two, "--yes"])
+        .assert()
+        .success();
+    // The index loses a ticket the remote still holds, so this pull runs the
+    // stranded-index self-heal while all of the work above is unsynced.
+    strand_ticket(&a, &stranded);
+    assert!(!list_ids(&a, &[]).contains(&stranded));
+
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    for clone in [&a, &b] {
+        let t = show_json(clone, &talked);
+        assert_eq!(
+            comment_bodies(&t),
+            vec!["first remote comment", "second, local-only comment"],
+            "comments: {t}"
+        );
+        assert_eq!(json_strings(&t["depends_on"]), vec![blocker.clone()]);
+
+        let children: BTreeSet<String> = json_strings(&show_json(clone, &map)["children"])
+            .into_iter()
+            .collect();
+        assert_eq!(
+            children,
+            BTreeSet::from([old_sub.clone(), new_sub_one.clone(), new_sub_two.clone()])
+        );
+        assert_eq!(
+            json_strings(&show_json(clone, &dependent)["depends_on"]),
+            vec![blocker.clone()]
+        );
+        let blocks: BTreeSet<String> = json_strings(&show_json(clone, &blocker)["blocks"])
+            .into_iter()
+            .collect();
+        assert_eq!(blocks, BTreeSet::from([dependent.clone(), talked.clone()]));
+
+        let live = list_ids(clone, &[]);
+        assert!(!live.contains(&doomed_one) && !live.contains(&doomed_two));
+        assert_eq!(
+            list_ids(clone, &["--deleted"]),
+            BTreeSet::from([doomed_one.clone(), doomed_two.clone()])
+        );
+        assert_eq!(
+            comment_bodies(&show_json(clone, &stranded)),
+            vec!["kept by the remote"]
+        );
+        clone.ti().arg("verify").assert().success();
+    }
+}
+
+/// A Stranded index the remote has moved on from: the merge brings in only
+/// what another clone appended to the lost ticket since, so the ticket is
+/// partly indexed. The pull still restores its earlier operations and
+/// comments, keeps this clone's unsynced edit, and the push leaves every
+/// operation on the remote.
+#[test]
+fn sync_restores_a_stranded_ticket_the_remote_appended_to() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let lost = create_ticket(&a, "lost then appended");
+    a.ti()
+        .args(["comment", "-t", &lost, "from before the loss"])
+        .assert()
+        .success();
+    let other = create_ticket(&a, "edited meanwhile");
+    a.ti()
+        .args(["comment", "-t", &other, "synced in A"])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["priority", "1", "-t", &lost])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+
+    strand_ticket(&a, &lost);
+    a.ti()
+        .args(["comment", "-t", &other, "unsynced in A"])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    for clone in [&a, &b] {
+        let t = show_json(clone, &lost);
+        assert_eq!(t["title"], "lost then appended", "{t}");
+        assert_eq!(t["priority"], 1, "{t}");
+        assert_eq!(comment_bodies(&t), vec!["from before the loss"]);
+        assert_eq!(
+            comment_bodies(&show_json(clone, &other)),
+            vec!["synced in A", "unsynced in A"]
+        );
+        clone.ti().arg("verify").assert().success();
     }
 }
 
