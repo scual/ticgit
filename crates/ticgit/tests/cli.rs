@@ -4646,3 +4646,65 @@ fn delete_json_reports_the_deletion_and_a_second_delete_fails() {
         .failure()
         .stderr(predicate::str::contains("already deleted"));
 }
+
+#[test]
+fn show_on_deleted_ticket_exits_zero_with_a_deleted_banner() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "ghost");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted"))
+        .stdout(predicate::str::contains("tester@example.com"))
+        .stdout(predicate::str::contains("ti undelete"));
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Deleted**"))
+        .stdout(predicate::str::contains("tester@example.com"));
+
+    let json = show_json(&repo, &id);
+    assert_eq!(json["deleted"]["by"], "tester@example.com");
+    let at = json["deleted"]["at"].as_str().expect("deleted.at string");
+    assert!(at.contains('T') && at.len() >= 20, "rfc3339 timestamp: {at}");
+}
+
+#[test]
+fn live_ticket_show_has_no_deleted_banner() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "alive and well");
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted").not());
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Deleted**").not());
+}
+
+#[test]
+fn checkout_refuses_a_deleted_ticket() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "ghost");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    repo.ti()
+        .args(["checkout", &id])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""))
+        .stderr(predicate::str::contains("deleted"))
+        .stderr(predicate::str::contains("ti undelete"));
+    // Nothing was checked out.
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}

@@ -47,10 +47,16 @@ pub fn run(args: Args) -> Result<()> {
         .ticket
         .ok_or_else(|| anyhow::anyhow!("ticket id (or prefix) required"))?;
     let id = store.resolve_id(&reference)?;
+    let ticket = store.load(&id)?;
+    if ticket.is_deleted() {
+        anyhow::bail!(
+            "ticket {} is deleted; run `ti undelete {}` first to work on it",
+            ticket.short_id(),
+            ticket.short_id()
+        );
+    }
     state.set_current(&git_dir, id);
     state.save()?;
-
-    let ticket = store.load(&id)?;
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
         return Ok(());
