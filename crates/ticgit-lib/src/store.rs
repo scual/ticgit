@@ -549,7 +549,7 @@ impl TicketStore {
         let mut open = Vec::new();
         for child_id in &ticket.children {
             if let Ok(child) = self.load(child_id) {
-                if child.status == TicketStatus::Open && !child.is_deleted() {
+                if child.is_open_and_live() {
                     open.push(child);
                 }
             }
@@ -565,7 +565,7 @@ impl TicketStore {
         let mut open = Vec::new();
         for dep_id in &ticket.depends_on {
             if let Ok(dep) = self.load(dep_id) {
-                if dep.status == TicketStatus::Open && !dep.is_deleted() {
+                if dep.is_open_and_live() {
                     open.push(dep);
                 }
             }

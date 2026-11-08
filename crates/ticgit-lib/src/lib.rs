@@ -69,7 +69,7 @@ pub use oplog::{
     CURRENT_OP_FORMAT,
 };
 pub use query::{
-    dependency_tree, matches_tags, next_queue, priority_rank, DeletedFilter, DepDirection, DepNode,
+    dependency_tree, live_children, matches_tags, next_queue, priority_rank, DeletedFilter, DepDirection, DepNode,
     Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
 };
 pub use review::*;

@@ -252,6 +252,14 @@ impl Ticket {
         self.deleted.is_some()
     }
 
+    /// Open and not deleted: work that still holds back a Parent closing
+    /// over it or a ticket that depends on it. A Closed ticket is finished,
+    /// and a deleted one counts as absent.
+    #[must_use]
+    pub fn is_open_and_live(&self) -> bool {
+        self.status == TicketStatus::Open && !self.is_deleted()
+    }
+
     /// Short 6-char form of the UUID used in table output and as a
     /// human-friendly handle (e.g. `d7f2d8`).
     #[must_use]

@@ -2086,16 +2086,11 @@ impl App {
             detail_lines.push(field_line("Parent", &self.issue_label(parent)));
         }
         // A deleted sub-issue is not live work: leave it out, as `ti show` does.
-        let children: Vec<&uuid::Uuid> = ticket
-            .children
-            .iter()
-            .filter(|id| {
-                !self
-                    .all_tickets
-                    .iter()
-                    .any(|t| t.id == **id && t.is_deleted())
-            })
-            .collect();
+        let children = ticgit_lib::live_children(ticket, |id| {
+            self.all_tickets
+                .iter()
+                .any(|t| t.id == *id && t.is_deleted())
+        });
         if !children.is_empty() {
             detail_lines.push(field_line(
                 "Sub-issues",

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{bail, Result};
@@ -48,17 +49,18 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let all_tickets = store.list()?;
-    for root in &roots {
-        if all_tickets.iter().any(|t| t.id == *root && t.is_deleted()) {
-            bail!(ticgit_lib::Error::AlreadyDeleted(*root));
-        }
+    let deleted: HashSet<Uuid> = all_tickets
+        .iter()
+        .filter(|t| t.is_deleted())
+        .map(|t| t.id)
+        .collect();
+    if let Some(root) = roots.iter().find(|root| deleted.contains(root)) {
+        bail!(ticgit_lib::Error::AlreadyDeleted(*root));
     }
     // Recursive expansion skips descendants that are already deleted.
     let targets: Vec<Uuid> = collect_targets(&roots, &all_tickets, args.recursive)
         .into_iter()
-        .filter(|id| {
-            roots.contains(id) || !all_tickets.iter().any(|t| t.id == *id && t.is_deleted())
-        })
+        .filter(|id| roots.contains(id) || !deleted.contains(id))
         .collect();
 
     // Snapshot ticket objects before deletion (for the confirmation prompt).

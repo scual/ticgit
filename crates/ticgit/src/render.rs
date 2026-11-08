@@ -92,18 +92,12 @@ fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
     }
 }
 
-/// `t`'s children minus the deleted ones: a deleted sub-issue is not live work,
-/// so it drops out of its parent's Children line (the stored set keeps it, and
-/// it reappears once undeleted).
+/// `t`'s Sub-issues for its Children line ([`ticgit_lib::live_children`]).
 fn live_children<'a>(t: &'a Ticket, rels: Option<&RelLookup>) -> Vec<&'a Uuid> {
-    t.children
-        .iter()
-        .filter(|id| {
-            !rels
-                .and_then(|r| r.get(id))
-                .is_some_and(|info| info.deleted)
-        })
-        .collect()
+    ticgit_lib::live_children(t, |id| {
+        rels.and_then(|r| r.get(id))
+            .is_some_and(|info| info.deleted)
+    })
 }
 
 /// A node in the recursive, open-only sub-issue tree. Each node carries a
@@ -137,7 +131,7 @@ fn build_subissue_nodes(
         let Some(child) = by_id.get(id) else {
             continue;
         };
-        if child.status == TicketStatus::Closed || child.is_deleted() {
+        if !child.is_open_and_live() {
             continue;
         }
         visited.insert(*id);
