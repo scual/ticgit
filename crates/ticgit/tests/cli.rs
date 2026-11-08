@@ -779,6 +779,40 @@ fn sync_json_emits_result_object() {
     assert_eq!(json["ref"], "refs/meta/main");
     assert_eq!(json["pushed_total"], 1);
     assert!(json["pulled"].as_array().unwrap().is_empty());
+    // Nothing landed on a deleted ticket: `warnings` is present and empty.
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // The published schema documents exactly the keys `ti sync --json` emits.
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let sync_result = &schema["$defs"]["syncResult"];
+    assert_eq!(sync_result["additionalProperties"], false);
+    let documented: BTreeSet<String> = sync_result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    // `warnings` is additive: always emitted by this binary, not required,
+    // so output from older binaries still validates.
+    let required = sync_result["required"].as_array().unwrap();
+    assert!(!required.iter().any(|key| key == "warnings"));
+    assert!(required.iter().any(|key| key == "pushed_total"));
+    let warning = &schema["$defs"]["syncWarning"];
+    assert_eq!(warning["additionalProperties"], false);
+    assert_eq!(
+        warning["required"],
+        serde_json::json!(["kind", "ticket", "count"])
+    );
+    assert_eq!(
+        warning["properties"]["kind"]["enum"],
+        serde_json::json!(["edit-on-deleted"])
+    );
+    assert_eq!(
+        sync_result["properties"]["warnings"]["items"]["$ref"],
+        "#/$defs/syncWarning"
+    );
 }
 
 #[test]

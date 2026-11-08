@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ticgit.dev/schema/v1.json",
   "title": "TicGit machine output schema v1",
-  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree). Every ticket object carries `deleted`: `{ at, by }` for a deleted ticket, `null` otherwise.",
+  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree). Every ticket object carries `deleted`: `{ at, by }` for a deleted ticket, `null` otherwise. `ti sync --json` emits a sync result object; its `warnings` array reports edits that landed on a ticket deleted locally.",
   "oneOf": [
     {
       "$ref": "#/$defs/ticket"
@@ -12,6 +12,9 @@
     },
     {
       "$ref": "#/$defs/nextNull"
+    },
+    {
+      "$ref": "#/$defs/syncResult"
     }
   ],
   "$defs": {
@@ -256,6 +259,111 @@
           "items": {
             "$ref": "#/$defs/subissueNode"
           }
+        }
+      }
+    },
+    "syncResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Emitted by `ti sync --json`.",
+      "required": [
+        "remote",
+        "ref",
+        "url",
+        "web_url",
+        "pulled",
+        "updated",
+        "pushed_total",
+        "push_retries"
+      ],
+      "properties": {
+        "remote": {
+          "type": ["string", "null"],
+          "description": "Git remote synced with, or null when none is configured."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Meta ref synced, e.g. `refs/meta/main`."
+        },
+        "url": {
+          "type": "string"
+        },
+        "web_url": {
+          "type": ["string", "null"]
+        },
+        "pulled": {
+          "type": "array",
+          "description": "Tickets that appeared during the pull.",
+          "items": {
+            "$ref": "#/$defs/syncTicketRef"
+          }
+        },
+        "updated": {
+          "type": "array",
+          "description": "Tickets already known locally that the pull changed.",
+          "items": {
+            "$ref": "#/$defs/syncTicketRef"
+          }
+        },
+        "pushed_total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Ticket count after the sync."
+        },
+        "push_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many times the push merged a remote that advanced after the pull and retried."
+        },
+        "warnings": {
+          "type": "array",
+          "description": "Things the sync merged that the user should know about. Always emitted by current binaries (empty when there is nothing to report); absent from older ones. Each entry is also printed to stderr as one `warning:` line. Exit status is unaffected.",
+          "items": {
+            "$ref": "#/$defs/syncWarning"
+          }
+        }
+      }
+    },
+    "syncTicketRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "syncWarning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "ticket",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["edit-on-deleted"],
+          "description": "`edit-on-deleted`: operations, comments or set members newer than the ticket's delete operation arrived for a ticket that is deleted locally. They are kept on the hidden ticket; `ti undelete <ticket>` shows them. Later versions may add kinds; ignore kinds you do not know."
+        },
+        "ticket": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Full id of the ticket the warning is about."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many items arrived."
         }
       }
     },
