@@ -5605,3 +5605,112 @@ fn reindex_reset_on_a_synced_store_succeeds() {
         clone.ti().arg("verify").assert().success();
     }
 }
+
+/// `ti reindex --reset --force` goes ahead despite unsynced changes: the
+/// store is rebuilt from the remote, so an unsynced comment and an unsynced
+/// tag removal on a ticket the remote holds are gone afterwards.
+#[test]
+fn reindex_reset_force_rebuilds_from_the_remote() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let synced = create_ticket(&repo, "syncedtkt");
+    repo.ti()
+        .args(["comment", "-t", &synced, "pushed comment"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &synced, "bug"])
+        .assert()
+        .success();
+    repo.ti().arg("sync").assert().success();
+
+    repo.ti()
+        .args(["comment", "-t", &synced, "unsynced comment"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &synced, "-d", "bug"])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["reindex", "--reset", "--force"])
+        .assert()
+        .success();
+
+    let t = show_json(&repo, &synced);
+    assert_eq!(comment_bodies(&t), vec!["pushed comment"]);
+    assert_eq!(json_strings(&t["tags"]), vec!["bug"]);
+    repo.ti().arg("verify").assert().success();
+    // The rebuilt store matches the remote, so a plain reset now goes through.
+    repo.ti().args(["reindex", "--reset"]).assert().success();
+}
+
+/// Ticket ids with any row in `repo`'s `git-meta.sqlite`, including records
+/// that project to no ticket and so never show in `ti list`.
+fn indexed_ticket_ids(repo: &TestRepo) -> BTreeSet<String> {
+    let db = rusqlite::Connection::open(repo.dir.path().join(".git/git-meta.sqlite"))
+        .expect("open git-meta.sqlite");
+    let mut stmt = db
+        .prepare("SELECT key FROM metadata WHERE key LIKE 'ticgit:tickets:%'")
+        .expect("prepare");
+    let keys = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|k| k.expect("key"));
+    keys.filter_map(|k| k.split(':').nth(2).map(str::to_string))
+        .collect()
+}
+
+/// Write a lone `format-version` marker for a fresh ticket id straight into
+/// the store: ghost residue that projects to no ticket (what a create that
+/// failed half-way, or a rewritten-away ticket, leaves behind). Returns the id.
+fn write_ghost_record(repo: &TestRepo) -> String {
+    use ticgit_lib::{Session, Target, TicketStore};
+    let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+    let store = TicketStore::from_session(session).expect("from_session");
+    let id = uuid::Uuid::new_v4();
+    store
+        .session()
+        .target(&Target::project())
+        .set(&format!("ticgit:tickets:{id}:format-version"), "2")
+        .expect("write ghost record");
+    id.to_string()
+}
+
+/// `ti reindex --reset --force` prunes ghost residue (a record no ref holds
+/// that projects to no ticket) and keeps a
+/// valid ticket that was created locally and never pushed. The ghost is local
+/// state the remote lacks, so a reset without --force refuses.
+#[test]
+fn reindex_reset_prunes_ghost_records_and_keeps_local_tickets() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let backed = create_ticket(&repo, "backedtkt");
+    repo.ti().arg("sync").assert().success();
+    let local = create_ticket(&repo, "localtkt");
+    let ghost = write_ghost_record(&repo);
+    let tickets = BTreeSet::from([backed, local]);
+    assert_eq!(list_ids(&repo, &[]), tickets);
+    assert!(indexed_ticket_ids(&repo).contains(&ghost));
+
+    repo.ti()
+        .args(["reindex", "--reset"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsynced change"));
+    repo.ti()
+        .args(["reindex", "--reset", "--force"])
+        .assert()
+        .success();
+
+    assert_eq!(indexed_ticket_ids(&repo), tickets);
+    assert_eq!(list_ids(&repo, &[]), tickets);
+    repo.ti().arg("verify").assert().success();
+}

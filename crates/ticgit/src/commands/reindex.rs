@@ -3,12 +3,6 @@ use clap::Parser;
 
 use crate::commands::open_store;
 
-/// Add to the local store what the meta remote holds and the store lacks.
-///
-/// The default reindex is additive: it never removes or rewrites what the
-/// store holds, so unsynced work survives it. `--reset` replaces the store
-/// with the remote tree instead, and refuses while the store holds changes
-/// the remote lacks unless `--force` is given.
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Replace the store with the remote tree (drops unsynced local changes,
