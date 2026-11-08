@@ -204,7 +204,11 @@ pub fn run(args: Args) -> Result<()> {
         blocks,
         parent,
         hide_subissues: !args.subissues && !args.deleted,
-        deleted: Some(args.deleted),
+        deleted: if args.deleted {
+            ticgit_lib::DeletedFilter::Only
+        } else {
+            ticgit_lib::DeletedFilter::Hide
+        },
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
     let total = tickets.len();

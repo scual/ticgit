@@ -4,7 +4,7 @@ use std::process::Command;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::Ticket;
+use ticgit_lib::{SyncWarning, Ticket};
 use uuid::Uuid;
 
 use crate::commands::open_store;
@@ -60,12 +60,15 @@ pub fn run_sync(args: Args) -> Result<()> {
         updated_tickets,
         total,
         push_retries,
+        warnings,
     } = sync_tickets(
         &store,
         args.remote.as_deref(),
         args.allow_deletes,
         args.no_verify,
     )?;
+
+    print_sync_warnings(&warnings);
 
     if args.json {
         let out = serde_json::json!({
@@ -77,6 +80,7 @@ pub fn run_sync(args: Args) -> Result<()> {
             "updated": ticket_refs_json(&updated_tickets),
             "pushed_total": total,
             "push_retries": push_retries,
+            "warnings": warnings,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -125,6 +129,20 @@ pub(crate) fn print_push_retries(push_retries: usize) {
     }
 }
 
+/// One stderr line per warning; stdout (and `--json`) stays clean.
+pub(crate) fn print_sync_warnings(warnings: &[SyncWarning]) {
+    for warning in warnings {
+        match warning {
+            SyncWarning::EditOnDeleted { ticket, count } => {
+                let short: String = ticket.to_string().chars().take(6).collect();
+                eprintln!(
+                    "warning: {count} edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)"
+                );
+            }
+        }
+    }
+}
+
 /// Result of one pull-then-push round.
 pub(crate) struct SyncOutcome {
     /// Tickets that appeared during the pull.
@@ -135,6 +153,9 @@ pub(crate) struct SyncOutcome {
     pub total: usize,
     /// How many times the push merged a remote that advanced after the pull.
     pub push_retries: usize,
+    /// What the pull merged that the user should know about, such as edits
+    /// that landed on a ticket deleted locally.
+    pub warnings: Vec<SyncWarning>,
 }
 
 /// Pull from then push to `remote`, reporting which tickets arrived.
@@ -145,6 +166,7 @@ pub(crate) fn sync_tickets(
     no_verify: bool,
 ) -> Result<SyncOutcome> {
     let before: BTreeMap<Uuid, Ticket> = store.list()?.into_iter().map(|t| (t.id, t)).collect();
+    let deleted_before = store.deleted_ticket_items()?;
 
     // A remote that has never received tickets has no meta ref to pull yet;
     // the push below creates it.
@@ -155,6 +177,7 @@ pub(crate) fn sync_tickets(
     }
 
     let after: BTreeMap<Uuid, Ticket> = store.list()?.into_iter().map(|t| (t.id, t)).collect();
+    let warnings = store.edits_on_deleted(&deleted_before)?;
 
     let new_tickets = after
         .iter()
@@ -175,6 +198,7 @@ pub(crate) fn sync_tickets(
         updated_tickets,
         total: after.len(),
         push_retries,
+        warnings,
     })
 }
 

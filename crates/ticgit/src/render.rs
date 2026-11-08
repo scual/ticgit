@@ -21,6 +21,9 @@ pub type NickMap = HashMap<String, String>;
 pub struct RelSummary {
     pub title: String,
     pub status: String,
+    /// The related ticket is deleted: a deleted child is left out of the
+    /// Children line, any other relation is shown greyed as "(deleted)".
+    pub deleted: bool,
 }
 
 /// Lookup from ticket id to its [`RelSummary`], built from the full ticket list.
@@ -37,6 +40,7 @@ pub fn build_rel_lookup(tickets: &[Ticket]) -> RelLookup {
                 RelSummary {
                     title: t.title.clone(),
                     status: t.status.as_str().to_string(),
+                    deleted: t.is_deleted(),
                 },
             )
         })
@@ -53,17 +57,53 @@ fn short_hex(id: &Uuid) -> String {
 }
 
 /// Format related ticket ids as a comma-separated list. With a lookup each
-/// entry becomes `shortid "title" [status]`; without one, just `shortid`.
+/// entry becomes `shortid "title" [status]`, or `shortid "title" (deleted)`
+/// for a deleted ticket; without one, just `shortid`.
 fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLookup>) -> String {
+    ids.map(|id| related_entry(id, rels))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// [`format_related`] for the terminal: each entry in `color`, except a
+/// deleted ticket, which is greyed out.
+fn format_related_colored<'a>(
+    ids: impl Iterator<Item = &'a Uuid>,
+    rels: Option<&RelLookup>,
+    color: &str,
+) -> String {
     ids.map(|id| {
-        let short = short_hex(id);
-        match rels.and_then(|r| r.get(id)) {
-            Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
-            None => short,
-        }
+        let deleted = rels.and_then(|r| r.get(id)).is_some_and(|i| i.deleted);
+        ansi(
+            if deleted { ANSI_DIM } else { color },
+            &related_entry(id, rels),
+        )
     })
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
+    let short = short_hex(id);
+    match rels.and_then(|r| r.get(id)) {
+        Some(info) if info.deleted => format!("{short} \"{}\" (deleted)", flatten(&info.title)),
+        Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
+        None => short,
+    }
+}
+
+/// `t`'s children minus the deleted ones: a deleted sub-issue is not live work,
+/// so it drops out of its parent's Children line (the stored set keeps it, and
+/// it reappears once undeleted).
+fn live_children<'a>(t: &'a Ticket, rels: Option<&RelLookup>) -> Vec<&'a Uuid> {
+    t.children
+        .iter()
+        .filter(|id| {
+            !rels
+                .and_then(|r| r.get(id))
+                .is_some_and(|info| info.deleted)
+        })
+        .collect()
 }
 
 /// A node in the recursive, open-only sub-issue tree. Each node carries a
@@ -76,7 +116,7 @@ pub struct SubissueNode {
 }
 
 /// Build the recursive sub-issue tree for `root`, using `by_id` to resolve child
-/// ids. Closed sub-issues (and their whole subtree) are omitted; a visited set
+/// ids. Closed and deleted sub-issues (and their whole subtree) are omitted; a visited set
 /// guards against cycles, and ids absent from `by_id` are skipped.
 pub fn build_subissue_tree(root: &Ticket, by_id: &HashMap<Uuid, &Ticket>) -> Vec<SubissueNode> {
     let mut visited = HashSet::new();
@@ -97,7 +137,7 @@ fn build_subissue_nodes(
         let Some(child) = by_id.get(id) else {
             continue;
         };
-        if child.status == TicketStatus::Closed {
+        if child.status == TicketStatus::Closed || child.is_deleted() {
             continue;
         }
         visited.insert(*id);
@@ -719,20 +759,21 @@ pub fn ticket_detail(
         out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
     }
     if let Some(parent_id) = &t.parent {
-        let value = format_related(std::iter::once(parent_id), rels);
-        out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(std::iter::once(parent_id), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Parent", &value));
     }
-    if !t.children.is_empty() {
-        let value = format_related(t.children.iter(), rels);
-        out.push_str(&detail_field("Children", &ansi(ANSI_CYAN, &value)));
+    let children = live_children(t, rels);
+    if !children.is_empty() {
+        let value = format_related_colored(children.into_iter(), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Children", &value));
     }
     if !t.depends_on.is_empty() {
-        let value = format_related(t.depends_on.iter(), rels);
-        out.push_str(&detail_field("Depends", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(t.depends_on.iter(), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Depends", &value));
     }
     if !t.blocks.is_empty() {
-        let value = format_related(t.blocks.iter(), rels);
-        out.push_str(&detail_field("Blocks", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(t.blocks.iter(), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Blocks", &value));
     }
     if let Some(spec) = &t.spec {
         let first_line = spec.lines().next().unwrap_or("");
@@ -1006,8 +1047,9 @@ fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
         let value = format_related(std::iter::once(parent_id), rels);
         writeln!(out, "- Parent: {}", markdown_inline(&value)).unwrap();
     }
-    if !t.children.is_empty() {
-        let value = format_related(t.children.iter(), rels);
+    let children = live_children(t, rels);
+    if !children.is_empty() {
+        let value = format_related(children.into_iter(), rels);
         writeln!(out, "- Children: {}", markdown_inline(&value)).unwrap();
     }
     if !t.depends_on.is_empty() {

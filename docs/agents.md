@@ -175,11 +175,16 @@ ti deps <id> --both --all    # both directions, including closed nodes (--json/-
 show only _direct_ relations; `ti deps` walks the chain transitively and prints
 it as a tree (closed tickets pruned unless `--all`).
 
+A Dependency on a deleted ticket counts as absent: it never holds back
+`ti next` or `ti close`, `ti deps` leaves it out (even with `--all`), and
+`ti show` keeps it greyed as `(deleted)`. The edge itself is kept, so
+`ti undelete` brings the Dependency back.
+
 ## Picking The Next Ticket
 
 `ti next` chooses one open ticket to work on and checks it out. It **excludes**
-closed tickets, sub-issues, tickets with unresolved dependencies, and tickets
-tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
+closed and deleted tickets, sub-issues, tickets with unresolved dependencies,
+and tickets tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
 deferred/backlog ones too.
 
 Among the remaining tickets it orders by, in precedence:
@@ -214,14 +219,19 @@ recursive tree, so reading the parent shows the whole remaining subtree.
 
 `ti next` treats a parent as a container: while it has open sub-issues, `next`
 picks one of those (recursively, deepest first) instead of the parent. The
-parent becomes next only once all its sub-issues are closed. A sub-issue
+parent becomes next only once all its sub-issues are closed (or deleted).
+Deleted sub-issues are left out of the tree, the Children line of `ti show`,
+and the TUI; they reappear after `ti undelete`. A sub-issue
 inherits its parent's `deferred`/`backlog` tag and open dependencies.
 
 ## Deleting
 
 `ti delete` writes a delete Operation to the ticket's log; it removes no keys.
-The ticket is hidden from `ti list` but keeps its history, comments, tags,
-Sub-issues and Dependencies, and no other ticket is changed. `ti delete` takes
+The ticket is hidden from `ti list` (and its search, filters and saved views),
+`ti next`, `ti recent`, `ti stats`, `ti deps`, its parent's Sub-issues and the
+TUI, but keeps its history, comments, tags, Sub-issues and Dependencies, and no
+other ticket is changed. Undeleting restores it everywhere with no extra
+writes, because no link was removed. `ti delete` takes
 explicit ids (it never falls back to the checked-out ticket) and prompts for
 confirmation unless `--yes` is passed. `--recursive` also deletes the whole
 subtree of sub-issues; `--reason <text>` is recorded in the operation and shown
@@ -243,6 +253,18 @@ ti undelete <id>             # restore it, relations and comments intact
 - The Deletion syncs like any other operation and wins over edits made
   concurrently on another clone: those edits are kept on the hidden ticket and
   reappear with `ti undelete`.
+- When a sync brings in such edits (operations, comments or set members newer
+  than the delete), it warns once per ticket on stderr and exits 0:
+
+  ```
+  warning: 2 edit(s) landed on deleted ticket 1a2b3c (ti undelete 1a2b3c to restore)
+  ```
+
+  `ti sync --json` carries the same in `warnings`:
+  `[{"kind": "edit-on-deleted", "ticket": "<uuid>", "count": 2}]` (empty array
+  when nothing landed). Look at the ticket with `ti show <id>` and decide:
+  `ti undelete` if the edits mean it is still wanted, otherwise leave it
+  deleted. The Sync hook prints the same warning.
 
 Prefer closing (`ti close`) over deleting; delete tickets that should not be in
 the backlog at all (duplicates of nothing, spam, mistakes).
@@ -294,6 +316,8 @@ ti import linear
 ti stats --markdown
 ```
 
+Deleted tickets are not counted.
+
 ## Sync And Setup
 
 Share ticket metadata with collaborators:
@@ -328,6 +352,11 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 >   The Sync hook is the one place this failure blocks: a code push whose
 >   ticket sync lost the race window is refused, so push again. Every other
 >   sync problem in the hook stays a warning.
+>
+> - **Edits on deleted tickets are reported.** Edits another clone made to a
+>   ticket you deleted are kept on the hidden ticket, and the sync prints
+>   `warning: N edit(s) landed on deleted ticket <short> (ti undelete <short>
+>   to restore)`; `--json` lists them under `warnings`.
 >
 > **Invariant:** a ticket leaves the remote only through an explicit deletion,
 > never as a side effect of serializing an incomplete local store.

@@ -75,7 +75,11 @@ ti undelete <id>                        # restore a deleted ticket
 a delete operation: the ticket keeps its comments, Sub-issues and Dependencies,
 hides from `ti list`, still opens with `ti show` (Deleted banner; JSON `deleted:
 {at, by}`), and `ti checkout` refuses it until `ti undelete`. ti <= 0.4.2 skips
-the operation and shows deleted tickets as alive — upgrade every clone.
+the operation and shows deleted tickets as alive — upgrade every clone. When a
+sync brings in edits made elsewhere to a ticket you deleted, it keeps them and
+warns (`warning: N edit(s) landed on deleted ticket <short> ...`; `--json`:
+`warnings: [{kind: "edit-on-deleted", ticket, count}]`); `ti show` it and
+`ti undelete` if it is still wanted.
 Lifecycle — **open:** `new assigned in-progress blocked review` · **closed:**
 `resolved wontfix duplicate invalid`.
 

@@ -2085,12 +2085,23 @@ impl App {
         if let Some(parent) = ticket.parent {
             detail_lines.push(field_line("Parent", &self.issue_label(parent)));
         }
-        if !ticket.children.is_empty() {
+        // A deleted sub-issue is not live work: leave it out, as `ti show` does.
+        let children: Vec<&uuid::Uuid> = ticket
+            .children
+            .iter()
+            .filter(|id| {
+                !self
+                    .all_tickets
+                    .iter()
+                    .any(|t| t.id == **id && t.is_deleted())
+            })
+            .collect();
+        if !children.is_empty() {
             detail_lines.push(field_line(
                 "Sub-issues",
-                &format!("{} (press U to show in list)", ticket.children.len()),
+                &format!("{} (press U to show in list)", children.len()),
             ));
-            for child in ticket.children.iter().take(5) {
+            for child in children.into_iter().take(5) {
                 detail_lines.push(detail_child_issue_line(&self.issue_label(*child)));
             }
         }
