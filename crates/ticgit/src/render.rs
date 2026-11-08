@@ -57,17 +57,39 @@ fn short_hex(id: &Uuid) -> String {
 }
 
 /// Format related ticket ids as a comma-separated list. With a lookup each
-/// entry becomes `shortid "title" [status]`; without one, just `shortid`.
+/// entry becomes `shortid "title" [status]`, or `shortid "title" (deleted)`
+/// for a deleted ticket; without one, just `shortid`.
 fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLookup>) -> String {
+    ids.map(|id| related_entry(id, rels))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// [`format_related`] for the terminal: each entry in `color`, except a
+/// deleted ticket, which is greyed out.
+fn format_related_colored<'a>(
+    ids: impl Iterator<Item = &'a Uuid>,
+    rels: Option<&RelLookup>,
+    color: &str,
+) -> String {
     ids.map(|id| {
-        let short = short_hex(id);
-        match rels.and_then(|r| r.get(id)) {
-            Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
-            None => short,
-        }
+        let deleted = rels.and_then(|r| r.get(id)).is_some_and(|i| i.deleted);
+        ansi(
+            if deleted { ANSI_DIM } else { color },
+            &related_entry(id, rels),
+        )
     })
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
+    let short = short_hex(id);
+    match rels.and_then(|r| r.get(id)) {
+        Some(info) if info.deleted => format!("{short} \"{}\" (deleted)", flatten(&info.title)),
+        Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
+        None => short,
+    }
 }
 
 /// `t`'s children minus the deleted ones: a deleted sub-issue is not live work,
@@ -737,21 +759,21 @@ pub fn ticket_detail(
         out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
     }
     if let Some(parent_id) = &t.parent {
-        let value = format_related(std::iter::once(parent_id), rels);
-        out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(std::iter::once(parent_id), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Parent", &value));
     }
     let children = live_children(t, rels);
     if !children.is_empty() {
-        let value = format_related(children.into_iter(), rels);
-        out.push_str(&detail_field("Children", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(children.into_iter(), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Children", &value));
     }
     if !t.depends_on.is_empty() {
-        let value = format_related(t.depends_on.iter(), rels);
-        out.push_str(&detail_field("Depends", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(t.depends_on.iter(), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Depends", &value));
     }
     if !t.blocks.is_empty() {
-        let value = format_related(t.blocks.iter(), rels);
-        out.push_str(&detail_field("Blocks", &ansi(ANSI_CYAN, &value)));
+        let value = format_related_colored(t.blocks.iter(), rels, ANSI_CYAN);
+        out.push_str(&detail_field("Blocks", &value));
     }
     if let Some(spec) = &t.spec {
         let first_line = spec.lines().next().unwrap_or("");

@@ -4910,3 +4910,49 @@ fn show_omits_a_deleted_sub_issue_until_it_is_undeleted() {
         .success()
         .stdout(predicate::str::contains("doomed child"));
 }
+
+#[test]
+fn a_deleted_dependency_no_longer_holds_back_its_dependent() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "vanished blocker");
+    repo.ti()
+        .args(["depends", "-t", &dependent, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["delete", &blocker, "--yes"])
+        .assert()
+        .success();
+
+    // `ti next` picks the dependent: the edge to a deleted ticket is absent.
+    assert_eq!(next_json(&repo)["id"], dependent.as_str());
+
+    // `ti show` keeps the edge but greys it out as "(deleted)", not [open].
+    let short = &blocker[..6];
+    for args in [
+        vec!["show", dependent.as_str()],
+        vec!["show", dependent.as_str(), "--markdown"],
+    ] {
+        let out = repo
+            .ti()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let out = String::from_utf8(out).unwrap();
+        let line = out
+            .lines()
+            .find(|l| l.contains("Depends"))
+            .unwrap_or_else(|| panic!("Depends line in {out}"));
+        assert!(line.contains(short), "{line}");
+        assert!(line.contains("(deleted)"), "{line}");
+        assert!(!line.contains("[open]"), "{line}");
+    }
+    assert_eq!(
+        json_strings(&show_json(&repo, &dependent)["depends_on"]),
+        vec![blocker.clone()]
+    );
+}

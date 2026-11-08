@@ -339,16 +339,18 @@ fn next_state_rank(s: TicketState) -> u8 {
 /// Open, actionable tickets ordered best-first for `ti next`.
 ///
 /// A ticket is **excluded** from the queue when any of these hold:
-/// - it is closed (`status == Closed`);
-/// - it still has an open sub-issue (a parent is a container: its open
+/// - it is closed (`status == Closed`) or deleted ([`Ticket::is_deleted`]);
+/// - it still has an open, live sub-issue (a parent is a container: its open
 ///   sub-issues are picked instead, recursively, and the parent itself becomes
 ///   workable only once they are all closed);
-/// - it has an unresolved dependency (a `depends_on` id whose ticket is not
-///   closed, or is missing);
+/// - it has an unresolved dependency (a `depends_on` id whose ticket is
+///   missing, or neither closed nor deleted — an edge to a deleted ticket
+///   counts as absent);
 /// - it is tagged with a [`DEFERRED_TAGS`] value, unless
 ///   [`NextOptions::include_deferred`] is set;
 /// - any ancestor is deferred or has an unresolved dependency (a sub-issue
-///   inherits its parent's parking and gating).
+///   inherits its parent's parking and gating; the walk stops at a deleted
+///   ancestor, whose edge counts as absent).
 ///
 /// Plus the optional [`NextOptions::tag`] / [`NextOptions::assigned`] narrowing.
 ///
@@ -364,15 +366,17 @@ fn next_state_rank(s: TicketState) -> u8 {
 pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Ticket> {
     let by_id: std::collections::HashMap<Uuid, &Ticket> =
         tickets.iter().map(|t| (t.id, t)).collect();
-    let closed_ids: std::collections::HashSet<Uuid> = tickets
+    // A dependency is finished when its ticket is closed or deleted: the edge
+    // to a deleted ticket stays stored but counts as absent.
+    let finished_ids: std::collections::HashSet<Uuid> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Closed)
+        .filter(|t| t.status == TicketStatus::Closed || t.is_deleted())
         .map(|t| t.id)
         .collect();
-    // Parents that still have at least one open sub-issue.
+    // Parents that still have at least one open, live sub-issue.
     let parents_with_open_children: std::collections::HashSet<Uuid> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Open)
+        .filter(|t| t.status == TicketStatus::Open && !t.is_deleted())
         .filter_map(|t| t.parent)
         .collect();
 
@@ -382,7 +386,7 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
                 .iter()
                 .any(|tag| DEFERRED_TAGS.contains(&tag.as_str()))
     };
-    let deps_resolved = |t: &Ticket| t.depends_on.iter().all(|dep| closed_ids.contains(dep));
+    let deps_resolved = |t: &Ticket| t.depends_on.iter().all(|dep| finished_ids.contains(dep));
     // Walk up the parent chain (cycle-safe): an ancestor that is deferred or
     // gated on an open dependency keeps all of its sub-issues out of the queue.
     let ancestor_parks = |t: &Ticket| {
@@ -392,7 +396,10 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
             if !seen.insert(pid) {
                 break;
             }
-            let Some(p) = by_id.get(&pid) else { break };
+            // A deleted parent is an absent edge: it parks nothing.
+            let Some(p) = by_id.get(&pid).filter(|p| !p.is_deleted()) else {
+                break;
+            };
             if is_deferred(p) || !deps_resolved(p) {
                 return true;
             }
@@ -403,7 +410,7 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
 
     let mut candidates: Vec<&Ticket> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Open)
+        .filter(|t| t.status == TicketStatus::Open && !t.is_deleted())
         .filter(|t| !parents_with_open_children.contains(&t.id))
         .filter(|t| deps_resolved(t))
         .filter(|t| !is_deferred(t))
