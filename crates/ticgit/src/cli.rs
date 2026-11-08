@@ -259,7 +259,12 @@ pub enum Command {
     /// Verify op-log integrity: every ticket replays to a valid state.
     Verify(commands::verify::Args),
 
-    /// Add tickets missing from the local store from refs/meta/* (additive).
+    /// Fetch the meta remote and add what the local store lacks (additive).
+    ///
+    /// Never removes or rewrites what the store holds, so unsynced work
+    /// survives it. `--reset` replaces the store with the remote tree instead,
+    /// and refuses while the store holds changes the remote lacks unless
+    /// `--force` is given.
     Reindex(commands::reindex::Args),
 
     /// Update ti to the latest release.

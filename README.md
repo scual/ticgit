@@ -182,6 +182,9 @@ path enforces that with four guards:
 - **Verify gate** — a store that fails `ti verify` is not pushed; pass `--no-verify` only for
   intentional recovery.
 
+`ti reindex` fetches the remote and adds whatever your store lacks; it never removes or rewrites
+anything, so it is safe at any time. `ti reindex --reset` replaces the store with the remote and
+refuses while you have unsynced changes (`ti sync` first, or `--force` to discard them).
 Recovering a stranded store, restoring from a backup ref, and the `ti reindex` runbook are
 documented in the [agent workflow guide](docs/agents.md#recovering-a-stranded-or-damaged-store)
 and [ADR 0002](docs/adr/0002-ticket-scalars-are-an-operation-log.md).

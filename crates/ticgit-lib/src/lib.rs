@@ -50,6 +50,7 @@ pub mod history;
 pub mod keys;
 pub mod oplog;
 pub mod query;
+pub mod remote_state;
 pub mod review;
 pub mod signing;
 pub mod stats;

@@ -106,6 +106,7 @@ ti meta <field> <value> -t <id>            # arbitrary metadata field
 ti sync                      # pull then push ticket metadata to origin
 ti push                      # push only (seed a fresh remote)
 ti pull <url|nickname>       # pull tickets from a fork / remote URL
+ti reindex                   # add tickets the store lacks from the remote (safe, additive)
 ```
 
 ## Beyond the basics — see reference.md
