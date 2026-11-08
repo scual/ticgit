@@ -23,6 +23,20 @@ use crate::review::{
 use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
 use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 
+/// Remove `value` from the set at `key`, treating an already-absent member (or
+/// an absent set) as success. The two sides of a Sub-issue or Dependency are
+/// denormalized sets that can disagree after a sync, so every removal in the
+/// store must be idempotent or the CLI could never repair a half-present
+/// relation.
+fn remove_member(p: &git_meta_lib::SessionTargetHandle<'_>, key: &str, value: &str) -> Result<()> {
+    match p.set_remove(key, value) {
+        Ok(())
+        | Err(git_meta_lib::Error::ValueNotFound(_))
+        | Err(git_meta_lib::Error::KeyNotFound { .. }) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Basic email format check: must contain exactly one `@` with non-empty
 /// local and domain parts.
 fn validate_email(email: &str) -> Result<()> {
@@ -679,7 +693,8 @@ impl TicketStore {
         }
 
         if let Some(old_parent) = child.parent {
-            p.set_remove(
+            remove_member(
+                &p,
                 &keys::ticket_field(&old_parent, "children"),
                 &child_id.to_string(),
             )?;
@@ -705,7 +720,8 @@ impl TicketStore {
         let p = self.project_handle();
 
         if let Some(old_parent) = child.parent {
-            p.set_remove(
+            remove_member(
+                &p,
                 &keys::ticket_field(&old_parent, "children"),
                 &child_id.to_string(),
             )?;
@@ -720,7 +736,11 @@ impl TicketStore {
         let p = self.project_handle();
 
         if let Some(parent_id) = ticket.parent {
-            p.set_remove(&keys::ticket_field(&parent_id, "children"), &id.to_string())?;
+            remove_member(
+                &p,
+                &keys::ticket_field(&parent_id, "children"),
+                &id.to_string(),
+            )?;
         }
 
         for child_id in &ticket.children {
@@ -733,10 +753,11 @@ impl TicketStore {
         // references too, or other tickets keep dangling depends_on/blocks UUIDs
         // that never resolve (e.g. silently un-workable in `ti next`).
         for dep_id in &ticket.depends_on {
-            p.set_remove(&keys::ticket_field(dep_id, "blocks"), &id.to_string())?;
+            remove_member(&p, &keys::ticket_field(dep_id, "blocks"), &id.to_string())?;
         }
         for blocked_id in &ticket.blocks {
-            p.set_remove(
+            remove_member(
+                &p,
                 &keys::ticket_field(blocked_id, "depends_on"),
                 &id.to_string(),
             )?;
@@ -796,11 +817,13 @@ impl TicketStore {
     /// Remove a dependency: `id` no longer depends on `dependency_id`.
     pub fn remove_dependency(&self, id: &Uuid, dependency_id: &Uuid) -> Result<()> {
         let p = self.project_handle();
-        p.set_remove(
+        remove_member(
+            &p,
             &keys::ticket_field(id, "depends_on"),
             &dependency_id.to_string(),
         )?;
-        p.set_remove(
+        remove_member(
+            &p,
             &keys::ticket_field(dependency_id, "blocks"),
             &id.to_string(),
         )?;
@@ -840,8 +863,7 @@ impl TicketStore {
         if tag.is_empty() {
             return Ok(());
         }
-        self.project_handle()
-            .set_remove(&keys::ticket_field(id, "tags"), tag)?;
+        remove_member(&self.project_handle(), &keys::ticket_field(id, "tags"), tag)?;
         Ok(())
     }
 
@@ -862,8 +884,11 @@ impl TicketStore {
         if tag.is_empty() {
             return Ok(());
         }
-        self.project_handle()
-            .set_remove(&keys::writeup_field(id, "tags"), tag)?;
+        remove_member(
+            &self.project_handle(),
+            &keys::writeup_field(id, "tags"),
+            tag,
+        )?;
         Ok(())
     }
 
@@ -1091,7 +1116,8 @@ impl TicketStore {
         self.load_writeup(writeup_id)?;
         self.load(ticket_id)?;
         let p = self.project_handle();
-        p.set_remove(
+        remove_member(
+            &p,
             &keys::writeup_field(writeup_id, "tickets"),
             &ticket_id.to_string(),
         )?;
@@ -1133,7 +1159,7 @@ impl TicketStore {
         let key = keys::view(name);
         if let Some(MetaValue::Set(existing)) = p.get_value(&key)? {
             for member in existing {
-                p.set_remove(&key, &member)?;
+                remove_member(&p, &key, &member)?;
             }
         }
         for id in ids {
@@ -1179,8 +1205,11 @@ impl TicketStore {
     }
 
     pub fn remove_owner(&self, who: &str) -> Result<()> {
-        self.project_handle()
-            .set_remove(&keys::system_key("owners"), who.trim())?;
+        remove_member(
+            &self.project_handle(),
+            &keys::system_key("owners"),
+            who.trim(),
+        )?;
         Ok(())
     }
 
@@ -1231,7 +1260,7 @@ impl TicketStore {
     /// Remove an email from a nick's set. If the set becomes empty, remove the key.
     pub fn remove_user_email(&self, nick: &str, email: &str) -> Result<()> {
         let p = self.project_handle();
-        p.set_remove(&keys::user_key(nick), email)?;
+        remove_member(&p, &keys::user_key(nick), email)?;
         // Check if empty and clean up.
         if let Ok(emails) = self.get_user(nick) {
             if emails.is_empty() {
@@ -2047,7 +2076,8 @@ impl TicketStore {
         if let Some(new_parent) = new_parent {
             // Keep the denormalized children sets in step with the parent op.
             if let Some(old_parent) = local.parent {
-                p.set_remove(
+                remove_member(
+                    &p,
                     &keys::ticket_field(&old_parent, "children"),
                     &id.to_string(),
                 )?;
@@ -2186,6 +2216,7 @@ impl TicketStore {
             .copied()
             .collect();
         let mut out = Vec::with_capacity(ids.len());
+        let mut live: BTreeMap<Uuid, Ticket> = BTreeMap::new();
         for id in ids {
             let mut issues = Vec::new();
             let mut warnings = Vec::new();
@@ -2237,7 +2268,9 @@ impl TicketStore {
             }
 
             let projected = project_scalar_fields(fields, &ops);
-            if build_ticket(id, projected).is_none() {
+            if let Some(ticket) = build_ticket(id, projected) {
+                live.insert(id, ticket);
+            } else {
                 // Distinguish a genuinely corrupt ticket from deletion/creation
                 // residue. A live ticket is evidenced by a `create` op (v2
                 // format); a legacy ticket is evidenced by a `title` field and
@@ -2267,6 +2300,14 @@ impl TicketStore {
                 issues,
                 warnings,
             });
+        }
+
+        let index: HashMap<Uuid, usize> = out.iter().enumerate().map(|(i, o)| (o.id, i)).collect();
+        for (id, issue) in relation_asymmetries(&live) {
+            if let Some(&i) = index.get(&id) {
+                out[i].issues.push(issue);
+                out[i].ok = false;
+            }
         }
         Ok(out)
     }
@@ -2834,6 +2875,69 @@ impl TicketStore {
 // ---------------------------------------------------------------------------
 // Op-log projection
 // ---------------------------------------------------------------------------
+
+/// Every place where the two denormalized sides of a Sub-issue or Dependency
+/// disagree among `live` tickets, as `(ticket to report it on, issue)`. Each
+/// asymmetry yields exactly one issue, reported on the Sub-issue or
+/// the dependent (Dependency), naming both tickets. References to tickets that
+/// are not live are not asymmetries between two tickets and are skipped.
+fn relation_asymmetries(live: &BTreeMap<Uuid, Ticket>) -> Vec<(Uuid, String)> {
+    let mut out = Vec::new();
+    for t in live.values() {
+        if let Some(parent) = t.parent.as_ref().and_then(|p| live.get(p)) {
+            if !parent.children.contains(&t.id) {
+                out.push((
+                    t.id,
+                    format!(
+                        "sub-issue asymmetry: {} has parent {p}, but {p}'s children lack it",
+                        t.short_id(),
+                        p = parent.short_id(),
+                    ),
+                ));
+            }
+        }
+        for sub in t.children.iter().filter_map(|c| live.get(c)) {
+            if sub.parent != Some(t.id) {
+                let actual = sub.parent.map_or("none".to_string(), |p| {
+                    p.to_string().chars().take(6).collect()
+                });
+                out.push((
+                    sub.id,
+                    format!(
+                        "sub-issue asymmetry: {} lists {s} as a sub-issue, but {s}'s parent is {actual}",
+                        t.short_id(),
+                        s = sub.short_id(),
+                    ),
+                ));
+            }
+        }
+        for dep in t.depends_on.iter().filter_map(|d| live.get(d)) {
+            if !dep.blocks.contains(&t.id) {
+                out.push((
+                    t.id,
+                    format!(
+                        "dependency asymmetry: {} depends on {d}, but {d}'s blocks lack it",
+                        t.short_id(),
+                        d = dep.short_id(),
+                    ),
+                ));
+            }
+        }
+        for dependent in t.blocks.iter().filter_map(|b| live.get(b)) {
+            if !dependent.depends_on.contains(&t.id) {
+                out.push((
+                    dependent.id,
+                    format!(
+                        "dependency asymmetry: {} blocks {d}, but {d}'s depends_on lacks it",
+                        t.short_id(),
+                        d = dependent.short_id(),
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
 
 /// Append a comment attributed to `author` (the session user for new
 /// comments, the original author for fork import/merge).

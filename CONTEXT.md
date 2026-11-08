@@ -143,7 +143,7 @@ The shared record mapping each author (by email) to the public key that signs th
 _Avoid_: Keyring, user table, trust store
 
 **Verify**:
-`ti verify` — the consistency oracle. Replays each ticket's log, recomputes operation ids, checks signatures, and confirms the log projects to a valid ticket. A failure is a hard error (non-zero exit); an unsigned op is a warning.
+`ti verify` — the consistency oracle. Replays each ticket's log, recomputes operation ids, checks signatures, confirms the log projects to a valid ticket, and confirms both sides of every Sub-issue (parent / children) and Dependency (depends-on / blocks) agree. A failure is a hard error (non-zero exit); an unsigned op is a warning.
 _Avoid_: Validate, lint
 
 **Migrate**:

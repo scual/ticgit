@@ -4347,3 +4347,193 @@ fn push_with_stale_tracking_ref_merges_instead_of_silently_failing() {
     );
     assert_eq!(json["priority"], 2);
 }
+
+// ---------------------------------------------------------------------------
+// Half-present relations (ticket 458402): a Sub-issue or Dependency whose two
+// denormalized sides disagree — e.g. after a sync dropped one side. Removal
+// must be idempotent so the CLI can repair it, and `ti verify` must flag it.
+// ---------------------------------------------------------------------------
+
+/// Remove `member` from the set at `ticgit:tickets:<id>:<field>` directly in
+/// the store, leaving the other side of the relation in place.
+fn drop_relation_side(repo: &TestRepo, id: &str, field: &str, member: &str) {
+    use ticgit_lib::{Session, Target, TicketStore};
+    let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+    let store = TicketStore::from_session(session).expect("from_session");
+    let p = store.session().target(&Target::project());
+    let id = uuid::Uuid::parse_str(id).expect("uuid");
+    p.set_remove(&ticgit_lib::keys::ticket_field(&id, field), member)
+        .expect("drop relation side");
+}
+
+fn show_json(repo: &TestRepo, id: &str) -> Value {
+    let out = repo
+        .ti()
+        .args(["show", id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&out).expect("show json")
+}
+
+fn json_strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .expect("array")
+        .iter()
+        .map(|x| x.as_str().expect("string").to_string())
+        .collect()
+}
+
+#[test]
+fn subissue_clear_and_relink_repair_a_half_present_subissue() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    drop_relation_side(&repo, &parent, "children", &child);
+    assert_eq!(show_json(&repo, &child)["parent"], parent.as_str());
+    assert!(json_strings(&show_json(&repo, &parent)["children"]).is_empty());
+
+    repo.ti()
+        .args(["subissue", "--clear", "-t", &child])
+        .assert()
+        .success();
+    assert!(show_json(&repo, &child)["parent"].is_null());
+
+    // Re-break it, then repair by relinking to the same parent.
+    repo.ti()
+        .args(["subissue", &parent, "-t", &child])
+        .assert()
+        .success();
+    drop_relation_side(&repo, &parent, "children", &child);
+    repo.ti()
+        .args(["subissue", &parent, "-t", &child])
+        .assert()
+        .success();
+    assert_eq!(show_json(&repo, &child)["parent"], parent.as_str());
+    assert_eq!(
+        json_strings(&show_json(&repo, &parent)["children"]),
+        vec![child]
+    );
+}
+
+#[test]
+fn depends_remove_repairs_a_half_present_dependency() {
+    let repo = TestRepo::new();
+    let a = create_ticket(&repo, "dependent");
+    let b = create_ticket(&repo, "blocker");
+    repo.ti().args(["depends", &b, "-t", &a]).assert().success();
+    drop_relation_side(&repo, &b, "blocks", &a);
+    assert_eq!(
+        json_strings(&show_json(&repo, &a)["depends_on"]),
+        vec![b.clone()]
+    );
+    assert!(json_strings(&show_json(&repo, &b)["blocks"]).is_empty());
+
+    repo.ti()
+        .args(["depends", &b, "-t", &a, "--remove"])
+        .assert()
+        .success();
+    assert!(json_strings(&show_json(&repo, &a)["depends_on"]).is_empty());
+    assert!(json_strings(&show_json(&repo, &b)["blocks"]).is_empty());
+
+    // The mirror case: only the blocks side survived.
+    repo.ti().args(["depends", &b, "-t", &a]).assert().success();
+    drop_relation_side(&repo, &a, "depends_on", &b);
+    repo.ti()
+        .args(["depends", &b, "-t", &a, "--remove"])
+        .assert()
+        .success();
+    assert!(json_strings(&show_json(&repo, &a)["depends_on"]).is_empty());
+    assert!(json_strings(&show_json(&repo, &b)["blocks"]).is_empty());
+}
+
+#[test]
+fn verify_reports_each_half_present_relation_naming_both_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let a = create_ticket(&repo, "dependent");
+    let b = create_ticket(&repo, "blocker");
+    repo.ti().args(["depends", &b, "-t", &a]).assert().success();
+    repo.ti().arg("verify").assert().success();
+
+    drop_relation_side(&repo, &parent, "children", &child);
+    drop_relation_side(&repo, &b, "blocks", &a);
+
+    let out = repo
+        .ti()
+        .args(["verify", "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&out).expect("verify json");
+    assert_eq!(report["ok"], false);
+    let issues: Vec<String> = report["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|t| json_strings(&t["issues"]))
+        .collect();
+    assert_eq!(issues.len(), 2, "one issue per asymmetry: {issues:?}");
+    let names_both = |x: &str, y: &str| {
+        issues
+            .iter()
+            .any(|i| i.contains(&x[..6]) && i.contains(&y[..6]))
+    };
+    assert!(names_both(&parent, &child), "{issues:?}");
+    assert!(names_both(&a, &b), "{issues:?}");
+
+    // Human output goes to stderr with the same issues and a non-zero exit.
+    repo.ti()
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(&child[..6]).and(predicate::str::contains(&a[..6])));
+
+    // Repairing both relations through the CLI makes verify clean again.
+    repo.ti()
+        .args(["subissue", &parent, "-t", &child])
+        .assert()
+        .success();
+    repo.ti().args(["depends", &b, "-t", &a]).assert().success();
+    repo.ti().arg("verify").assert().success();
+}
+
+#[test]
+fn verify_reports_a_parent_listing_a_sub_issue_that_has_no_parent() {
+    use ticgit_lib::{Session, Target, TicketStore};
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let sub = create_ticket(&repo, "sub-issue");
+    {
+        let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+        let store = TicketStore::from_session(session).expect("from_session");
+        let p = store.session().target(&Target::project());
+        let pid = uuid::Uuid::parse_str(&parent).unwrap();
+        p.set_add(&ticgit_lib::keys::ticket_field(&pid, "children"), &sub)
+            .expect("add stray children member");
+    }
+
+    repo.ti()
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(&parent[..6]).and(predicate::str::contains(&sub[..6])));
+
+    // Documented repair: point it at the parent named in the issue, then clear.
+    repo.ti()
+        .args(["subissue", &parent, "-t", &sub])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["subissue", "--clear", "-t", &sub])
+        .assert()
+        .success();
+    assert!(show_json(&repo, &sub)["parent"].is_null());
+    assert!(json_strings(&show_json(&repo, &parent)["children"]).is_empty());
+    repo.ti().arg("verify").assert().success();
+}

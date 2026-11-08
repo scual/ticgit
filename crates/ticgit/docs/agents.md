@@ -326,8 +326,12 @@ ti reindex                    # rebuild the local store from refs/meta/* (--json
 
 `ti verify` recomputes every operation's content id, confirms it matches the
 stored id, validates any signatures, and checks the log still projects to a
-valid ticket. Unsigned operations are trusted by default and reported as
-warnings, not failures.
+valid ticket. It also reports, as one issue naming both tickets, every
+Sub-issue or Dependency whose two sides disagree (a Sub-issue missing from its
+parent's `children`, a `depends_on` entry missing from the other ticket's
+`blocks`, and the reverse). Because the push gate runs `ti verify`, such an
+asymmetry also stops `ti sync` / `ti push` until it is repaired. Unsigned
+operations are trusted by default and reported as warnings, not failures.
 
 `ti reindex` rebuilds the local `git-meta.sqlite` from the git-meta refs. Use it
 to recover tickets that exist in `refs/meta/*` (e.g. synced from a since-removed
@@ -346,8 +350,13 @@ first so the ref is present.
   `<backup-ref>` is the latest ref under `refs/ticgit-backup/<ns>/`
   (list them with `git for-each-ref refs/ticgit-backup/`).
 - **`ti verify` fails:** it lists the offending tickets; fix them or `ti reindex`,
-  then sync. Use `ti sync --no-verify` only when you deliberately accept the
-  current state.
+  then sync. To repair a Sub-issue asymmetry, run `ti subissue <parent> -t
+  <sub-issue>` with the parent named in the issue so both sides agree, then
+  re-parent it or `ti subissue --clear -t <sub-issue>` as intended. Repair a
+  Dependency asymmetry with `ti depends <blocker> -t <dependent>` (keep it) or
+  `ti depends --remove <blocker> -t <dependent>` (drop it). Removal succeeds
+  even when one side is already gone. Use `ti sync --no-verify` only when you
+  deliberately accept the current state.
 
 Operations can be **signed** with your existing SSH key (git-signing style): set
 `TICGIT_SIGNING_KEY` to a private key path and new operations are signed with
