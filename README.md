@@ -163,8 +163,9 @@ silently delete tickets on the shared remote. **A ticket leaves the remote only 
 explicit deletion, never as a side effect of serializing an incomplete local store.** The sync
 path enforces that with four guards:
 
-- **Self-healing pull** — a remote ticket missing from your index triggers a reindex instead
-  of a silent "no new tickets".
+- **Additive, self-healing pull** — after the merge, every pull adds back any remote ticket
+  (or ticket key) missing from your index, and never drops or rewrites what the index holds:
+  unsynced comments, Sub-issues, Dependencies and Deletions survive the sync.
 - **Deletion guard** — a push that would drop remote ticket keys is refused; pass
   `--allow-deletes` to remove them deliberately. `ti delete` never trips it: a Deletion is an
   operation in the ticket's log ([ADR 0003](docs/adr/0003-deletion-is-an-operation-reindex-is-additive.md)),

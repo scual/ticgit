@@ -71,7 +71,7 @@ use crate::commands;
 \x1b[1;36mMaintenance:\x1b[0m
   migrate    Roll tickets forward to the current on-disk format
   verify     Check op-log integrity and operation signatures
-  reindex    Rebuild the local store from refs/meta/*
+  reindex    Recover tickets missing from the local store
 
 \x1b[1;36mAgents:\x1b[0m
   agent      Markdown guide for AI agents
@@ -259,7 +259,7 @@ pub enum Command {
     /// Verify op-log integrity: every ticket replays to a valid state.
     Verify(commands::verify::Args),
 
-    /// Rebuild the local store from refs/meta/* (recover stranded tickets).
+    /// Add tickets missing from the local store from refs/meta/* (additive).
     Reindex(commands::reindex::Args),
 
     /// Update ti to the latest release.
