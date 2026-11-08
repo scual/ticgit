@@ -4955,4 +4955,36 @@ fn a_deleted_dependency_no_longer_holds_back_its_dependent() {
         json_strings(&show_json(&repo, &dependent)["depends_on"]),
         vec![blocker.clone()]
     );
+
+    // Nor does it hold up closing the dependent.
+    repo.ti().args(["close", &dependent]).assert().success();
+}
+
+#[test]
+fn next_never_picks_a_deleted_ticket_or_deleted_sub_issue() {
+    let repo = TestRepo::new();
+    let urgent = create_ticket(&repo, "urgent but deleted");
+    repo.ti()
+        .args(["priority", "1", "-t", &urgent])
+        .assert()
+        .success();
+    let container = create_ticket(&repo, "container");
+    let doomed = create_subissue(&repo, &container, "deleted sub-issue");
+    repo.ti()
+        .args(["priority", "1", "-t", &doomed])
+        .assert()
+        .success();
+    for id in [&urgent, &doomed] {
+        repo.ti().args(["delete", id, "--yes"]).assert().success();
+    }
+
+    // The container's only sub-issue is deleted, so the container itself is
+    // the work; neither deleted ticket is offered despite its priority.
+    assert_eq!(next_json(&repo)["id"], container.as_str());
+    assert!(next_json(&repo)["subissues"]
+        .as_array()
+        .is_none_or(|s| s.is_empty()));
+
+    repo.ti().args(["close", &container]).assert().success();
+    assert!(next_json(&repo)["next"].is_null());
 }

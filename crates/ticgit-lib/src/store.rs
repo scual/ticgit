@@ -480,7 +480,9 @@ impl TicketStore {
         self.set_lifecycle(id, state.status(), state)
     }
 
-    /// Direct children of `id` that are still open (`status == Open`).
+    /// Direct children of `id` that are still open (`status == Open`) and not
+    /// deleted: a deleted sub-issue is not live work, so it never holds up
+    /// its parent's close.
     ///
     /// Dangling child references that fail to load are skipped rather than
     /// propagated, mirroring the `.ok()` handling in `set_parent`'s ancestor
@@ -490,7 +492,7 @@ impl TicketStore {
         let mut open = Vec::new();
         for child_id in &ticket.children {
             if let Ok(child) = self.load(child_id) {
-                if child.status == TicketStatus::Open {
+                if child.status == TicketStatus::Open && !child.is_deleted() {
                     open.push(child);
                 }
             }
@@ -499,13 +501,14 @@ impl TicketStore {
     }
 
     /// Direct dependencies of `id` (its `depends_on` targets) that are still
-    /// open. Dangling references that fail to load are skipped.
+    /// open and not deleted (an edge to a deleted ticket counts as absent).
+    /// Dangling references that fail to load are skipped.
     pub fn open_dependencies(&self, id: &Uuid) -> Result<Vec<Ticket>> {
         let ticket = self.load(id)?;
         let mut open = Vec::new();
         for dep_id in &ticket.depends_on {
             if let Ok(dep) = self.load(dep_id) {
-                if dep.status == TicketStatus::Open {
+                if dep.status == TicketStatus::Open && !dep.is_deleted() {
                     open.push(dep);
                 }
             }
