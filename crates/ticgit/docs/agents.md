@@ -175,11 +175,16 @@ ti deps <id> --both --all    # both directions, including closed nodes (--json/-
 show only _direct_ relations; `ti deps` walks the chain transitively and prints
 it as a tree (closed tickets pruned unless `--all`).
 
+A Dependency on a deleted ticket counts as absent: it never holds back
+`ti next` or `ti close`, `ti deps` leaves it out (even with `--all`), and
+`ti show` keeps it greyed as `(deleted)`. The edge itself is kept, so
+`ti undelete` brings the Dependency back.
+
 ## Picking The Next Ticket
 
 `ti next` chooses one open ticket to work on and checks it out. It **excludes**
-closed tickets, sub-issues, tickets with unresolved dependencies, and tickets
-tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
+closed and deleted tickets, sub-issues, tickets with unresolved dependencies,
+and tickets tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
 deferred/backlog ones too.
 
 Among the remaining tickets it orders by, in precedence:
@@ -214,14 +219,19 @@ recursive tree, so reading the parent shows the whole remaining subtree.
 
 `ti next` treats a parent as a container: while it has open sub-issues, `next`
 picks one of those (recursively, deepest first) instead of the parent. The
-parent becomes next only once all its sub-issues are closed. A sub-issue
+parent becomes next only once all its sub-issues are closed (or deleted).
+Deleted sub-issues are left out of the tree, the Children line of `ti show`,
+and the TUI; they reappear after `ti undelete`. A sub-issue
 inherits its parent's `deferred`/`backlog` tag and open dependencies.
 
 ## Deleting
 
 `ti delete` writes a delete Operation to the ticket's log; it removes no keys.
-The ticket is hidden from `ti list` but keeps its history, comments, tags,
-Sub-issues and Dependencies, and no other ticket is changed. `ti delete` takes
+The ticket is hidden from `ti list` (and its search, filters and saved views),
+`ti next`, `ti recent`, `ti stats`, `ti deps`, its parent's Sub-issues and the
+TUI, but keeps its history, comments, tags, Sub-issues and Dependencies, and no
+other ticket is changed. Undeleting restores it everywhere with no extra
+writes, because no link was removed. `ti delete` takes
 explicit ids (it never falls back to the checked-out ticket) and prompts for
 confirmation unless `--yes` is passed. `--recursive` also deletes the whole
 subtree of sub-issues; `--reason <text>` is recorded in the operation and shown
@@ -293,6 +303,8 @@ ti import linear
 ```sh
 ti stats --markdown
 ```
+
+Deleted tickets are not counted.
 
 ## Sync And Setup
 
