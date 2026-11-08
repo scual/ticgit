@@ -58,29 +58,30 @@ fn short_hex(id: &Uuid) -> String {
 
 /// Format related ticket ids as a comma-separated list. With a lookup each
 /// entry becomes `shortid "title" [status]`, or `shortid "title" (deleted)`
-/// for a deleted ticket; without one, just `shortid`.
-fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLookup>) -> String {
-    ids.map(|id| related_entry(id, rels))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// [`format_related`] for the terminal: each entry in `color`, except a
-/// deleted ticket, which is greyed out.
-fn format_related_colored<'a>(
+/// for a deleted ticket; without one, just `shortid`. With a `color` (for the
+/// terminal) each entry is painted in it, except a deleted ticket, which is
+/// greyed out.
+fn format_related<'a>(
     ids: impl Iterator<Item = &'a Uuid>,
     rels: Option<&RelLookup>,
-    color: &str,
+    color: Option<&str>,
 ) -> String {
     ids.map(|id| {
-        let deleted = rels.and_then(|r| r.get(id)).is_some_and(|i| i.deleted);
-        ansi(
-            if deleted { ANSI_DIM } else { color },
-            &related_entry(id, rels),
-        )
+        let entry = related_entry(id, rels);
+        match color {
+            Some(_) if deleted_in(rels, id) => ansi(ANSI_DIM, &entry),
+            Some(color) => ansi(color, &entry),
+            None => entry,
+        }
     })
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+/// Whether `rels` knows `id` as a deleted ticket.
+fn deleted_in(rels: Option<&RelLookup>, id: &Uuid) -> bool {
+    rels.and_then(|r| r.get(id))
+        .is_some_and(|info| info.deleted)
 }
 
 fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
@@ -94,10 +95,7 @@ fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
 
 /// `t`'s Sub-issues for its Children line ([`ticgit_lib::live_children`]).
 fn live_children<'a>(t: &'a Ticket, rels: Option<&RelLookup>) -> Vec<&'a Uuid> {
-    ticgit_lib::live_children(t, |id| {
-        rels.and_then(|r| r.get(id))
-            .is_some_and(|info| info.deleted)
-    })
+    ticgit_lib::live_children(t, |id| deleted_in(rels, id))
 }
 
 /// A node in the recursive, open-only sub-issue tree. Each node carries a
@@ -753,20 +751,20 @@ pub fn ticket_detail(
         out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
     }
     if let Some(parent_id) = &t.parent {
-        let value = format_related_colored(std::iter::once(parent_id), rels, ANSI_CYAN);
+        let value = format_related(std::iter::once(parent_id), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Parent", &value));
     }
     let children = live_children(t, rels);
     if !children.is_empty() {
-        let value = format_related_colored(children.into_iter(), rels, ANSI_CYAN);
+        let value = format_related(children.into_iter(), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Children", &value));
     }
     if !t.depends_on.is_empty() {
-        let value = format_related_colored(t.depends_on.iter(), rels, ANSI_CYAN);
+        let value = format_related(t.depends_on.iter(), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Depends", &value));
     }
     if !t.blocks.is_empty() {
-        let value = format_related_colored(t.blocks.iter(), rels, ANSI_CYAN);
+        let value = format_related(t.blocks.iter(), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Blocks", &value));
     }
     if let Some(spec) = &t.spec {
@@ -1038,20 +1036,20 @@ fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
     .unwrap();
     writeln!(out, "- Code: {}", optional_inline(t.code.as_deref())).unwrap();
     if let Some(parent_id) = &t.parent {
-        let value = format_related(std::iter::once(parent_id), rels);
+        let value = format_related(std::iter::once(parent_id), rels, None);
         writeln!(out, "- Parent: {}", markdown_inline(&value)).unwrap();
     }
     let children = live_children(t, rels);
     if !children.is_empty() {
-        let value = format_related(children.into_iter(), rels);
+        let value = format_related(children.into_iter(), rels, None);
         writeln!(out, "- Children: {}", markdown_inline(&value)).unwrap();
     }
     if !t.depends_on.is_empty() {
-        let value = format_related(t.depends_on.iter(), rels);
+        let value = format_related(t.depends_on.iter(), rels, None);
         writeln!(out, "- Depends on: {}", markdown_inline(&value)).unwrap();
     }
     if !t.blocks.is_empty() {
-        let value = format_related(t.blocks.iter(), rels);
+        let value = format_related(t.blocks.iter(), rels, None);
         writeln!(out, "- Blocks: {}", markdown_inline(&value)).unwrap();
     }
     writeln!(out, "- Tags: {}", tags_inline(t)).unwrap();
