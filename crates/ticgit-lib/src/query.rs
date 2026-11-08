@@ -31,6 +31,9 @@ pub struct Filter {
     /// relationship filter never silently hides a sub-issue blocker,
     /// dependent, or child.
     pub hide_subissues: bool,
+    /// Deletion filter ([`Ticket::is_deleted`]): `Some(false)` keeps only live
+    /// tickets, `Some(true)` only deleted ones, `None` does not filter.
+    pub deleted: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +227,11 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     let mut tickets: Vec<Ticket> = tickets
         .into_iter()
         .filter(|t| {
+            if let Some(deleted) = filter.deleted {
+                if t.is_deleted() != deleted {
+                    return false;
+                }
+            }
             if let Some(state) = filter.state {
                 if t.state != state {
                     return false;
@@ -629,6 +637,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::from_unix_timestamp(ts).unwrap(),
             created_by: "tester".into(),
+            deleted: None,
         }
     }
 

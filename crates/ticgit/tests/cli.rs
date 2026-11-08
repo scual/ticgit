@@ -441,6 +441,16 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         schema["$defs"]["subissueNode"]["additionalProperties"],
         false
     );
+    // `deleted` is additive too: always emitted by this binary (`null` for a
+    // live ticket) but not required, so output from older binaries validates.
+    assert!(!required.contains("deleted"));
+    let deletion = &schema["$defs"]["deletion"];
+    assert_eq!(deletion["additionalProperties"], false);
+    assert_eq!(deletion["required"], serde_json::json!(["at", "by"]));
+    assert_eq!(
+        schema["$defs"]["ticket"]["properties"]["deleted"]["oneOf"],
+        serde_json::json!([{ "type": "null" }, { "$ref": "#/$defs/deletion" }])
+    );
 
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "schema ticket");
@@ -468,9 +478,12 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         .keys()
         .map(|key| key.to_string())
         .collect();
-    let mut show_keys = required.clone();
+    let mut list_keys = required.clone();
+    list_keys.insert("deleted".to_string());
+    let mut show_keys = list_keys.clone();
     show_keys.insert("subissues".to_string());
     assert_eq!(ticket_keys, show_keys);
+    assert!(ticket["deleted"].is_null());
     assert!(ticket["subissues"].is_array());
     assert_eq!(ticket["id"], id);
     assert_eq!(ticket["status"], "open");
@@ -489,7 +502,16 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
     let list: Value = serde_json::from_slice(&output).unwrap();
     let first = &list.as_array().unwrap()[0];
     assert_eq!(first["id"], id);
-    assert_eq!(first.as_object().unwrap().len(), required.len());
+    let first_keys: BTreeSet<_> = first.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(first_keys, list_keys);
+
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    let deleted = show_json(&repo, &id)["deleted"].clone();
+    let deleted_keys: BTreeSet<_> = deleted.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        deleted_keys,
+        BTreeSet::from(["at".to_string(), "by".to_string()])
+    );
 }
 
 #[test]
@@ -1353,7 +1375,7 @@ fn delete_without_yes_fails_non_interactively() {
     let id = create_ticket(&repo, "keep me");
     repo.ti().args(["delete", &id]).assert().failure();
     // Still present.
-    repo.ti().args(["show", &id, "--json"]).assert().success();
+    assert!(show_json(&repo, &id)["deleted"].is_null());
 }
 
 #[test]
@@ -1365,11 +1387,11 @@ fn delete_unknown_id_is_atomic() {
         .args(["delete", &keep, "ffffffff", "--yes"])
         .assert()
         .failure();
-    repo.ti().args(["show", &keep, "--json"]).assert().success();
+    assert!(show_json(&repo, &keep)["deleted"].is_null());
 }
 
 #[test]
-fn delete_parent_orphans_children_by_default() {
+fn delete_parent_keeps_its_sub_issues_linked() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
@@ -1377,17 +1399,11 @@ fn delete_parent_orphans_children_by_default() {
         .args(["delete", &parent, "--yes"])
         .assert()
         .success();
-    // Child survives and is now top-level (parent is null).
-    let out = repo
-        .ti()
-        .args(["show", &child, "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let t: Value = serde_json::from_slice(&out).unwrap();
-    assert!(t["parent"].is_null());
+    // Deletion is soft: the child survives, alive, still pointing at its
+    // (deleted) parent, so `ti undelete` restores the tree without relinking.
+    let t = show_json(&repo, &child);
+    assert_eq!(t["parent"], parent.as_str());
+    assert!(t["deleted"].is_null());
 }
 
 #[test]
@@ -1403,8 +1419,9 @@ fn delete_recursive_removes_subtree_including_closed() {
         .assert()
         .success();
     for id in [&parent, &child, &grandchild] {
-        repo.ti().args(["show", id, "--json"]).assert().failure();
+        assert!(show_json(&repo, id)["deleted"].is_object(), "{id} deleted");
     }
+    assert!(list_ids(&repo, &["--all"]).is_empty());
 }
 
 #[test]
@@ -1505,7 +1522,7 @@ fn delete_json_requires_yes() {
         .failure()
         .stdout(predicate::eq(""));
     // Not deleted.
-    repo.ti().args(["show", &id, "--json"]).assert().success();
+    assert!(show_json(&repo, &id)["deleted"].is_null());
 }
 
 #[test]
@@ -4101,35 +4118,65 @@ fn push_refuses_deletion_without_flag_but_allows_it_with_flag() {
     git(remote.path(), &["init", "--bare", "--quiet"]);
     let remote_url = remote.path().to_string_lossy().to_string();
 
-    // Clone A seeds two tickets on the remote.
+    // Clone A seeds three tickets on the remote.
     let a = TestRepo::new();
     git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
     a.ti().arg("init").assert().success();
     create_ticket(&a, "keep me");
     let doomed = create_ticket(&a, "delete me");
+    let gone = create_ticket(&a, "vanish me");
     a.ti().arg("push").assert().success();
     a.ti().arg("sync").assert().success();
 
-    // Delete one ticket locally. A plain push now looks like a deletion and is
-    // refused with actionable guidance.
+    // `ti delete` is an operation that keeps the ticket's keys, so it never
+    // trips the implicit-deletion guard.
     a.ti().args(["delete", &doomed, "-y"]).assert().success();
+    a.ti().arg("push").assert().success();
+
+    // A ticket whose keys vanished (a stranded store, or an older ti that
+    // removed keys) looks like an implicit deletion and is refused with
+    // actionable guidance.
+    remove_ticket_keys(&a, &gone);
     a.ti()
         .arg("push")
         .assert()
         .failure()
         .stderr(predicate::str::contains("--allow-deletes"));
 
-    // With the opt-in flag the deletion propagates to the remote.
+    // With the opt-in flag the key removal propagates to the remote.
     a.ti().args(["push", "--allow-deletes"]).assert().success();
 
-    // A fresh clone sees "keep me" but not "delete me".
+    // A fresh clone lists "keep me" only; "delete me" is there but deleted.
     let b = TestRepo::new();
     git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
     b.ti().arg("init").assert().success();
     b.ti().arg("sync").assert().success();
-    b.ti().args(["list"]).assert().success().stdout(
-        predicate::str::contains("keep me").and(predicate::str::contains("delete me").not()),
+    b.ti().args(["list", "--all"]).assert().success().stdout(
+        predicate::str::contains("keep me")
+            .and(predicate::str::contains("delete me").not())
+            .and(predicate::str::contains("vanish me").not()),
     );
+    b.ti()
+        .args(["list", "--deleted"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("delete me"));
+}
+
+/// Remove every key of a ticket directly in the store, the way a stranded
+/// index or a `ti delete` from ti <= 0.4.2 left it.
+fn remove_ticket_keys(repo: &TestRepo, id: &str) {
+    use ticgit_lib::{Session, Target, TicketStore};
+    let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+    let store = TicketStore::from_session(session).expect("from_session");
+    let p = store.session().target(&Target::project());
+    let id = uuid::Uuid::parse_str(id).expect("uuid");
+    for (key, _) in p
+        .get_all_values(Some(&ticgit_lib::keys::ticket_prefix(&id)))
+        .expect("ticket keys")
+    {
+        p.remove(&key).expect("remove key");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4536,4 +4583,285 @@ fn verify_reports_a_parent_listing_a_sub_issue_that_has_no_parent() {
     assert!(show_json(&repo, &sub)["parent"].is_null());
     assert!(json_strings(&show_json(&repo, &parent)["children"]).is_empty());
     repo.ti().arg("verify").assert().success();
+}
+
+// ---------------------------------------------------------------------------
+// Deletion is an operation (ticket 88f85c, ADR 0003)
+// ---------------------------------------------------------------------------
+
+fn list_ids(repo: &TestRepo, extra: &[&str]) -> BTreeSet<String> {
+    let mut args = vec!["list", "--json"];
+    args.extend_from_slice(extra);
+    let out = repo
+        .ti()
+        .args(&args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&out).expect("list json");
+    list.as_array()
+        .expect("array")
+        .iter()
+        .map(|t| t["id"].as_str().expect("id").to_string())
+        .collect()
+}
+
+#[test]
+fn deleted_ticket_is_hidden_from_list_and_list_deleted_shows_only_it() {
+    let repo = TestRepo::new();
+    let doomed = create_ticket(&repo, "doomed");
+    let alive = create_ticket(&repo, "alive");
+    repo.ti()
+        .args(["delete", &doomed, "--yes"])
+        .assert()
+        .success();
+
+    assert_eq!(list_ids(&repo, &[]), BTreeSet::from([alive.clone()]));
+    assert_eq!(list_ids(&repo, &["--all"]), BTreeSet::from([alive]));
+    assert_eq!(
+        list_ids(&repo, &["--deleted"]),
+        BTreeSet::from([doomed.clone()])
+    );
+    repo.ti()
+        .args(["list", "--deleted"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doomed"))
+        .stdout(predicate::str::contains("alive").not());
+}
+
+#[test]
+fn delete_json_reports_the_deletion_and_a_second_delete_fails() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "twice");
+    let out = repo
+        .ti()
+        .args(["delete", &id, "--yes", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v[0]["deleted"]["by"], "tester@example.com");
+    repo.ti()
+        .args(["delete", &id, "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already deleted"));
+}
+
+#[test]
+fn show_on_deleted_ticket_exits_zero_with_a_deleted_banner() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "ghost");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted"))
+        .stdout(predicate::str::contains("tester@example.com"))
+        .stdout(predicate::str::contains("ti undelete"));
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Deleted**"))
+        .stdout(predicate::str::contains("tester@example.com"));
+
+    let json = show_json(&repo, &id);
+    assert_eq!(json["deleted"]["by"], "tester@example.com");
+    let at = json["deleted"]["at"].as_str().expect("deleted.at string");
+    assert!(
+        at.contains('T') && at.len() >= 20,
+        "rfc3339 timestamp: {at}"
+    );
+}
+
+#[test]
+fn live_ticket_show_has_no_deleted_banner() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "alive and well");
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted").not());
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Deleted**").not());
+}
+
+#[test]
+fn checkout_refuses_a_deleted_ticket() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "ghost");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    repo.ti()
+        .args(["checkout", &id])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""))
+        .stderr(predicate::str::contains("deleted"))
+        .stderr(predicate::str::contains("ti undelete"));
+    // Nothing was checked out.
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
+fn delete_writes_no_set_changes_on_parent_or_dependency_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    repo.ti()
+        .args(["depends", "-t", &child, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["depends", "-t", &dependent, &child])
+        .assert()
+        .success();
+    let before: Vec<Value> = [&parent, &blocker, &dependent]
+        .iter()
+        .map(|id| show_json(&repo, id))
+        .collect();
+
+    repo.ti()
+        .args(["delete", &child, "--yes"])
+        .assert()
+        .success();
+
+    let after: Vec<Value> = [&parent, &blocker, &dependent]
+        .iter()
+        .map(|id| show_json(&repo, id))
+        .collect();
+    // `subissues` is a derived, open-only view; the stored sets must not move.
+    for (b, a) in before.iter().zip(&after) {
+        for field in ["children", "depends_on", "blocks", "parent", "deleted"] {
+            assert_eq!(b[field], a[field], "{field} of {} changed", b["title"]);
+        }
+    }
+}
+
+#[test]
+fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let blocker = create_ticket(&repo, "blocker");
+    repo.ti()
+        .args(["depends", "-t", &child, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &child, "keep this note"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &child, "important"])
+        .assert()
+        .success();
+    let before = show_json(&repo, &child);
+
+    repo.ti()
+        .args(["delete", &child, "--yes"])
+        .assert()
+        .success();
+    let out = repo
+        .ti()
+        .args(["undelete", &child, "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let restored: Value = serde_json::from_slice(&out).expect("undelete json");
+    assert_eq!(restored["id"], child.as_str());
+    assert!(restored["deleted"].is_null());
+
+    let after = show_json(&repo, &child);
+    assert_eq!(after, before);
+    assert_eq!(after["comments"][0]["body"], "keep this note");
+    assert_eq!(json_strings(&after["tags"]), vec!["important".to_string()]);
+    assert_eq!(after["parent"], parent.as_str());
+    assert_eq!(json_strings(&after["depends_on"]), vec![blocker.clone()]);
+    assert_eq!(
+        json_strings(&show_json(&repo, &parent)["children"]),
+        vec![child.clone()]
+    );
+    assert_eq!(
+        json_strings(&show_json(&repo, &blocker)["blocks"]),
+        vec![child.clone()]
+    );
+    assert!(list_ids(&repo, &["--subissues"]).contains(&child));
+
+    // Undeleting a live ticket is refused (a stray undelete would outrank a
+    // concurrent delete from another clone).
+    repo.ti()
+        .args(["undelete", &child])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not deleted"));
+}
+
+#[test]
+fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    let keep = create_ticket(&a, "bystander");
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+    assert!(list_ids(&b, &[]).contains(&id));
+
+    // A deletes and syncs; B, not yet synced, comments on the ticket.
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["comment", "-t", &id, "written before B synced"])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+
+    // B now hides the ticket; the comment landed on the hidden ticket.
+    assert_eq!(list_ids(&b, &[]), BTreeSet::from([keep.clone()]));
+    assert_eq!(list_ids(&b, &["--deleted"]), BTreeSet::from([id.clone()]));
+    let hidden = show_json(&b, &id);
+    assert!(hidden["deleted"].is_object(), "deleted on B: {hidden}");
+    assert_eq!(hidden["comments"][0]["body"], "written before B synced");
+
+    // Undelete (on A, after it picks up B's comment): visible everywhere,
+    // comment intact.
+    a.ti().arg("sync").assert().success();
+    a.ti().args(["undelete", &id]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+    for clone in [&a, &b] {
+        assert!(list_ids(clone, &[]).contains(&id));
+        let t = show_json(clone, &id);
+        assert!(t["deleted"].is_null());
+        assert_eq!(t["comments"][0]["body"], "written before B synced");
+    }
 }

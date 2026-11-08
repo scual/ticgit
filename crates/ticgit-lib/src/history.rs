@@ -20,6 +20,10 @@ pub enum HistoryAction {
     Set,
     Cleared,
     Commented,
+    /// The ticket was deleted (`value` carries the optional reason).
+    Deleted,
+    /// A Deletion was undone.
+    Undeleted,
 }
 
 /// One readable change to a ticket: which field, to what, by whom, when.
@@ -85,6 +89,20 @@ pub(crate) fn project_history(
                     });
                 }
             }
+            Some(OpKind::Delete { reason }) => out.push(HistoryEntry {
+                action: HistoryAction::Deleted,
+                field: "deleted".to_string(),
+                value: reason,
+                by: op.author.clone(),
+                at: op.created_at,
+            }),
+            Some(OpKind::Undelete) => out.push(HistoryEntry {
+                action: HistoryAction::Undeleted,
+                field: "deleted".to_string(),
+                value: None,
+                by: op.author.clone(),
+                at: op.created_at,
+            }),
             None => {}
         }
     }

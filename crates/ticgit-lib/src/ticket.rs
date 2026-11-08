@@ -192,6 +192,16 @@ pub struct Comment {
     pub body: String,
 }
 
+/// Who deleted a ticket and when: the winning `del` operation
+/// ([`crate::oplog::project_deletion`]) projected onto the ticket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deletion {
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// Author email of the `del` operation.
+    pub by: String,
+}
+
 /// On-the-wire shape of a comment list entry. We JSON-encode this as
 /// the `value` of a git-meta `ListEntry`; the timestamp lives on the
 /// `ListEntry` itself.
@@ -227,9 +237,21 @@ pub struct Ticket {
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     pub created_by: String,
+    /// `Some` while the ticket is deleted (see [`Ticket::is_deleted`]).
+    /// Always serialized, as `null` for a live ticket.
+    #[serde(default)]
+    pub deleted: Option<Deletion>,
 }
 
 impl Ticket {
+    /// The one deletion predicate: a deleted ticket keeps its keys, history
+    /// and relations but is hidden from default views. Every consumer that
+    /// hides deleted tickets asks this, never `deleted` directly.
+    #[must_use]
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.is_some()
+    }
+
     /// Short 6-char form of the UUID used in table output and as a
     /// human-friendly handle (e.g. `d7f2d8`).
     #[must_use]
@@ -377,6 +399,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "x".into(),
+            deleted: None,
         };
         assert_eq!(t.short_id(), "d7f2d8");
     }
@@ -405,6 +428,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "x".into(),
+            deleted: None,
         };
         assert_eq!(t.assigned_short().as_deref(), Some("jeff.welling"));
     }
@@ -433,6 +457,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "x".into(),
+            deleted: None,
         };
         assert_eq!(t.assigned_short().as_deref(), Some("jdoe"));
     }

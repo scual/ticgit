@@ -113,6 +113,12 @@ pub enum OpKind {
     SetField { fields: BTreeMap<String, String> },
     /// Remove one or more scalar fields.
     ClearField { fields: Vec<String> },
+    /// Delete the ticket (a soft Deletion: keys, history and relations stay).
+    /// Wire kind `del`; binaries that predate it skip it and see the ticket
+    /// alive.
+    Delete { reason: Option<String> },
+    /// Undo a Deletion. Wire kind `undel`.
+    Undelete,
 }
 
 impl OpKind {
@@ -121,6 +127,8 @@ impl OpKind {
             OpKind::Create { .. } => "create",
             OpKind::SetField { .. } => "set-field",
             OpKind::ClearField { .. } => "clear-field",
+            OpKind::Delete { .. } => "del",
+            OpKind::Undelete => "undel",
         }
     }
 
@@ -128,6 +136,10 @@ impl OpKind {
         match self {
             OpKind::Create { fields } | OpKind::SetField { fields } => json!({ "fields": fields }),
             OpKind::ClearField { fields } => json!({ "fields": fields }),
+            OpKind::Delete {
+                reason: Some(reason),
+            } => json!({ "reason": reason }),
+            OpKind::Delete { reason: None } | OpKind::Undelete => json!({}),
         }
     }
 
@@ -136,6 +148,14 @@ impl OpKind {
             "create" => parse_field_map(payload).map(|fields| OpKind::Create { fields }),
             "set-field" => parse_field_map(payload).map(|fields| OpKind::SetField { fields }),
             "clear-field" => parse_field_list(payload).map(|fields| OpKind::ClearField { fields }),
+            "del" => {
+                let reason = match payload.get("reason") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_str()?.to_string()),
+                };
+                Some(OpKind::Delete { reason })
+            }
+            "undel" => Some(OpKind::Undelete),
             _ => None,
         }
     }
@@ -245,10 +265,29 @@ pub fn replay(ops: &[Op]) -> BTreeMap<String, String> {
                     state.remove(&k);
                 }
             }
-            None => {}
+            Some(OpKind::Delete { .. }) | Some(OpKind::Undelete) | None => {}
         }
     }
     state
+}
+
+/// The op that leaves a ticket deleted, or `None` when it is not deleted.
+///
+/// A ticket is deleted iff the highest `(lamport, id)` op among its `del` and
+/// `undel` ops is a `del` — equivalently, iff some `del` is not covered by a
+/// later `undel`. Other op kinds never compete, so a Deletion wins over edits
+/// made concurrently on another clone. The returned op carries who deleted the
+/// ticket and when.
+#[must_use]
+pub fn project_deletion(ops: &[Op]) -> Option<&Op> {
+    ops.iter()
+        .filter_map(|op| match op.decoded() {
+            Some(OpKind::Delete { .. }) => Some((op, true)),
+            Some(OpKind::Undelete) => Some((op, false)),
+            _ => None,
+        })
+        .max_by(|(a, _), (b, _)| a.lamport.cmp(&b.lamport).then_with(|| a.id.cmp(&b.id)))
+        .and_then(|(op, deleted)| deleted.then_some(op))
 }
 
 #[cfg(test)]
@@ -339,6 +378,87 @@ mod tests {
         };
         let state = replay(&[known, unknown]);
         assert_eq!(state.get("title").map(String::as_str), Some("kept"));
+    }
+
+    fn del(lamport: u64) -> Op {
+        Op::new(lamport, "a@b.c", ts(), OpKind::Delete { reason: None }).unwrap()
+    }
+
+    fn undel(lamport: u64) -> Op {
+        Op::new(lamport, "a@b.c", ts(), OpKind::Undelete).unwrap()
+    }
+
+    #[test]
+    fn delete_and_undelete_round_trip_through_their_wire_kinds() {
+        let d = Op::new(
+            1,
+            "a@b.c",
+            ts(),
+            OpKind::Delete {
+                reason: Some("dup".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(d.kind, "del");
+        assert_eq!(
+            d.decoded(),
+            Some(OpKind::Delete {
+                reason: Some("dup".to_string())
+            })
+        );
+        let u = undel(2);
+        assert_eq!(u.kind, "undel");
+        assert_eq!(u.decoded(), Some(OpKind::Undelete));
+    }
+
+    #[test]
+    fn ticket_without_delete_ops_is_not_deleted() {
+        assert!(project_deletion(&[set_field(0, "title", "t")]).is_none());
+    }
+
+    #[test]
+    fn replay_with_delete_last_yields_deleted() {
+        let ops = [set_field(0, "title", "t"), undel(1), del(2)];
+        let winner = project_deletion(&ops).expect("deleted");
+        assert_eq!(winner.lamport, 2);
+    }
+
+    #[test]
+    fn undelete_after_delete_restores_the_ticket() {
+        let ops = [set_field(0, "title", "t"), del(1), undel(2)];
+        assert!(project_deletion(&ops).is_none());
+    }
+
+    #[test]
+    fn deletion_ignores_later_field_edits() {
+        // Deletion wins over concurrent edits: only del/undel ops compete.
+        let ops = [del(1), set_field(5, "title", "edited")];
+        assert!(project_deletion(&ops).is_some());
+    }
+
+    #[test]
+    fn deletion_is_independent_of_input_order() {
+        let ops = [undel(3), del(1), del(4), undel(2)];
+        let mut reversed = ops.clone();
+        reversed.reverse();
+        assert_eq!(project_deletion(&ops).map(|o| o.lamport), Some(4));
+        assert_eq!(project_deletion(&reversed).map(|o| o.lamport), Some(4));
+    }
+
+    #[test]
+    fn deletion_breaks_equal_lamport_ties_by_id() {
+        let d = del(3);
+        let u = undel(3);
+        let expect_deleted = d.id > u.id;
+        let ops = [d.clone(), u.clone()];
+        assert_eq!(project_deletion(&ops).is_some(), expect_deleted);
+        assert_eq!(project_deletion(&[u, d]).is_some(), expect_deleted);
+    }
+
+    #[test]
+    fn replay_ignores_delete_ops_for_scalar_fields() {
+        let ops = [set_field(0, "title", "t"), del(1)];
+        assert_eq!(replay(&ops).get("title").map(String::as_str), Some("t"));
     }
 
     #[test]

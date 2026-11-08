@@ -108,7 +108,7 @@ ti close <id>
 | Area                | Commands                                                                                                   |
 | ------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **Create & browse** | `new` · `list`/`ls` · `show` · `recent` · `mine` · `history` · `tui`                                       |
-| **Work on tickets** | `checkout`/`co` · `next` · `edit` · `comment` · `state`/`status` · `close` · `delete`                      |
+| **Work on tickets** | `checkout`/`co` · `next` · `edit` · `comment` · `state`/`status` · `close` · `delete` · `undelete`         |
 | **Ticket fields**   | `tag` · `assign` · `priority` · `points` · `milestone` · `subissue` · `code` · `depends` · `deps` · `spec` · `meta` |
 | **Views & import**  | `views` · `writeup` · `review` · `stats` · `import gh\|linear`                                             |
 | **Team**            | `users`                                                                                                    |
@@ -165,8 +165,15 @@ path enforces that with four guards:
 
 - **Self-healing pull** — a remote ticket missing from your index triggers a reindex instead
   of a silent "no new tickets".
-- **Deletion guard** — a push that would drop remote tickets you did not `ti delete` is
-  refused; pass `--allow-deletes` to remove them deliberately.
+- **Deletion guard** — a push that would drop remote ticket keys is refused; pass
+  `--allow-deletes` to remove them deliberately. `ti delete` never trips it: a Deletion is an
+  operation in the ticket's log ([ADR 0003](docs/adr/0003-deletion-is-an-operation-reindex-is-additive.md)),
+  so the ticket keeps its keys, hides from `ti list`, syncs to every clone and comes back with
+  `ti undelete`.
+
+> **Upgrade every clone.** `ti` 0.4.2 and older skip the delete operation, so a ticket deleted
+> on an up-to-date clone still shows as alive there ("ghost" tickets). Nothing is lost; the
+> deletion takes effect once that clone upgrades.
 - **Pre-push backup** — the prior remote tip is snapshotted to `refs/ticgit-backup/<ns>/`
   (newest 10 kept) before any overwriting push, so a bad push stays reversible.
 - **Verify gate** — a store that fails `ti verify` is not pushed; pass `--no-verify` only for
@@ -187,6 +194,7 @@ and [ADR 0002](docs/adr/0002-ticket-scalars-are-an-operation-log.md).
 - non-zero exit status means failure; ambiguous/missing id prefixes fail non-zero
 - ids may be full UUIDs or any unique prefix
 - `ti show --json` / mutations emit a ticket object; `ti list --json` emits an array
+- every ticket object carries `deleted`: `{ "at", "by" }` for a deleted ticket, `null` otherwise
 - `ti next --json` emits a ticket object, or `{ "next": null }` when nothing is workable
 
 Point an agent at the full workflow guide with `ti agent`.

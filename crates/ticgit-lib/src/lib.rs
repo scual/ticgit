@@ -62,7 +62,10 @@ pub mod test_support;
 
 pub use error::{Error, Result};
 pub use history::{HistoryAction, HistoryEntry};
-pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
+pub use oplog::{
+    canonical_json, content_id, project_deletion, replay, Lamport, Op, OpId, OpKind,
+    CURRENT_OP_FORMAT,
+};
 pub use query::{
     dependency_tree, matches_tags, next_queue, priority_rank, DepDirection, DepNode, Filter,
     NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
@@ -71,7 +74,8 @@ pub use review::*;
 pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
-    validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
+    validate_code_uri, Comment, Deletion, NewTicketOpts, Ticket, TicketLifecycle, TicketState,
+    TicketStatus,
 };
 pub use writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 

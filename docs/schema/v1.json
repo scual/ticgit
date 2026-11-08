@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ticgit.dev/schema/v1.json",
   "title": "TicGit machine output schema v1",
-  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree).",
+  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. `ti next --json` emits a ticket object, or the sentinel `{ \"next\": null }` when no workable ticket matches. Ticket objects from `ti next` and `ti show` additionally carry an optional `subissues` array (recursive open-only sub-issue tree). Every ticket object carries `deleted`: `{ at, by }` for a deleted ticket, `null` otherwise.",
   "oneOf": [
     {
       "$ref": "#/$defs/ticket"
@@ -160,6 +160,17 @@
             "$ref": "#/$defs/subissueNode"
           }
         },
+        "deleted": {
+          "description": "The ticket's Deletion: who deleted it and when, or `null` for a live ticket. Emitted on every ticket object; additive and optional so output from ti <= 0.4.2 (which has no Deletion) still validates. Deleted tickets are hidden from `ti list` unless `--deleted` is passed; `ti undelete` restores them.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/deletion"
+            }
+          ]
+        },
         "depends_on": {
           "type": "array",
           "items": {
@@ -203,6 +214,25 @@
         },
         "created_by": {
           "type": "string"
+        }
+      }
+    },
+    "deletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at",
+        "by"
+      ],
+      "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the winning delete operation was written."
+        },
+        "by": {
+          "type": "string",
+          "description": "Author email of the winning delete operation."
         }
       }
     },

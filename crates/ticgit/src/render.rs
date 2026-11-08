@@ -663,6 +663,21 @@ pub fn ticket_detail(
     let title_bar = "-".repeat(t.title.chars().count().max(20));
     out.push_str(&ansi(ANSI_DIM, &title_bar));
     out.push('\n');
+    if let Some(d) = &t.deleted {
+        out.push_str(&detail_field(
+            "Deleted",
+            &ansi(
+                ANSI_RED,
+                &format!(
+                    "{} ({})  by {}  (hidden; `ti undelete {}` restores it)",
+                    friendly_date(d.at),
+                    relative_time(d.at, OffsetDateTime::now_utc()),
+                    display_name(&d.by, nicks),
+                    t.short_id()
+                ),
+            ),
+        ));
+    }
     out.push_str(&detail_field(
         "Title",
         &ansi(ANSI_BLUE, &highlight(&t.title, needles, ANSI_BLUE)),
@@ -799,7 +814,7 @@ pub fn tickets_json(t: &[Ticket]) -> Result<String, serde_json::Error> {
 
 const TICKET_MARKDOWN_TEMPLATE: &str = r#"# Ticket: {title}
 
-## Details
+{deleted_banner}## Details
 
 {details}
 
@@ -862,6 +877,7 @@ pub fn ticket_markdown_with_rels(t: &Ticket, rels: Option<&RelLookup>) -> String
     render_template(
         TICKET_MARKDOWN_TEMPLATE,
         &[
+            ("deleted_banner", deleted_banner_markdown(t)),
             ("title", markdown_inline(&flatten(&t.title))),
             ("details", ticket_details_markdown(t, rels)),
             ("description", markdown_body(t.description.as_deref())),
@@ -919,6 +935,21 @@ fn render_template(template: &str, values: &[(&str, String)]) -> String {
         out = out.replace(&format!("{{{key}}}"), value);
     }
     out
+}
+
+/// Blockquote banner for a deleted ticket (with its trailing blank line), or
+/// empty for a live one.
+fn deleted_banner_markdown(t: &Ticket) -> String {
+    match &t.deleted {
+        Some(d) => format!(
+            "> **Deleted** {} ({}) by {}. Hidden from `ti list`; `ti undelete {}` restores it.\n\n",
+            markdown_inline(&friendly_date(d.at)),
+            code_span(&d.at.format(&Rfc3339).unwrap_or_default()),
+            markdown_inline(&d.by),
+            t.short_id()
+        ),
+        None => String::new(),
+    }
 }
 
 fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
@@ -1108,6 +1139,11 @@ fn imported_tickets_markdown(tickets: &[Ticket]) -> String {
 
 fn ticket_next_commands(t: &Ticket) -> String {
     let id = t.short_id();
+    if t.is_deleted() {
+        return format!(
+            "- `ti undelete {id}` to restore this ticket.\n- `ti show {id} --markdown` to refresh this ticket."
+        );
+    }
     let mut commands = vec![
         format!("`ti show {id} --markdown` to refresh this ticket."),
         format!("`ti checkout {id}` to make this the current ticket."),
@@ -1665,6 +1701,7 @@ mod tests {
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "tester@example.com".to_string(),
+            deleted: None,
         }
     }
 

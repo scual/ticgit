@@ -69,6 +69,11 @@ pub struct Args {
     #[arg(long = "parent")]
     pub parent: Option<String>,
 
+    /// Show only deleted tickets (hidden by default), in any status and
+    /// including sub-issues. Restore one with `ti undelete <id>`.
+    #[arg(long = "deleted")]
+    pub deleted: bool,
+
     /// Maximum number of tickets to show. Defaults to available terminal rows.
     #[arg(short = 'n', long = "limit", default_value_t = 0)]
     pub limit: usize,
@@ -100,6 +105,7 @@ impl Default for Args {
             depends_on: None,
             blocks: None,
             parent: None,
+            deleted: false,
             limit: 0,
             json: false,
             markdown: false,
@@ -135,6 +141,7 @@ pub fn run(args: Args) -> Result<()> {
             depends_on: saved.depends_on.clone(),
             blocks: saved.blocks.clone(),
             parent: saved.parent.clone(),
+            deleted: saved.deleted,
             limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
@@ -143,8 +150,11 @@ pub fn run(args: Args) -> Result<()> {
         args
     };
 
-    let (status, state) =
-        resolve_base_lifecycle(args.status.as_deref(), args.state.as_deref(), args.all)?;
+    let (status, state) = resolve_base_lifecycle(
+        args.status.as_deref(),
+        args.state.as_deref(),
+        args.all || args.deleted,
+    )?;
     let order = match args.order.as_deref() {
         Some(spec) => Some(
             SortOrder::parse(spec).ok_or_else(|| anyhow::anyhow!("unknown sort order `{spec}`"))?,
@@ -193,7 +203,8 @@ pub fn run(args: Args) -> Result<()> {
         depends_on,
         blocks,
         parent,
-        hide_subissues: !args.subissues,
+        hide_subissues: !args.subissues && !args.deleted,
+        deleted: Some(args.deleted),
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
     let total = tickets.len();
@@ -229,6 +240,7 @@ pub fn run(args: Args) -> Result<()> {
             parent: parent.map(|id| id.to_string()),
             all: args.all,
             subissues: args.subissues,
+            deleted: args.deleted,
             limit: args.limit,
             columns: Vec::new(),
         };

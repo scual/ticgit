@@ -19,6 +19,11 @@ pub struct Args {
     #[arg(short = 'r', long = "recursive")]
     pub recursive: bool,
 
+    /// Why the ticket(s) are deleted; recorded in the delete operation and
+    /// shown by `ti history`.
+    #[arg(long = "reason", value_name = "TEXT")]
+    pub reason: Option<String>,
+
     /// Skip the confirmation prompt.
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
@@ -43,9 +48,20 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let all_tickets = store.list()?;
-    let targets = collect_targets(&roots, &all_tickets, args.recursive);
+    for root in &roots {
+        if all_tickets.iter().any(|t| t.id == *root && t.is_deleted()) {
+            bail!(ticgit_lib::Error::AlreadyDeleted(*root));
+        }
+    }
+    // Recursive expansion skips descendants that are already deleted.
+    let targets: Vec<Uuid> = collect_targets(&roots, &all_tickets, args.recursive)
+        .into_iter()
+        .filter(|id| {
+            roots.contains(id) || !all_tickets.iter().any(|t| t.id == *id && t.is_deleted())
+        })
+        .collect();
 
-    // Snapshot ticket objects before deletion (for output).
+    // Snapshot ticket objects before deletion (for the confirmation prompt).
     let mut snapshots: Vec<Ticket> = Vec::new();
     for id in &targets {
         snapshots.push(store.load(id)?);
@@ -66,8 +82,12 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
 
+    // Deletion is an operation: no keys are removed and no parent or
+    // Dependency set on another ticket is touched (ADR 0003).
+    let mut deleted: Vec<Ticket> = Vec::with_capacity(targets.len());
     for id in &targets {
-        store.delete_ticket(id)?;
+        store.delete_ticket(id, args.reason.as_deref())?;
+        deleted.push(store.load(id)?);
     }
 
     // Clear session state if a deleted id was the checked-out ticket.
@@ -81,17 +101,18 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if args.json {
-        println!("{}", render::tickets_json(&snapshots)?);
+        println!("{}", render::tickets_json(&deleted)?);
         return Ok(());
     }
     if args.markdown {
-        println!("{}", deleted_markdown(&snapshots));
+        println!("{}", deleted_markdown(&deleted));
         return Ok(());
     }
-    println!("Deleted {} ticket(s):", snapshots.len());
-    for t in &snapshots {
+    println!("Deleted {} ticket(s):", deleted.len());
+    for t in &deleted {
         println!("  {} — {}", t.short_id(), t.title);
     }
+    println!("Restore with `ti undelete <id>`.");
     Ok(())
 }
 

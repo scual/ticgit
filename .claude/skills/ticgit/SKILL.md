@@ -65,12 +65,17 @@ ti comment -t <id> "found the failing case"   # progress / blockers / verificati
 ti state in-progress -t <id> # lifecycle: status, state, or status:state
 ti state blocked -t <id>
 ti close <id>                # resolve (id positional or -t); records closed_by
-ti delete <id> [<id>...] --yes          # permanently delete (positional ids); irreversible
+ti delete <id> [<id>...] --yes          # delete (positional ids); hidden, reversible
 ti delete <parent> --recursive --yes    # also delete the whole sub-issue subtree
+ti list --deleted                       # only deleted tickets
+ti undelete <id>                        # restore a deleted ticket
 ```
 `ti delete` requires explicit id(s) (no default-to-current) and prompts unless
-`--yes`; `--json`/`--markdown` and non-interactive shells require `--yes`. Deleting
-a parent **orphans** its sub-issues (kept top-level) unless `--recursive`. No undo.
+`--yes`; `--json`/`--markdown` and non-interactive shells require `--yes`. It writes
+a delete operation: the ticket keeps its comments, Sub-issues and Dependencies,
+hides from `ti list`, still opens with `ti show` (Deleted banner; JSON `deleted:
+{at, by}`), and `ti checkout` refuses it until `ti undelete`. ti <= 0.4.2 skips
+the operation and shows deleted tickets as alive — upgrade every clone.
 Lifecycle — **open:** `new assigned in-progress blocked review` · **closed:**
 `resolved wontfix duplicate invalid`.
 

@@ -38,6 +38,7 @@ pub mod subissue;
 pub mod sync;
 pub mod tag;
 pub mod tui;
+pub mod undelete;
 pub mod update;
 pub mod users;
 pub mod verify;

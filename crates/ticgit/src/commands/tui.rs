@@ -3542,22 +3542,9 @@ impl App {
             .map(|ticket| format!("{} {}", ticket.short_id(), ticket.title))
             .unwrap_or_else(|| "<unknown issue>".to_string());
         let label = truncate_display(&label, usize::from(area.width).saturating_sub(8));
-        let relationship_note = ticket
-            .map(
-                |ticket| match (ticket.parent.is_some(), ticket.children.len()) {
-                    (true, 0) => "This child will be removed from its parent.",
-                    (false, 1) => "Its child will be unparented.",
-                    (false, n) if n > 1 => "Its children will be unparented.",
-                    (true, 1) => {
-                        "It will be removed from its parent; its child will be unparented."
-                    }
-                    (true, _) => {
-                        "It will be removed from its parent; its children will be unparented."
-                    }
-                    _ => "This permanently removes the issue metadata.",
-                },
-            )
-            .unwrap_or("This permanently removes the issue metadata.");
+        // Deletion is an operation (ADR 0003): nothing is removed and no
+        // relation changes, so `ti undelete` restores the issue exactly.
+        let relationship_note = "It is hidden but kept; `ti undelete` restores it.";
         let lines = vec![
             Line::from(Span::styled(
                 format!("Delete issue `{label}`?"),
@@ -5285,7 +5272,7 @@ impl App {
             return Ok(());
         };
         let label = self.issue_label(id);
-        self.store.delete_ticket(&id)?;
+        self.store.delete_ticket(&id, None)?;
         self.detail = None;
         self.comments_mode = false;
         self.comment_state.select(None);
@@ -5317,6 +5304,7 @@ impl App {
             parent: None,
             all: self.base_status.is_none() && self.base_state.is_none(),
             subissues: !self.hide_subissues,
+            deleted: false,
             limit: 0,
             columns: self
                 .issue_columns
@@ -14293,6 +14281,7 @@ meta/tickets\t1779106269\tMeta\t<meta@example.com>\n";
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "test@example.com".to_string(),
+            deleted: None,
         }
     }
 }
