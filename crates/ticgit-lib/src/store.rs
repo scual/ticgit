@@ -4612,14 +4612,8 @@ mod tests {
         let child = fork.load(&child.id).unwrap();
 
         let parent = fork.load(&parent.id).unwrap();
-        assert_eq!(
-            fork_merge(&local, &fork, &parent.id),
-            ForkMerge::Imported
-        );
-        assert_eq!(
-            fork_merge(&local, &fork, &child.id),
-            ForkMerge::Imported
-        );
+        assert_eq!(fork_merge(&local, &fork, &parent.id), ForkMerge::Imported);
+        assert_eq!(fork_merge(&local, &fork, &child.id), ForkMerge::Imported);
 
         let imported = local.load(&child.id).unwrap();
         assert_eq!(imported.title, "child");
@@ -4639,8 +4633,12 @@ mod tests {
     fn fork_merge_carries_deletion_and_undeletion_operations() {
         let (fork, _fork_td) = test_store();
         let (local, _local_td) = test_store();
-        let gone = fork.create("deleted on the fork", NewTicketOpts::default()).unwrap();
-        let kept = fork.create("live on the fork", NewTicketOpts::default()).unwrap();
+        let gone = fork
+            .create("deleted on the fork", NewTicketOpts::default())
+            .unwrap();
+        let kept = fork
+            .create("live on the fork", NewTicketOpts::default())
+            .unwrap();
         fork.delete_ticket(&gone.id, Some("dup")).unwrap();
 
         // A ticket the fork deleted imports deleted, not live.
@@ -4669,7 +4667,8 @@ mod tests {
         fork_merge(&local, &fork, &t.id);
         local.delete_ticket(&t.id, None).unwrap();
 
-        fork.add_comment(&t.id, "the fork still works on it").unwrap();
+        fork.add_comment(&t.id, "the fork still works on it")
+            .unwrap();
         assert_eq!(fork_merge(&local, &fork, &t.id), ForkMerge::Updated);
         let after = local.load(&t.id).unwrap();
         assert!(after.is_deleted());
@@ -4709,10 +4708,7 @@ mod tests {
         assert_verifies(&local);
 
         // Merging the same fork state again is a no-op.
-        assert_eq!(
-            fork_merge(&local, &fork, &child.id),
-            ForkMerge::Unchanged
-        );
+        assert_eq!(fork_merge(&local, &fork, &child.id), ForkMerge::Unchanged);
     }
 
     #[test]
@@ -4759,10 +4755,7 @@ mod tests {
             .unwrap();
         fork.add_tag(&parent.id, "fork-tag").unwrap();
         fork.add_comment(&parent.id, "from the fork").unwrap();
-        assert_eq!(
-            fork_merge(&local, &fork, &parent.id),
-            ForkMerge::Updated
-        );
+        assert_eq!(fork_merge(&local, &fork, &parent.id), ForkMerge::Updated);
 
         let after = local.load(&parent.id).unwrap();
         assert_eq!(after.status, TicketStatus::Closed);

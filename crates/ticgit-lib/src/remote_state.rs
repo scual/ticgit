@@ -138,13 +138,7 @@ fn blobs_missing_from(
         let theirs = their_entries.get(&entry.name);
         if entry.is_tree {
             let their_tree = theirs.filter(|(_, is_tree)| *is_tree).map(|(oid, _)| *oid);
-            blobs_missing_from(
-                repo,
-                &format!("{path}/"),
-                entry.oid,
-                their_tree,
-                out,
-            )?;
+            blobs_missing_from(repo, &format!("{path}/"), entry.oid, their_tree, out)?;
         } else if theirs.map(|(oid, _)| *oid) != Some(entry.oid) {
             out.push(path);
         }

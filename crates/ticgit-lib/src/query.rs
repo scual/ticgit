@@ -362,8 +362,12 @@ fn next_state_rank(s: TicketState) -> u8 {
 /// an id; an id it does not know stays). A deleted Sub-issue is not live work,
 /// so it drops out of its Parent's Sub-issues everywhere they are shown; the
 /// stored set keeps it, and it comes back once undeleted.
-pub fn live_children<'a>(ticket: &'a Ticket, is_deleted: impl Fn(&Uuid) -> bool) -> Vec<&'a Uuid> {
-    ticket.children.iter().filter(|id| !is_deleted(id)).collect()
+pub fn live_children(ticket: &Ticket, is_deleted: impl Fn(&Uuid) -> bool) -> Vec<&Uuid> {
+    ticket
+        .children
+        .iter()
+        .filter(|id| !is_deleted(id))
+        .collect()
 }
 
 /// Open, actionable tickets ordered best-first for `ti next`.

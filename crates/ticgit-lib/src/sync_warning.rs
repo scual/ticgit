@@ -163,7 +163,13 @@ mod tests {
 
     fn set_priority(lamport: u64, created_at: OffsetDateTime, value: &str) -> Op {
         let fields = [("priority".to_string(), value.to_string())].into();
-        Op::new(lamport, "b@example.com", created_at, OpKind::SetField { fields }).unwrap()
+        Op::new(
+            lamport,
+            "b@example.com",
+            created_at,
+            OpKind::SetField { fields },
+        )
+        .unwrap()
     }
 
     /// Operations order by Lamport clock, never by wall clock (ADR 0002): an

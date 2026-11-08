@@ -162,9 +162,7 @@ fn fetch_remote_tickets(url: &str) -> Result<Vec<(Ticket, Vec<Op>)>> {
         .pull(Some("origin"))
         .context("pulling metadata from remote")?;
 
-    let tickets = remote_store
-        .list()
-        .context("listing tickets from remote")?;
+    let tickets = remote_store.list().context("listing tickets from remote")?;
     tickets
         .into_iter()
         .map(|t| {
