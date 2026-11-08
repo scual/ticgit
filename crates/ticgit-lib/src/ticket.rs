@@ -244,20 +244,34 @@ pub struct Ticket {
 }
 
 impl Ticket {
-    /// The one deletion predicate: a deleted ticket keeps its keys, history
-    /// and relations but is hidden from default views. Every consumer that
+    /// The one deletion predicate: a deleted ticket keeps its keys, history,
+    /// Dependencies and Sub-issues but is hidden from default views. Every consumer that
     /// hides deleted tickets asks this, never `deleted` directly.
     #[must_use]
     pub fn is_deleted(&self) -> bool {
         self.deleted.is_some()
     }
 
+    /// Open and not deleted: work that still holds back a Parent closing
+    /// over it or a ticket that depends on it. A Closed ticket is finished,
+    /// and a deleted one counts as absent.
+    #[must_use]
+    pub fn is_open_and_live(&self) -> bool {
+        self.status == TicketStatus::Open && !self.is_deleted()
+    }
+
     /// Short 6-char form of the UUID used in table output and as a
     /// human-friendly handle (e.g. `d7f2d8`).
     #[must_use]
     pub fn short_id(&self) -> String {
-        let s = self.id.to_string();
-        s.chars().take(6).collect()
+        Self::short_hex(&self.id)
+    }
+
+    /// The short display form of any ticket id: its first six hex digits,
+    /// as [`Self::short_id`] gives for a loaded ticket.
+    #[must_use]
+    pub fn short_hex(id: &Uuid) -> String {
+        id.to_string().chars().take(6).collect()
     }
 
     /// The "@user" portion of an email-style assigned handle, or the

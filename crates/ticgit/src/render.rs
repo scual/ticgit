@@ -21,8 +21,8 @@ pub type NickMap = HashMap<String, String>;
 pub struct RelSummary {
     pub title: String,
     pub status: String,
-    /// The related ticket is deleted: a deleted child is left out of the
-    /// Children line, any other relation is shown greyed as "(deleted)".
+    /// The ticket is deleted: a deleted Sub-issue is left out of the Children
+    /// line, a deleted Parent or Dependency is shown greyed as "(deleted)".
     pub deleted: bool,
 }
 
@@ -53,34 +53,35 @@ pub fn by_id_map(all: &[Ticket]) -> HashMap<Uuid, &Ticket> {
 }
 
 fn short_hex(id: &Uuid) -> String {
-    id.to_string().chars().take(6).collect()
+    Ticket::short_hex(id)
 }
 
 /// Format related ticket ids as a comma-separated list. With a lookup each
 /// entry becomes `shortid "title" [status]`, or `shortid "title" (deleted)`
-/// for a deleted ticket; without one, just `shortid`.
-fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLookup>) -> String {
-    ids.map(|id| related_entry(id, rels))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// [`format_related`] for the terminal: each entry in `color`, except a
-/// deleted ticket, which is greyed out.
-fn format_related_colored<'a>(
+/// for a deleted ticket; without one, just `shortid`. With a `color` (for the
+/// terminal) each entry is painted in it, except a deleted ticket, which is
+/// greyed out.
+fn format_related<'a>(
     ids: impl Iterator<Item = &'a Uuid>,
     rels: Option<&RelLookup>,
-    color: &str,
+    color: Option<&str>,
 ) -> String {
     ids.map(|id| {
-        let deleted = rels.and_then(|r| r.get(id)).is_some_and(|i| i.deleted);
-        ansi(
-            if deleted { ANSI_DIM } else { color },
-            &related_entry(id, rels),
-        )
+        let entry = related_entry(id, rels);
+        match color {
+            Some(_) if deleted_in(rels, id) => ansi(ANSI_DIM, &entry),
+            Some(color) => ansi(color, &entry),
+            None => entry,
+        }
     })
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+/// Whether `rels` knows `id` as a deleted ticket.
+fn deleted_in(rels: Option<&RelLookup>, id: &Uuid) -> bool {
+    rels.and_then(|r| r.get(id))
+        .is_some_and(|info| info.deleted)
 }
 
 fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
@@ -92,18 +93,9 @@ fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
     }
 }
 
-/// `t`'s children minus the deleted ones: a deleted sub-issue is not live work,
-/// so it drops out of its parent's Children line (the stored set keeps it, and
-/// it reappears once undeleted).
+/// `t`'s Sub-issues for its Children line ([`ticgit_lib::live_children`]).
 fn live_children<'a>(t: &'a Ticket, rels: Option<&RelLookup>) -> Vec<&'a Uuid> {
-    t.children
-        .iter()
-        .filter(|id| {
-            !rels
-                .and_then(|r| r.get(id))
-                .is_some_and(|info| info.deleted)
-        })
-        .collect()
+    ticgit_lib::live_children(t, |id| deleted_in(rels, id))
 }
 
 /// A node in the recursive, open-only sub-issue tree. Each node carries a
@@ -137,7 +129,7 @@ fn build_subissue_nodes(
         let Some(child) = by_id.get(id) else {
             continue;
         };
-        if child.status == TicketStatus::Closed || child.is_deleted() {
+        if !child.is_open_and_live() {
             continue;
         }
         visited.insert(*id);
@@ -709,7 +701,7 @@ pub fn ticket_detail(
             &ansi(
                 ANSI_RED,
                 &format!(
-                    "{} ({})  by {}  (hidden; `ti undelete {}` restores it)",
+                    "{} ({})  by {}  (hidden; `ti undelete {}` brings it back)",
                     friendly_date(d.at),
                     relative_time(d.at, OffsetDateTime::now_utc()),
                     display_name(&d.by, nicks),
@@ -759,20 +751,20 @@ pub fn ticket_detail(
         out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
     }
     if let Some(parent_id) = &t.parent {
-        let value = format_related_colored(std::iter::once(parent_id), rels, ANSI_CYAN);
+        let value = format_related(std::iter::once(parent_id), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Parent", &value));
     }
     let children = live_children(t, rels);
     if !children.is_empty() {
-        let value = format_related_colored(children.into_iter(), rels, ANSI_CYAN);
+        let value = format_related(children.into_iter(), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Children", &value));
     }
     if !t.depends_on.is_empty() {
-        let value = format_related_colored(t.depends_on.iter(), rels, ANSI_CYAN);
+        let value = format_related(t.depends_on.iter(), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Depends", &value));
     }
     if !t.blocks.is_empty() {
-        let value = format_related_colored(t.blocks.iter(), rels, ANSI_CYAN);
+        let value = format_related(t.blocks.iter(), rels, Some(ANSI_CYAN));
         out.push_str(&detail_field("Blocks", &value));
     }
     if let Some(spec) = &t.spec {
@@ -983,7 +975,7 @@ fn render_template(template: &str, values: &[(&str, String)]) -> String {
 fn deleted_banner_markdown(t: &Ticket) -> String {
     match &t.deleted {
         Some(d) => format!(
-            "> **Deleted** {} ({}) by {}. Hidden from `ti list`; `ti undelete {}` restores it.\n\n",
+            "> **Deleted** {} ({}) by {}. Hidden from `ti list`; `ti undelete {}` brings it back.\n\n",
             markdown_inline(&friendly_date(d.at)),
             code_span(&d.at.format(&Rfc3339).unwrap_or_default()),
             markdown_inline(&d.by),
@@ -1044,20 +1036,20 @@ fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
     .unwrap();
     writeln!(out, "- Code: {}", optional_inline(t.code.as_deref())).unwrap();
     if let Some(parent_id) = &t.parent {
-        let value = format_related(std::iter::once(parent_id), rels);
+        let value = format_related(std::iter::once(parent_id), rels, None);
         writeln!(out, "- Parent: {}", markdown_inline(&value)).unwrap();
     }
     let children = live_children(t, rels);
     if !children.is_empty() {
-        let value = format_related(children.into_iter(), rels);
+        let value = format_related(children.into_iter(), rels, None);
         writeln!(out, "- Children: {}", markdown_inline(&value)).unwrap();
     }
     if !t.depends_on.is_empty() {
-        let value = format_related(t.depends_on.iter(), rels);
+        let value = format_related(t.depends_on.iter(), rels, None);
         writeln!(out, "- Depends on: {}", markdown_inline(&value)).unwrap();
     }
     if !t.blocks.is_empty() {
-        let value = format_related(t.blocks.iter(), rels);
+        let value = format_related(t.blocks.iter(), rels, None);
         writeln!(out, "- Blocks: {}", markdown_inline(&value)).unwrap();
     }
     writeln!(out, "- Tags: {}", tags_inline(t)).unwrap();
@@ -1183,7 +1175,7 @@ fn ticket_next_commands(t: &Ticket) -> String {
     let id = t.short_id();
     if t.is_deleted() {
         return format!(
-            "- `ti undelete {id}` to restore this ticket.\n- `ti show {id} --markdown` to refresh this ticket."
+            "- `ti undelete {id}` to bring this ticket back.\n- `ti show {id} --markdown` to refresh this ticket."
         );
     }
     let mut commands = vec![

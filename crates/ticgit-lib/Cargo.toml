@@ -38,5 +38,5 @@ default = []
 test-support = []
 
 [dev-dependencies]
-proptest = "1.12.0"
+proptest = { workspace = true }
 tempfile = { workspace = true }

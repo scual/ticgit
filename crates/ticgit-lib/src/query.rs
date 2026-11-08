@@ -358,6 +358,18 @@ fn next_state_rank(s: TicketState) -> u8 {
     }
 }
 
+/// `ticket`'s Sub-issue ids minus the deleted ones (`is_deleted` answers for
+/// an id; an id it does not know stays). A deleted Sub-issue is not live work,
+/// so it drops out of its Parent's Sub-issues everywhere they are shown; the
+/// stored set keeps it, and it comes back once undeleted.
+pub fn live_children(ticket: &Ticket, is_deleted: impl Fn(&Uuid) -> bool) -> Vec<&Uuid> {
+    ticket
+        .children
+        .iter()
+        .filter(|id| !is_deleted(id))
+        .collect()
+}
+
 /// Open, actionable tickets ordered best-first for `ti next`.
 ///
 /// A ticket is **excluded** from the queue when any of these hold:
@@ -392,13 +404,13 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
     // to a deleted ticket stays stored but counts as absent.
     let finished_ids: std::collections::HashSet<Uuid> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Closed || t.is_deleted())
+        .filter(|t| !t.is_open_and_live())
         .map(|t| t.id)
         .collect();
     // Parents that still have at least one open, live sub-issue.
     let parents_with_open_children: std::collections::HashSet<Uuid> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Open && !t.is_deleted())
+        .filter(|t| t.is_open_and_live())
         .filter_map(|t| t.parent)
         .collect();
 
@@ -432,7 +444,7 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
 
     let mut candidates: Vec<&Ticket> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Open && !t.is_deleted())
+        .filter(|t| t.is_open_and_live())
         .filter(|t| !parents_with_open_children.contains(&t.id))
         .filter(|t| deps_resolved(t))
         .filter(|t| !is_deferred(t))

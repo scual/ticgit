@@ -113,7 +113,8 @@ pub enum OpKind {
     SetField { fields: BTreeMap<String, String> },
     /// Remove one or more scalar fields.
     ClearField { fields: Vec<String> },
-    /// Delete the ticket (a soft Deletion: keys, history and relations stay).
+    /// Delete the ticket (a soft Deletion: keys, history, Dependencies and
+    /// Sub-issues stay).
     /// Wire kind `del`; binaries that predate it skip it and see the ticket
     /// alive.
     Delete { reason: Option<String> },
@@ -424,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn undelete_after_delete_restores_the_ticket() {
+    fn undelete_after_delete_brings_the_ticket_back() {
         let ops = [set_field(0, "title", "t"), del(1), undel(2)];
         assert!(project_deletion(&ops).is_none());
     }

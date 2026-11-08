@@ -172,7 +172,7 @@ path enforces that with four guards:
   so the ticket keeps its keys, hides from `ti list`, syncs to every clone and comes back with
   `ti undelete`. Edits another clone made to it before learning of the deletion are kept on the
   hidden ticket, and the sync warns: `warning: N edit(s) landed on deleted ticket <short> (ti
-  undelete <short> to restore)` on stderr, `warnings` in `ti sync --json`.
+  undelete <short> to bring it back)` on stderr, `warnings` in `ti sync --json`.
 
 > **Upgrade every clone.** `ti` 0.4.2 and older skip the delete operation, so a ticket deleted
 > on an up-to-date clone still shows as alive there ("ghost" tickets). Nothing is lost; the

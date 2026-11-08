@@ -2086,16 +2086,11 @@ impl App {
             detail_lines.push(field_line("Parent", &self.issue_label(parent)));
         }
         // A deleted sub-issue is not live work: leave it out, as `ti show` does.
-        let children: Vec<&uuid::Uuid> = ticket
-            .children
-            .iter()
-            .filter(|id| {
-                !self
-                    .all_tickets
-                    .iter()
-                    .any(|t| t.id == **id && t.is_deleted())
-            })
-            .collect();
+        let children = ticgit_lib::live_children(ticket, |id| {
+            self.all_tickets
+                .iter()
+                .any(|t| t.id == *id && t.is_deleted())
+        });
         if !children.is_empty() {
             detail_lines.push(field_line(
                 "Sub-issues",
@@ -3554,8 +3549,9 @@ impl App {
             .unwrap_or_else(|| "<unknown issue>".to_string());
         let label = truncate_display(&label, usize::from(area.width).saturating_sub(8));
         // Deletion is an operation (ADR 0003): nothing is removed and no
-        // relation changes, so `ti undelete` restores the issue exactly.
-        let relationship_note = "It is hidden but kept; `ti undelete` restores it.";
+        // Dependency or Sub-issue changes, so `ti undelete` brings the issue
+        // back exactly.
+        let relationship_note = "It is hidden but kept; `ti undelete` brings it back.";
         let lines = vec![
             Line::from(Span::styled(
                 format!("Delete issue `{label}`?"),

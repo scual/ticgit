@@ -2,9 +2,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use ticgit_lib::{ForkMerge, Ticket, TicketStore};
+use ticgit_lib::{ForkMerge, Op, Ticket, TicketStore};
 
 use crate::commands::open_store;
+use crate::commands::sync::print_sync_warnings;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -38,21 +39,24 @@ pub fn run(args: Args) -> Result<()> {
     // Fetch into a temp bare repo and open a store on it.
     let remote_tickets = fetch_remote_tickets(&url)?;
 
-    if remote_tickets.is_empty() {
+    if remote_tickets.is_empty() && !args.json && !args.markdown {
         println!("No tickets found on remote.");
         return Ok(());
     }
 
+    let deleted_before = store.deleted_ticket_items()?;
     let mut imported = Vec::new();
     let mut updated = Vec::new();
 
-    for remote in &remote_tickets {
-        match store.merge_fork_ticket(remote)? {
+    for (remote, ops) in &remote_tickets {
+        match store.merge_fork_ticket(remote, ops)? {
             ForkMerge::Imported => imported.push(remote.clone()),
             ForkMerge::Updated => updated.push(remote.clone()),
             ForkMerge::Unchanged => {}
         }
     }
+    let warnings = store.edits_on_deleted(&deleted_before)?;
+    print_sync_warnings(&warnings);
 
     if args.json {
         println!(
@@ -63,6 +67,7 @@ pub fn run(args: Args) -> Result<()> {
                 "updated": updated.len(),
                 "imported_tickets": imported,
                 "updated_tickets": updated,
+                "warnings": warnings,
             })
         );
         return Ok(());
@@ -124,8 +129,9 @@ fn save_nickname(nick: &str, url: &str) -> Result<()> {
 }
 
 /// Set up a temp repo with the URL as a remote, pull git-meta data
-/// from it, and return all tickets found.
-fn fetch_remote_tickets(url: &str) -> Result<Vec<Ticket>> {
+/// from it, and return every ticket found (deleted ones too) with its
+/// operation log.
+fn fetch_remote_tickets(url: &str) -> Result<Vec<(Ticket, Vec<Op>)>> {
     let tmpdir = tempfile::tempdir().context("creating temp dir for fetch")?;
     let path = tmpdir.path();
 
@@ -138,7 +144,7 @@ fn fetch_remote_tickets(url: &str) -> Result<Vec<Ticket>> {
     // Configure a remote with git-meta refspecs so session.pull() works.
     git_at(path, &["remote", "add", "origin", url])?;
     let namespace = meta_namespace()?;
-    let fetch_refspec = format!("+refs/{namespace}/main:refs/{namespace}/remotes/main");
+    let fetch_refspec = ticgit_lib::keys::meta_fetch_refspec(&namespace);
     git_at(
         path,
         &["config", "--add", "remote.origin.fetch", &fetch_refspec],
@@ -156,7 +162,16 @@ fn fetch_remote_tickets(url: &str) -> Result<Vec<Ticket>> {
         .pull(Some("origin"))
         .context("pulling metadata from remote")?;
 
-    remote_store.list().context("listing tickets from remote")
+    let tickets = remote_store.list().context("listing tickets from remote")?;
+    tickets
+        .into_iter()
+        .map(|t| {
+            let ops = remote_store
+                .load_ops(&t.id)
+                .context("reading operations from remote")?;
+            Ok((t, ops))
+        })
+        .collect()
 }
 
 fn meta_namespace() -> Result<String> {

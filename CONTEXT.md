@@ -80,8 +80,8 @@ A git hook that runs a Sync before code is pushed, so tickets travel with the co
 _Avoid_: Auto-sync, pre-push script
 
 **Reindex**:
-Adding to the local index whatever the synced refs hold that it lacks. A Reindex never removes or rewrites what the index already has, so every Sync runs one after merging.
-_Avoid_: Rebuild, reset (both suggest replacing the index)
+Adding to the local index whatever the synced refs hold that it lacks. A Reindex never removes or rewrites what the index already has, so every Sync runs one after merging. The one wholesale replacement of the index is `ti reindex --reset`, which is guarded: it refuses while the index holds changes the remote lacks, unless forced (ADR 0003).
+_Avoid_: Rebuild, reset (both suggest replacing the index; "reset" names only the guarded `--reset`)
 
 **Stranded index**:
 A local index missing tickets that exist in the synced refs. It is healed by a Reindex, and is never confused with a Deletion.

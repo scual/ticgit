@@ -816,6 +816,85 @@ fn sync_json_emits_result_object() {
 }
 
 #[test]
+fn sync_markdown_summarises_the_sync() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "synced ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    let out = b
+        .ti()
+        .args(["sync", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let md = String::from_utf8(out).unwrap();
+    assert!(md.starts_with("## Sync\n"), "{md}");
+    assert!(md.contains("- Ref: `refs/meta/main`"), "{md}");
+    assert!(md.contains("- Pushed: 1 ticket(s)"), "{md}");
+    assert!(md.contains(&format!("- **{short}** synced ticket")), "{md}");
+    assert!(!md.contains("\x1b["), "markdown carries no ANSI color");
+}
+
+#[test]
+fn reindex_json_matches_the_schema_and_markdown_summarises_it() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    let repo = clone_of(&remote_url);
+    create_ticket(&repo, "indexed ticket");
+    repo.ti().arg("sync").assert().success();
+
+    let out = repo
+        .ti()
+        .args(["reindex", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("reindex json");
+    assert_eq!(
+        json,
+        serde_json::json!({ "tickets": 1, "fetched": true, "reset": false })
+    );
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let result = &schema["$defs"]["reindexResult"];
+    assert_eq!(result["additionalProperties"], false);
+    let documented: BTreeSet<String> = result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    assert!(schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "$ref": "#/$defs/reindexResult" })));
+
+    let out = repo
+        .ti()
+        .args(["reindex", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "## Reindex\n\n- Mode: additive\n- Fetched the meta remote: yes\n- Tickets: 1\n"
+    );
+}
+
+#[test]
 fn new_show_and_list_round_trip() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "first bug");
@@ -1425,7 +1504,7 @@ fn delete_unknown_id_is_atomic() {
 }
 
 #[test]
-fn delete_parent_keeps_its_sub_issues_linked() {
+fn delete_parent_keeps_its_sub_issues_under_it() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
@@ -1434,7 +1513,8 @@ fn delete_parent_keeps_its_sub_issues_linked() {
         .assert()
         .success();
     // Deletion is soft: the child survives, alive, still pointing at its
-    // (deleted) parent, so `ti undelete` restores the tree without relinking.
+    // (deleted) parent, so `ti undelete` brings the tree back without setting a
+    // Parent again.
     let t = show_json(&repo, &child);
     assert_eq!(t["parent"], parent.as_str());
     assert!(t["deleted"].is_null());
@@ -3198,6 +3278,73 @@ fn pull_applies_fork_parent_change_to_op_based_ticket() {
     assert_eq!(json["ok"], true);
 }
 
+/// A fork's Deletion reaches the pulling clone (the ticket arrives deleted,
+/// not live), and an edit the fork made to a ticket deleted locally is
+/// reported the way `ti sync` reports it.
+#[test]
+fn pull_carries_fork_deletions_and_warns_about_edits_on_deleted_tickets() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let gone = create_ticket(&a, "deleted on the fork");
+    let ours = create_ticket(&a, "deleted here");
+    let short: String = ours.chars().take(6).collect();
+    a.ti().arg("push").assert().success();
+
+    let b = TestRepo::new();
+    b.ti().arg("init").assert().success();
+    b.ti().args(["pull", &remote_url]).assert().success();
+
+    a.ti().args(["delete", &gone, "--yes"]).assert().success();
+    a.ti()
+        .args(["comment", "-t", &ours, "the fork kept working"])
+        .assert()
+        .success();
+    a.ti().arg("push").assert().success();
+    b.ti().args(["delete", &ours, "--yes"]).assert().success();
+
+    let out = b
+        .ti()
+        .args(["pull", &remote_url, "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("pull json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": ours, "count": 1 }])
+    );
+    assert!(show_json(&b, &gone)["deleted"].is_object());
+    assert!(!list_ids(&b, &[]).contains(&gone));
+    let hidden = show_json(&b, &ours);
+    assert!(hidden["deleted"].is_object());
+    assert_eq!(comment_bodies(&hidden), vec!["the fork kept working"]);
+
+    // The published schema documents exactly the keys `ti pull --json` emits.
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let pull_result = &schema["$defs"]["pullResult"];
+    assert_eq!(pull_result["additionalProperties"], false);
+    let documented: BTreeSet<String> = pull_result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    assert_eq!(
+        pull_result["properties"]["warnings"]["items"]["$ref"],
+        "#/$defs/syncWarning"
+    );
+}
+
 #[test]
 fn history_shows_readable_entries_without_raw_ops() {
     let repo = TestRepo::new();
@@ -4792,7 +4939,7 @@ fn delete_writes_no_set_changes_on_parent_or_dependency_tickets() {
 }
 
 #[test]
-fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
+fn undelete_brings_the_ticket_back_with_comments_tags_dependencies_and_sub_issues_intact() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
@@ -4824,9 +4971,9 @@ fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
         .get_output()
         .stdout
         .clone();
-    let restored: Value = serde_json::from_slice(&out).expect("undelete json");
-    assert_eq!(restored["id"], child.as_str());
-    assert!(restored["deleted"].is_null());
+    let undeleted: Value = serde_json::from_slice(&out).expect("undelete json");
+    assert_eq!(undeleted["id"], child.as_str());
+    assert!(undeleted["deleted"].is_null());
 
     let after = show_json(&repo, &child);
     assert_eq!(after, before);
@@ -5397,7 +5544,7 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         .assert()
         .success()
         .stderr(predicate::eq(format!(
-        "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
+        "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)\n"
     )));
     // The edits are kept on the hidden ticket.
     let hidden = show_json(&a, &id);
@@ -5430,7 +5577,7 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         .assert()
         .success()
         .stderr(predicate::eq(format!(
-            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)\n"
         )))
         .get_output()
         .stdout
@@ -5455,8 +5602,114 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         .assert()
         .success()
         .stderr(predicate::str::contains(format!(
-            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)"
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
         )));
+}
+
+/// A comment's time is the wall clock of the clone that wrote it, so a
+/// comment written before the Deletion but merged after it still landed on
+/// a deleted ticket: it is reported, like the tag written with it.
+#[test]
+fn sync_warns_about_edits_written_before_the_deletion_but_merged_after_it() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "doomed ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    // B edits first; A deletes later and syncs first.
+    b.ti()
+        .args(["comment", "-t", &id, "written before the delete"])
+        .assert()
+        .success();
+    b.ti().args(["tag", "-t", &id, "early"]).assert().success();
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 2 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 2 }])
+    );
+}
+
+/// An edit another clone pushes in the Race window reaches this clone through
+/// the push's merge-and-retry, not the pull, and is reported all the same.
+#[test]
+fn sync_warns_about_edits_merged_during_the_race_window_retry() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "doomed ticket");
+    let other = create_ticket(&a, "bystander");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+
+    // A's pre-push hook runs after A's pull: B, not yet aware of the
+    // Deletion, comments on the ticket and syncs inside that window.
+    let ti_bin = assert_cmd::cargo::cargo_bin("ti");
+    let fired = a.dir.path().join("hook-fired");
+    let hook = format!(
+        "#!/usr/bin/env bash\n\
+         [ -e '{fired}' ] && exit 0\n\
+         touch '{fired}'\n\
+         cd '{b_dir}'\n\
+         export TICGIT_STATE_FILE='{b_state}'\n\
+         '{ti}' comment -t {id} 'written in the race window' >/dev/null\n\
+         '{ti}' sync >/dev/null\n\
+         exit 0\n",
+        fired = fired.display(),
+        b_dir = b.dir.path().display(),
+        b_state = b.state_file.path().join("state.json").display(),
+        ti = ti_bin.display(),
+    );
+    executable_script(&a.dir.path().join(".git/hooks"), "pre-push", &hook);
+
+    a.ti()
+        .args(["priority", "1", "-t", &other])
+        .assert()
+        .success();
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    assert!(fired.exists(), "the race hook must have fired");
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["push_retries"], 1);
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 1 }])
+    );
 }
 
 // ---------------------------------------------------------------------------
