@@ -4988,3 +4988,36 @@ fn next_never_picks_a_deleted_ticket_or_deleted_sub_issue() {
     repo.ti().args(["close", &container]).assert().success();
     assert!(next_json(&repo)["next"].is_null());
 }
+
+#[test]
+fn stats_counts_leave_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "live open");
+    let closed = create_ticket(&repo, "live closed");
+    repo.ti().args(["close", "-t", &closed]).assert().success();
+    let gone_open = create_ticket(&repo, "deleted open");
+    let gone_closed = create_ticket(&repo, "deleted closed");
+    repo.ti()
+        .args(["close", "-t", &gone_closed])
+        .assert()
+        .success();
+    for id in [&gone_open, &gone_closed] {
+        repo.ti().args(["delete", id, "--yes"]).assert().success();
+    }
+
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 2, "{v}");
+    assert_eq!(v["open"], 1, "{v}");
+    assert_eq!(v["closed"], 1, "{v}");
+    assert_eq!(v["closed_7d"], 1, "{v}");
+    assert!(!v.to_string().contains("deleted open"), "{v}");
+
+    // Only deleted tickets left: stats reports none.
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "solo");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 0, "{v}");
+}

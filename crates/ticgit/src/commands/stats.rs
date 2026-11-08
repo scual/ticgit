@@ -35,17 +35,6 @@ const BG_MAGENTA: &str = "\x1b[45m";
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let tickets = store.list()?;
-    let total = tickets.len();
-
-    if total == 0 {
-        if args.json {
-            println!("{}", serde_json::json!({ "total": 0 }));
-        } else {
-            println!("No tickets.");
-        }
-        return Ok(());
-    }
-
     let closed_times = store.closed_times().unwrap_or_default();
     let nick_map = crate::render::build_nick_map(&store.list_users().unwrap_or_default());
     let stats = TicketStats::compute(&tickets, &closed_times, OffsetDateTime::now_utc(), |a| {
@@ -56,6 +45,17 @@ pub fn run(args: Args) -> Result<()> {
                 .to_string()
         })
     });
+    // Deleted tickets are not counted, so `total` is the live count.
+    let total = stats.total;
+
+    if total == 0 {
+        if args.json {
+            println!("{}", serde_json::json!({ "total": 0 }));
+        } else {
+            println!("No tickets.");
+        }
+        return Ok(());
+    }
     let short = |id: &uuid::Uuid| id.to_string().chars().take(6).collect::<String>();
     let recently_opened: Vec<(String, String)> = stats
         .recently_opened
