@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use proptest::prelude::*;
-use proptest::sample::Index;
 use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 use tempfile::TempDir;
 use ticgit_lib::{NewTicketOpts, OpKind, Session, TicketStore};
@@ -32,7 +31,7 @@ impl Remote {
 
     /// A fresh clone configured the way `ti init` configures one: `origin`
     /// points at the remote and is the git-meta remote.
-    fn clone(&self, email: &str) -> Clone {
+    fn new_clone(&self, email: &str) -> GitClone {
         let dir = tempfile::tempdir().expect("clone tempdir");
         let p = dir.path();
         git(p, &["init", "--quiet", "-b", "main"]);
@@ -59,7 +58,7 @@ impl Remote {
         );
         let session = Session::open(p.join(".git")).expect("session");
         let store = TicketStore::from_session(session).expect("store");
-        Clone {
+        GitClone {
             store,
             dir,
             remote: self.dir.path().to_owned(),
@@ -69,13 +68,13 @@ impl Remote {
 
 /// One clone: its store, the tempdir that keeps the repository alive, and
 /// the path of its remote.
-struct Clone {
+struct GitClone {
     store: TicketStore,
     dir: TempDir,
     remote: PathBuf,
 }
 
-impl Clone {
+impl GitClone {
     /// `ti sync`: pull, then push. Returns how many times the push merged
     /// and retried because the remote advanced after the pull.
     fn sync(&self) -> usize {
@@ -141,8 +140,8 @@ fn git(cwd: &Path, args: &[&str]) {
 #[test]
 fn two_clones_sync_through_a_bare_remote_regardless_of_cwd() {
     let remote = Remote::new();
-    let a = remote.clone("a@example.com");
-    let b = remote.clone("b@example.com");
+    let a = remote.new_clone("a@example.com");
+    let b = remote.new_clone("b@example.com");
 
     let t = a.store.create("shared", NewTicketOpts::default()).unwrap();
     a.store.add_comment(&t.id, "from a").unwrap();
@@ -177,20 +176,24 @@ impl Side {
     }
 }
 
-/// A local edit. Tickets are picked from the tickets the clone holds, so a
-/// pick means "some ticket this clone can see", whatever its id turned out to
-/// be.
+/// Picks one of the tickets a clone holds: the tickets it holds in creation
+/// order, indexed modulo their count. A pick means "some ticket this clone can
+/// see", whatever its id turned out to be; when the clone holds every ticket,
+/// `n` is the n-th ticket created.
+type Pick = u8;
+
+/// A local edit.
 #[derive(Debug, Clone)]
 enum Edit {
     Create,
-    Comment(Index),
-    Tag(Index, u8),
+    Comment(Pick),
+    Tag(Pick, u8),
     /// Make the first pick a Sub-issue of the second.
-    Subissue(Index, Index),
+    Subissue(Pick, Pick),
     /// The first pick depends on the second.
-    Depends(Index, Index),
-    Delete(Index),
-    Undelete(Index),
+    Depends(Pick, Pick),
+    Delete(Pick),
+    Undelete(Pick),
 }
 
 #[derive(Debug, Clone)]
@@ -209,12 +212,12 @@ fn side() -> impl Strategy<Value = Side> {
 fn edit() -> impl Strategy<Value = Edit> {
     prop_oneof![
         3 => Just(Edit::Create),
-        3 => any::<Index>().prop_map(Edit::Comment),
-        2 => (any::<Index>(), 0..3u8).prop_map(|(t, g)| Edit::Tag(t, g)),
-        2 => (any::<Index>(), any::<Index>()).prop_map(|(c, p)| Edit::Subissue(c, p)),
-        2 => (any::<Index>(), any::<Index>()).prop_map(|(t, d)| Edit::Depends(t, d)),
-        2 => any::<Index>().prop_map(Edit::Delete),
-        2 => any::<Index>().prop_map(Edit::Undelete),
+        3 => any::<Pick>().prop_map(Edit::Comment),
+        2 => (any::<Pick>(), 0..3u8).prop_map(|(t, g)| Edit::Tag(t, g)),
+        2 => (any::<Pick>(), any::<Pick>()).prop_map(|(c, p)| Edit::Subissue(c, p)),
+        2 => (any::<Pick>(), any::<Pick>()).prop_map(|(t, d)| Edit::Depends(t, d)),
+        2 => any::<Pick>().prop_map(Edit::Delete),
+        2 => any::<Pick>().prop_map(Edit::Undelete),
     ]
 }
 
@@ -284,13 +287,13 @@ impl Model {
 }
 
 /// The tickets `clone` holds, deleted ones included, in creation order.
-fn held(clone: &Clone, model: &Model) -> Vec<Uuid> {
+fn held(clone: &GitClone, model: &Model) -> Vec<Uuid> {
     let mut ids: Vec<Uuid> = clone.store.list().unwrap().iter().map(|t| t.id).collect();
     ids.sort_by_key(|id| model.rank(id));
     ids
 }
 
-fn record_ops(clone: &Clone, side: Side, id: Uuid, model: &mut Model) {
+fn record_ops(clone: &GitClone, side: Side, id: Uuid, model: &mut Model) {
     let ops = clone.store.load_ops(&id).unwrap();
     model.did[side.ix()]
         .ops
@@ -308,9 +311,12 @@ fn record_ops(clone: &Clone, side: Side, id: Uuid, model: &mut Model) {
 /// clones re-parenting the same ticket, or closing a cycle, concurrently is
 /// a conflict the merge does not resolve today (`ti verify --repair`,
 /// ticket dab3f8), not a lost operation.
-fn apply_edit(clone: &Clone, side: Side, edit: &Edit, model: &mut Model) -> bool {
+fn apply_edit(clone: &GitClone, side: Side, edit: &Edit, model: &mut Model) -> bool {
     let tickets = held(clone, model);
-    let pick = |ix: &Index| tickets.get(ix.index(tickets.len().max(1))).copied();
+    let pick = |n: &Pick| match tickets.len() {
+        0 => None,
+        len => Some(tickets[usize::from(*n) % len]),
+    };
     let store = &clone.store;
     let did = side.ix();
     match edit {
@@ -378,7 +384,7 @@ fn apply_edit(clone: &Clone, side: Side, edit: &Edit, model: &mut Model) -> bool
 }
 
 /// Remember which tickets `clone`'s index holds deleted right now.
-fn observe_deletions(clone: &Clone, side: Side, model: &mut Model) {
+fn observe_deletions(clone: &GitClone, side: Side, model: &mut Model) {
     for t in clone.store.list().unwrap() {
         if t.is_deleted() {
             model.seen_deleted[side.ix()].insert(t.id);
@@ -388,7 +394,7 @@ fn observe_deletions(clone: &Clone, side: Side, model: &mut Model) {
 
 /// NoLostLocalOp: every ticket, comment, tag, Sub-issue, Dependency and
 /// operation in `did` is in `clone`'s index.
-fn assert_holds(clone: &Clone, name: &str, did: &Did) {
+fn assert_holds(clone: &GitClone, name: &str, did: &Did) {
     let store = &clone.store;
     for id in &did.tickets {
         store
@@ -452,7 +458,12 @@ fn assert_holds(clone: &Clone, name: &str, did: &Did) {
 /// NoResurrection: a ticket `clone`'s index has held deleted is visible there
 /// only if an Undeletion is in its log, and one nobody undeleted stays
 /// deleted.
-fn assert_no_resurrection(clone: &Clone, name: &str, seen_deleted: &BTreeSet<Uuid>, model: &Model) {
+fn assert_no_resurrection(
+    clone: &GitClone,
+    name: &str,
+    seen_deleted: &BTreeSet<Uuid>,
+    model: &Model,
+) {
     for id in seen_deleted {
         let t = clone.store.load(id).unwrap();
         if t.is_deleted() {
@@ -473,7 +484,7 @@ fn assert_no_resurrection(clone: &Clone, name: &str, seen_deleted: &BTreeSet<Uui
 
 /// Check the invariants that hold in every state for the clone that just
 /// synced: it lost nothing it did, and resurrected nothing.
-fn check_clone(clone: &Clone, side: Side, model: &mut Model) {
+fn check_clone(clone: &GitClone, side: Side, model: &mut Model) {
     let name = format!("{side:?}");
     assert_holds(clone, &name, &model.did[side.ix()]);
     assert_no_resurrection(clone, &name, &model.seen_deleted[side.ix()], model);
@@ -485,7 +496,10 @@ fn check_clone(clone: &Clone, side: Side, model: &mut Model) {
 /// Returns the model, for callers that check what was exercised.
 fn run(steps: &[Step]) -> Model {
     let remote = Remote::new();
-    let clones = [remote.clone("a@example.com"), remote.clone("b@example.com")];
+    let clones = [
+        remote.new_clone("a@example.com"),
+        remote.new_clone("b@example.com"),
+    ];
     let mut model = Model::default();
 
     for step in steps {
@@ -604,4 +618,87 @@ fn random_edits_and_syncs_on_two_clones_keep_the_sync_invariants() {
             "no generated case exercised the Race window"
         );
     }
+}
+
+/// The motivating case, incident 215ee3, seeded by hand through the same
+/// runner and checks as the generated cases. One clone with unsynced local
+/// work syncs against a remote that holds the state of its previous Sync;
+/// nothing on the remote is newer. As in the incident, the local work adds to
+/// lists and sets the remote already holds: a second comment on a ticket with
+/// one, two new Sub-issues of a map ticket that has one, and Dependencies on
+/// tickets that have some. A ticket deleted before the Sync must stay deleted,
+/// and a comment on a ticket with none on the remote must stay too (it did in
+/// the incident).
+///
+/// It fails on the pre-fix code path (ti <= 0.4.2, `docs/spec/Sync_v0.tla`).
+/// There `delete_ticket` removed the ticket's keys, so the pull found a ticket
+/// in the remote tree with no local keys, took the index for stranded, and
+/// healed it by replacing the index with the remote tree, which rewrites
+/// every list and set key the remote holds. The first check after that pull,
+/// `check_clone` on A, trips NoLostLocalOp ("A lost comment ... on <ticket
+/// 2>"); the Sub-issues and Dependencies are lost the same way. Past that,
+/// NoResurrection trips: ticket 5 is visible again with no Undeletion in its
+/// log. This is the three-step TLC trace of `Sync_v0` (Delete, AddItem, Pull)
+/// with the incident's detail. Swapping the additive gain in
+/// `TicketStore::pull` for `reindex_reset` reproduces the NoLostLocalOp
+/// failure on today's code; NoResurrection needs the old key-removing delete
+/// as well, since a `del` operation is a key the remote lacks and survives
+/// the reset.
+#[test]
+fn incident_215ee3_local_work_survives_a_sync_against_a_stale_remote() {
+    use Edit::*;
+    use Side::A;
+    let steps = [
+        // State of the previous Sync.
+        Step::Edit(A, Create), // 0: the map
+        Step::Edit(A, Create), // 1: the map's old Sub-issue
+        Step::Edit(A, Subissue(1, 0)),
+        Step::Edit(A, Create), // 2: talked about
+        Step::Edit(A, Comment(2)),
+        Step::Edit(A, Create), // 3: blocker
+        Step::Edit(A, Create), // 4: dependent
+        Step::Edit(A, Depends(4, 3)),
+        Step::Edit(A, Create), // 5: deleted before the incident Sync
+        Step::Edit(A, Create), // 6: commented on locally only
+        Step::Sync(A, None),
+        // Unsynced local work.
+        Step::Edit(A, Comment(2)),
+        Step::Edit(A, Create), // 7: new Sub-issue of the map
+        Step::Edit(A, Create), // 8: new Sub-issue of the map
+        Step::Edit(A, Subissue(7, 0)),
+        Step::Edit(A, Subissue(8, 0)),
+        Step::Edit(A, Depends(2, 3)),
+        Step::Edit(A, Depends(4, 2)),
+        Step::Edit(A, Depends(7, 3)),
+        Step::Edit(A, Depends(8, 4)),
+        Step::Edit(A, Comment(6)),
+        Step::Edit(A, Delete(5)),
+        // The incident Sync.
+        Step::Sync(A, None),
+    ];
+    run(&steps);
+}
+
+/// The Race window, exercised for certain: B edits and syncs between A's pull
+/// and A's push, so each of A's pushes is rejected, merges and retries. The
+/// second race deletes the ticket A just commented on: the comment is kept on
+/// the deleted ticket, on both clones.
+#[test]
+fn edits_racing_a_sync_between_its_pull_and_push_are_kept() {
+    use Edit::*;
+    use Side::{A, B};
+    let steps = [
+        Step::Edit(A, Create),
+        Step::Sync(A, None),
+        Step::Sync(B, None),
+        Step::Edit(A, Tag(0, 0)),
+        Step::Sync(A, Some(Comment(0))),
+        Step::Edit(A, Comment(0)),
+        Step::Sync(A, Some(Delete(0))),
+    ];
+    let model = run(&steps);
+    assert_eq!(
+        model.raced_pushes, 2,
+        "both of A's pushes met a moved remote"
+    );
 }
