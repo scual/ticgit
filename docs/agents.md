@@ -49,6 +49,7 @@ ti list --search "title:timeout comments:retry" --markdown   # per-term scope
 ti list --search "\"title:timeout\"" --markdown   # quoted prefix = literal text, no scope
 ti list --status closed --markdown
 ti list --all --markdown
+ti list --deleted --markdown                     # only deleted tickets, any status
 ti mine --markdown
 ```
 
@@ -218,18 +219,42 @@ inherits its parent's `deferred`/`backlog` tag and open dependencies.
 
 ## Deleting
 
-`ti delete` removes tickets permanently. It takes explicit ids (it never falls
-back to the checked-out ticket) and prompts for confirmation unless `--yes` is
-passed. Deleting a parent orphans its sub-issues; pass `--recursive` to remove
-the whole subtree instead:
+`ti delete` writes a delete Operation to the ticket's log; it removes no keys.
+The ticket is hidden from `ti list` but keeps its history, comments, tags,
+Sub-issues and Dependencies, and no other ticket is changed. `ti delete` takes
+explicit ids (it never falls back to the checked-out ticket) and prompts for
+confirmation unless `--yes` is passed. `--recursive` also deletes the whole
+subtree of sub-issues; `--reason <text>` is recorded in the operation and shown
+by `ti history`.
 
 ```sh
 ti delete <id> --yes
 ti delete <parent-id> --recursive --yes
+ti list --deleted            # deleted tickets only
+ti show <id> --markdown      # still works; leads with a Deleted banner
+ti undelete <id>             # restore it, relations and comments intact
 ```
 
-Prefer closing (`ti close`) over deleting; delete only to discard tickets that
-should leave no history.
+- `ti show` on a deleted ticket exits 0 and shows who deleted it and when.
+  Every ticket object in `--json` output carries `deleted`: `{at, by}` for a
+  deleted ticket, `null` otherwise.
+- `ti checkout` refuses a deleted ticket; undelete it first.
+- Deleting a deleted ticket, or undeleting a live one, fails.
+- The Deletion syncs like any other operation and wins over edits made
+  concurrently on another clone: those edits are kept on the hidden ticket and
+  reappear with `ti undelete`.
+
+Prefer closing (`ti close`) over deleting; delete tickets that should not be in
+the backlog at all (duplicates of nothing, spam, mistakes).
+
+### Upgrade notes: deleted tickets on older binaries
+
+`ti` 0.4.2 and older do not know the delete Operation and skip it, so on a
+clone running an older binary a ticket deleted elsewhere still shows as alive
+(a "ghost") and can be edited or picked by `ti next`. Nothing is lost: the
+deletion is in the log and takes effect as soon as that clone upgrades.
+Upgrade every clone that shares tickets (`cargo install --path crates/ticgit
+--locked`, or the release binaries).
 
 ## Writeups
 
@@ -285,9 +310,10 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 > - **Pull self-heals.** If the remote holds tickets missing from your local
 >   index, the pull reindexes them instead of reporting "no new or updated
 >   tickets". Changes to tickets you already have are listed as updated.
-> - **Push refuses implicit deletion.** A push that would drop remote tickets
->   not removed by an explicit `ti delete` is rejected; pass `--allow-deletes`
->   to remove them on purpose.
+> - **Push refuses implicit deletion.** A push that would drop remote ticket
+>   keys is rejected; pass `--allow-deletes` to remove them on purpose. `ti
+>   delete` keeps keys (it writes a delete Operation), so it never trips this
+>   guard.
 > - **Backup before overwrite.** The prior remote tip is snapshotted to a local
 >   `refs/ticgit-backup/<ns>/` ref (newest 10 kept) before every overwriting push.
 > - **Verify gate.** A store that fails `ti verify` is not pushed; pass
@@ -404,5 +430,5 @@ ti review update
 - Mark blockers with `ti state blocked` and dependencies with `ti depends`.
 - Break large tickets into sub-issues with `ti subissue`.
 - Resolve tickets only after implementation and verification are complete.
-- Close tickets with `ti close`; reach for `ti delete` only to discard a ticket
-  that should leave no trace, and use `--recursive` so sub-issues are not orphaned.
+- Close tickets with `ti close`; reach for `ti delete` only for tickets that
+  should leave the backlog entirely. It is reversible with `ti undelete`.
