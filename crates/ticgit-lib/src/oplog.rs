@@ -136,7 +136,9 @@ impl OpKind {
         match self {
             OpKind::Create { fields } | OpKind::SetField { fields } => json!({ "fields": fields }),
             OpKind::ClearField { fields } => json!({ "fields": fields }),
-            OpKind::Delete { reason: Some(reason) } => json!({ "reason": reason }),
+            OpKind::Delete {
+                reason: Some(reason),
+            } => json!({ "reason": reason }),
             OpKind::Delete { reason: None } | OpKind::Undelete => json!({}),
         }
     }

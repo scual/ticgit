@@ -150,12 +150,11 @@ pub fn run(args: Args) -> Result<()> {
         args
     };
 
-    let (status, state) =
-        resolve_base_lifecycle(
-            args.status.as_deref(),
-            args.state.as_deref(),
-            args.all || args.deleted,
-        )?;
+    let (status, state) = resolve_base_lifecycle(
+        args.status.as_deref(),
+        args.state.as_deref(),
+        args.all || args.deleted,
+    )?;
     let order = match args.order.as_deref() {
         Some(spec) => Some(
             SortOrder::parse(spec).ok_or_else(|| anyhow::anyhow!("unknown sort order `{spec}`"))?,

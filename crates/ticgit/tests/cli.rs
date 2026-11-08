@@ -508,7 +508,10 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
     repo.ti().args(["delete", &id, "--yes"]).assert().success();
     let deleted = show_json(&repo, &id)["deleted"].clone();
     let deleted_keys: BTreeSet<_> = deleted.as_object().unwrap().keys().cloned().collect();
-    assert_eq!(deleted_keys, BTreeSet::from(["at".to_string(), "by".to_string()]));
+    assert_eq!(
+        deleted_keys,
+        BTreeSet::from(["at".to_string(), "by".to_string()])
+    );
 }
 
 #[test]
@@ -4610,7 +4613,10 @@ fn deleted_ticket_is_hidden_from_list_and_list_deleted_shows_only_it() {
     let repo = TestRepo::new();
     let doomed = create_ticket(&repo, "doomed");
     let alive = create_ticket(&repo, "alive");
-    repo.ti().args(["delete", &doomed, "--yes"]).assert().success();
+    repo.ti()
+        .args(["delete", &doomed, "--yes"])
+        .assert()
+        .success();
 
     assert_eq!(list_ids(&repo, &[]), BTreeSet::from([alive.clone()]));
     assert_eq!(list_ids(&repo, &["--all"]), BTreeSet::from([alive]));
@@ -4670,7 +4676,10 @@ fn show_on_deleted_ticket_exits_zero_with_a_deleted_banner() {
     let json = show_json(&repo, &id);
     assert_eq!(json["deleted"]["by"], "tester@example.com");
     let at = json["deleted"]["at"].as_str().expect("deleted.at string");
-    assert!(at.contains('T') && at.len() >= 20, "rfc3339 timestamp: {at}");
+    assert!(
+        at.contains('T') && at.len() >= 20,
+        "rfc3339 timestamp: {at}"
+    );
 }
 
 #[test]
@@ -4729,7 +4738,10 @@ fn delete_writes_no_set_changes_on_parent_or_dependency_tickets() {
         .map(|id| show_json(&repo, id))
         .collect();
 
-    repo.ti().args(["delete", &child, "--yes"]).assert().success();
+    repo.ti()
+        .args(["delete", &child, "--yes"])
+        .assert()
+        .success();
 
     let after: Vec<Value> = [&parent, &blocker, &dependent]
         .iter()
@@ -4763,7 +4775,10 @@ fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
         .success();
     let before = show_json(&repo, &child);
 
-    repo.ti().args(["delete", &child, "--yes"]).assert().success();
+    repo.ti()
+        .args(["delete", &child, "--yes"])
+        .assert()
+        .success();
     let out = repo
         .ti()
         .args(["undelete", &child, "--json"])
