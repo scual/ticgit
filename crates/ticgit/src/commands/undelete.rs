@@ -6,15 +6,15 @@ use crate::render;
 
 #[derive(Debug, Parser)]
 pub struct Args {
-    /// Id (or unique prefix) of the deleted ticket to restore.
+    /// Id (or unique prefix) of the deleted ticket to bring back.
     #[arg(value_name = "TICKET")]
     pub ticket: String,
 
-    /// Output the restored ticket as JSON.
+    /// Output the undeleted ticket as JSON.
     #[arg(long = "json")]
     pub json: bool,
 
-    /// Output the restored ticket as Markdown.
+    /// Output the undeleted ticket as Markdown.
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
 }

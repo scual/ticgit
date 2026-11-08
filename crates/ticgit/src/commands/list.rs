@@ -70,7 +70,7 @@ pub struct Args {
     pub parent: Option<String>,
 
     /// Show only deleted tickets (hidden by default), in any status and
-    /// including sub-issues. Restore one with `ti undelete <id>`.
+    /// including sub-issues. Bring one back with `ti undelete <id>`.
     #[arg(long = "deleted")]
     pub deleted: bool,
 

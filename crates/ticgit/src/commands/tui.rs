@@ -3554,8 +3554,9 @@ impl App {
             .unwrap_or_else(|| "<unknown issue>".to_string());
         let label = truncate_display(&label, usize::from(area.width).saturating_sub(8));
         // Deletion is an operation (ADR 0003): nothing is removed and no
-        // relation changes, so `ti undelete` restores the issue exactly.
-        let relationship_note = "It is hidden but kept; `ti undelete` restores it.";
+        // Dependency or Sub-issue changes, so `ti undelete` brings the issue
+        // back exactly.
+        let relationship_note = "It is hidden but kept; `ti undelete` brings it back.";
         let lines = vec![
             Line::from(Span::styled(
                 format!("Delete issue `{label}`?"),

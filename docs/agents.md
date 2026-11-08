@@ -230,8 +230,8 @@ inherits its parent's `deferred`/`backlog` tag and open dependencies.
 The ticket is hidden from `ti list` (and its search, filters and saved views),
 `ti next`, `ti recent`, `ti stats`, `ti deps`, its parent's Sub-issues and the
 TUI, but keeps its history, comments, tags, Sub-issues and Dependencies, and no
-other ticket is changed. Undeleting restores it everywhere with no extra
-writes, because no link was removed. `ti delete` takes
+other ticket is changed. Undeleting brings it back everywhere with no extra
+writes, because no Dependency or Sub-issue was removed. `ti delete` takes
 explicit ids (it never falls back to the checked-out ticket) and prompts for
 confirmation unless `--yes` is passed. `--recursive` also deletes the whole
 subtree of sub-issues; `--reason <text>` is recorded in the operation and shown
@@ -242,7 +242,7 @@ ti delete <id> --yes
 ti delete <parent-id> --recursive --yes
 ti list --deleted            # deleted tickets only
 ti show <id> --markdown      # still works; leads with a Deleted banner
-ti undelete <id>             # restore it, relations and comments intact
+ti undelete <id>             # bring it back, Dependencies, Sub-issues and comments intact
 ```
 
 - `ti show` on a deleted ticket exits 0 and shows who deleted it and when.
@@ -253,14 +253,15 @@ ti undelete <id>             # restore it, relations and comments intact
 - The Deletion syncs like any other operation and wins over edits made
   concurrently on another clone: those edits are kept on the hidden ticket and
   reappear with `ti undelete`.
-- When a sync brings in such edits (operations, comments or set members newer
-  than the delete), it warns once per ticket on stderr and exits 0:
+- When a sync (or a `ti pull` from a fork) brings in such edits (operations
+  that follow the delete operation in Lamport order, comments, set members or
+  custom fields), it warns once per ticket on stderr and exits 0:
 
   ```
-  warning: 2 edit(s) landed on deleted ticket 1a2b3c (ti undelete 1a2b3c to restore)
+  warning: 2 edit(s) landed on deleted ticket 1a2b3c (ti undelete 1a2b3c to bring it back)
   ```
 
-  `ti sync --json` carries the same in `warnings`:
+  `ti sync --json` and `ti pull --json` carry the same in `warnings`:
   `[{"kind": "edit-on-deleted", "ticket": "<uuid>", "count": 2}]` (empty array
   when nothing landed). Look at the ticket with `ti show <id>` and decide:
   `ti undelete` if the edits mean it is still wanted, otherwise leave it
@@ -356,7 +357,7 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 > - **Edits on deleted tickets are reported.** Edits another clone made to a
 >   ticket you deleted are kept on the hidden ticket, and the sync prints
 >   `warning: N edit(s) landed on deleted ticket <short> (ti undelete <short>
->   to restore)`; `--json` lists them under `warnings`.
+>   to bring it back)`; `--json` lists them under `warnings`.
 >
 > **Invariant:** a ticket leaves the remote only through an explicit deletion,
 > never as a side effect of serializing an incomplete local store.

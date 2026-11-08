@@ -170,7 +170,7 @@
           }
         },
         "deleted": {
-          "description": "The ticket's Deletion: who deleted it and when, or `null` for a live ticket. Emitted on every ticket object; additive and optional so output from ti <= 0.4.2 (which has no Deletion) still validates. Deleted tickets are hidden from `ti list` unless `--deleted` is passed; `ti undelete` restores them.",
+          "description": "The ticket's Deletion: who deleted it and when, or `null` for a live ticket. Emitted on every ticket object; additive and optional so output from ti <= 0.4.2 (which has no Deletion) still validates. Deleted tickets are hidden from `ti list` unless `--deleted` is passed; `ti undelete` brings them back.",
           "oneOf": [
             {
               "type": "null"

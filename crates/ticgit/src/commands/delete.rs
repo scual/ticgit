@@ -112,7 +112,7 @@ pub fn run(args: Args) -> Result<()> {
     for t in &deleted {
         println!("  {} — {}", t.short_id(), t.title);
     }
-    println!("Restore with `ti undelete <id>`.");
+    println!("Bring back with `ti undelete <id>`.");
     Ok(())
 }
 

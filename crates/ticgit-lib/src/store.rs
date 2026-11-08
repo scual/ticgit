@@ -793,7 +793,7 @@ impl TicketStore {
     /// Delete a ticket by appending a `del` operation (ADR 0003). Soft: the
     /// ticket keeps every key, its history, comments, Sub-issues and
     /// Dependencies, and no other ticket is touched, so [`Self::undelete_ticket`]
-    /// restores it exactly. Fails with [`Error::AlreadyDeleted`] when it is
+    /// brings it back exactly. Fails with [`Error::AlreadyDeleted`] when it is
     /// already deleted (no op is written).
     pub fn delete_ticket(&self, id: &Uuid, reason: Option<&str>) -> Result<()> {
         if self.load(id)?.is_deleted() {
@@ -4622,7 +4622,7 @@ mod tests {
     }
 
     #[test]
-    fn undelete_ticket_restores_and_both_refuse_a_no_op() {
+    fn undelete_ticket_brings_it_back_and_both_refuse_a_no_op() {
         let (store, _td) = test_store();
         let t = store.create("t", NewTicketOpts::default()).unwrap();
         assert!(matches!(

@@ -1434,7 +1434,7 @@ fn delete_parent_keeps_its_sub_issues_linked() {
         .assert()
         .success();
     // Deletion is soft: the child survives, alive, still pointing at its
-    // (deleted) parent, so `ti undelete` restores the tree without relinking.
+    // (deleted) parent, so `ti undelete` brings the tree back without relinking.
     let t = show_json(&repo, &child);
     assert_eq!(t["parent"], parent.as_str());
     assert!(t["deleted"].is_null());
@@ -4859,7 +4859,7 @@ fn delete_writes_no_set_changes_on_parent_or_dependency_tickets() {
 }
 
 #[test]
-fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
+fn undelete_brings_the_ticket_back_with_comments_tags_dependencies_and_sub_issues_intact() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
@@ -4891,9 +4891,9 @@ fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
         .get_output()
         .stdout
         .clone();
-    let restored: Value = serde_json::from_slice(&out).expect("undelete json");
-    assert_eq!(restored["id"], child.as_str());
-    assert!(restored["deleted"].is_null());
+    let undeleted: Value = serde_json::from_slice(&out).expect("undelete json");
+    assert_eq!(undeleted["id"], child.as_str());
+    assert!(undeleted["deleted"].is_null());
 
     let after = show_json(&repo, &child);
     assert_eq!(after, before);
@@ -5464,7 +5464,7 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         .assert()
         .success()
         .stderr(predicate::eq(format!(
-        "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
+        "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)\n"
     )));
     // The edits are kept on the hidden ticket.
     let hidden = show_json(&a, &id);
@@ -5497,7 +5497,7 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         .assert()
         .success()
         .stderr(predicate::eq(format!(
-            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)\n"
         )))
         .get_output()
         .stdout
@@ -5522,7 +5522,7 @@ fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
         .assert()
         .success()
         .stderr(predicate::str::contains(format!(
-            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)"
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
         )));
 }
 

@@ -34,7 +34,7 @@ use crate::commands;
   state         Change a ticket's lifecycle status/state
   close         Close a ticket (shorthand for state resolved)
   delete        Delete ticket(s) (hidden; reversible)
-  undelete      Restore a deleted ticket
+  undelete      Bring back a deleted ticket
 
 \x1b[1;36mTicket Fields:\x1b[0m
   tag        Add or remove a tag
@@ -169,10 +169,10 @@ pub enum Command {
 
     /// Delete one or more tickets. Deletion is an operation: the ticket is
     /// hidden from `ti list` but keeps its comments, Sub-issues and
-    /// Dependencies, and `ti undelete` restores it.
+    /// Dependencies, and `ti undelete` brings it back.
     Delete(commands::delete::Args),
 
-    /// Restore a deleted ticket.
+    /// Bring back a deleted ticket.
     Undelete(commands::undelete::Args),
 
     // -- Ticket fields ----------------------------------------------------

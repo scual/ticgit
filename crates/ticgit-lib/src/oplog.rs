@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn undelete_after_delete_restores_the_ticket() {
+    fn undelete_after_delete_brings_the_ticket_back() {
         let ops = [set_field(0, "title", "t"), del(1), undel(2)];
         assert!(project_deletion(&ops).is_none());
     }

@@ -68,7 +68,7 @@ ti close <id>                # resolve (id positional or -t); records closed_by
 ti delete <id> [<id>...] --yes          # delete (positional ids); hidden, reversible
 ti delete <parent> --recursive --yes    # also delete the whole sub-issue subtree
 ti list --deleted                       # only deleted tickets
-ti undelete <id>                        # restore a deleted ticket
+ti undelete <id>                        # bring back a deleted ticket
 ```
 `ti delete` requires explicit id(s) (no default-to-current) and prompts unless
 `--yes`; `--json`/`--markdown` and non-interactive shells require `--yes`. It writes

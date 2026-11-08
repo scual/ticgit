@@ -709,7 +709,7 @@ pub fn ticket_detail(
             &ansi(
                 ANSI_RED,
                 &format!(
-                    "{} ({})  by {}  (hidden; `ti undelete {}` restores it)",
+                    "{} ({})  by {}  (hidden; `ti undelete {}` brings it back)",
                     friendly_date(d.at),
                     relative_time(d.at, OffsetDateTime::now_utc()),
                     display_name(&d.by, nicks),
@@ -983,7 +983,7 @@ fn render_template(template: &str, values: &[(&str, String)]) -> String {
 fn deleted_banner_markdown(t: &Ticket) -> String {
     match &t.deleted {
         Some(d) => format!(
-            "> **Deleted** {} ({}) by {}. Hidden from `ti list`; `ti undelete {}` restores it.\n\n",
+            "> **Deleted** {} ({}) by {}. Hidden from `ti list`; `ti undelete {}` brings it back.\n\n",
             markdown_inline(&friendly_date(d.at)),
             code_span(&d.at.format(&Rfc3339).unwrap_or_default()),
             markdown_inline(&d.by),
@@ -1183,7 +1183,7 @@ fn ticket_next_commands(t: &Ticket) -> String {
     let id = t.short_id();
     if t.is_deleted() {
         return format!(
-            "- `ti undelete {id}` to restore this ticket.\n- `ti show {id} --markdown` to refresh this ticket."
+            "- `ti undelete {id}` to bring this ticket back.\n- `ti show {id} --markdown` to refresh this ticket."
         );
     }
     let mut commands = vec![

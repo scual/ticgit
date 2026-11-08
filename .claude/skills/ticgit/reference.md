@@ -176,8 +176,8 @@ Shorthand for `ti state resolved`; records the current user as `closed_by`.
                            `deleted: {at, by}`. Both require --yes.
 ```
 Writes a delete operation per ticket; removes no keys and changes no other ticket,
-so comments, tags, Sub-issues and Dependencies survive and `ti undelete` restores
-it exactly. Deleted tickets are hidden from `ti list` (see `--deleted`); `ti show`
+so comments, tags, Sub-issues and Dependencies survive and `ti undelete` brings
+it back exactly. Deleted tickets are hidden from `ti list` (see `--deleted`); `ti show`
 still works (exit 0, Deleted banner). Resolves every id first — if any is
 unknown/ambiguous/already deleted the whole batch aborts and nothing is deleted.
 Without `--recursive`, a deleted parent's sub-issues stay alive and keep their
@@ -186,10 +186,10 @@ and non-interactive shells **require `--yes`** (they error instead of prompting)
 Clears the checked-out pointer if you delete the current ticket. ti <= 0.4.2 skips
 delete operations and shows such tickets as alive; upgrade every clone.
 
-### `ti undelete` — restore a deleted ticket
+### `ti undelete` — bring back a deleted ticket
 ```
 <TICKET>                   Id/prefix of a deleted ticket (REQUIRED, POSITIONAL).
-    --json / --markdown    Output the restored ticket object.
+    --json / --markdown    Output the undeleted ticket object.
 ```
 Writes an undelete operation. Fails (non-zero) if the ticket is not deleted.
 
@@ -377,10 +377,11 @@ with code: any `git fetch`/`pull`/`push` should be paired with a `ti sync`.
 -r, --remote <REMOTE>      Remote to sync. Default: git-meta's first meta remote.
     --json                 Result object (schema `syncResult`).
 ```
-If the pull brought in operations, comments or set members newer than the
-delete of a ticket deleted locally, sync prints one stderr line per ticket,
+If the sync merged edits into a ticket deleted locally before it (operations
+that follow the delete operation in Lamport order, comments, set members or
+custom fields), it prints one stderr line per ticket,
 `warning: N edit(s) landed on deleted ticket <short> (ti undelete <short> to
-restore)`, and exits 0. `--json` carries them as `warnings: [{"kind":
+bring it back)`, and exits 0. `--json` carries them as `warnings: [{"kind":
 "edit-on-deleted", "ticket": "<uuid>", "count": N}]` (always present, empty
 when none).
 

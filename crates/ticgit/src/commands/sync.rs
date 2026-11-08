@@ -136,7 +136,7 @@ pub(crate) fn print_sync_warnings(warnings: &[SyncWarning]) {
             SyncWarning::EditOnDeleted { ticket, count } => {
                 let short: String = ticket.to_string().chars().take(6).collect();
                 eprintln!(
-                    "warning: {count} edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)"
+                    "warning: {count} edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
                 );
             }
         }
