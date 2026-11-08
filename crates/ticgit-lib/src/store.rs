@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::keys;
+use crate::meta_tree;
 use crate::oplog::{project_deletion, Op, OpKind};
 use crate::review::{
     format_review_revision, parse_review_revision_change, CommitReviewStatus, NewReviewOpts,
@@ -179,45 +180,6 @@ struct GainOutcome {
 /// Current time in milliseconds, git-meta's timestamp unit.
 fn now_millis() -> i64 {
     i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
-}
-
-/// Collect every key directory under a ticket's serialized tree as
-/// `(key segments below the ticket, directory oid)`. A directory is a key when
-/// it holds a value marker (`__value`, `__list`, `__set`); any other
-/// subdirectory, except git-meta's own `__`-prefixed ones, is a further key
-/// segment. Reads trees only, never blobs.
-fn collect_key_dirs(
-    repo: &gix::Repository,
-    dir: gix::ObjectId,
-    segments: &mut Vec<String>,
-    out: &mut Vec<(Vec<String>, gix::ObjectId)>,
-) -> Result<()> {
-    use gix::bstr::ByteSlice;
-
-    let tree = repo
-        .find_tree(dir)
-        .map_err(|e| Error::InvalidValue(format!("reading ticket tree: {e}")))?;
-    let mut is_key = false;
-    let mut children = Vec::new();
-    for entry in tree.iter() {
-        let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
-        let name = entry.filename().to_str_lossy().to_string();
-        match name.as_str() {
-            "__value" | "__list" | "__set" => is_key = true,
-            _ if name.starts_with("__") => {}
-            _ if entry.mode().is_tree() => children.push((name, entry.object_id())),
-            _ => {}
-        }
-    }
-    if is_key && !segments.is_empty() {
-        out.push((segments.clone(), dir));
-    }
-    for (name, oid) in children {
-        segments.push(name);
-        collect_key_dirs(repo, oid, segments, out)?;
-        segments.pop();
-    }
-    Ok(())
 }
 
 /// One ticket's stored keys as read by [`TicketStore::ticket_records`]: its
@@ -2694,30 +2656,10 @@ impl TicketStore {
     /// `ref_name`. Returns an empty set when the ref — or that subtree — does
     /// not exist yet (e.g. a remote that has never received tickets).
     fn ticket_ids_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
-        use gix::bstr::ByteSlice;
-
-        let repo = self.session.repo();
-        let spec = format!("{ref_name}:{}", keys::tickets_tree_path());
-        let tree = match repo.rev_parse_single(spec.as_bytes()) {
-            Ok(id) => id
-                .object()
-                .map_err(|e| Error::InvalidValue(format!("reading {ref_name}: {e}")))?
-                .into_tree(),
-            // The ref or the tickets subtree is absent.
-            Err(_) => return Ok(BTreeSet::new()),
-        };
-
-        let mut ids = BTreeSet::new();
-        for entry in tree.iter() {
-            let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
-            if !entry.mode().is_tree() {
-                continue;
-            }
-            if let Ok(id) = Uuid::parse_str(&entry.filename().to_str_lossy()) {
-                ids.insert(id);
-            }
-        }
-        Ok(ids)
+        Ok(meta_tree::ticket_dirs(self.session.repo(), ref_name)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
     }
 
     /// Additive reindex: gain from the fetched remote tracking refs
@@ -2820,19 +2762,13 @@ impl TicketStore {
     fn gain_from_ref(&self, ref_name: &str) -> Result<GainOutcome> {
         use git_meta_lib::tree::format::parse_tree;
         use git_meta_lib::tree::model::ParsedTree;
-        use gix::bstr::ByteSlice;
 
         let mut outcome = GainOutcome::default();
         let repo = self.session.repo();
-        let tickets_path = keys::tickets_tree_path();
-        let spec = format!("{ref_name}:{tickets_path}");
-        let Ok(tickets_tree) = repo.rev_parse_single(spec.as_bytes()) else {
+        let ticket_dirs = meta_tree::ticket_dirs(repo, ref_name)?;
+        if ticket_dirs.is_empty() {
             return Ok(outcome); // no such ref, or no tickets in it
-        };
-        let tickets_tree = tickets_tree
-            .object()
-            .map_err(|e| Error::InvalidValue(format!("reading {ref_name}: {e}")))?
-            .into_tree();
+        }
 
         let held: BTreeSet<String> = self
             .project_handle()
@@ -2845,20 +2781,9 @@ impl TicketStore {
             .filter_map(|k| keys::parse_ticket_field(k).map(|(id, _)| id))
             .collect();
 
-        let mut ticket_dirs = Vec::new();
-        for entry in tickets_tree.iter() {
-            let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
-            if !entry.mode().is_tree() {
-                continue;
-            }
-            if let Ok(id) = Uuid::parse_str(&entry.filename().to_str_lossy()) {
-                ticket_dirs.push((id, entry.object_id()));
-            }
-        }
-
         for (id, dir) in ticket_dirs {
             let mut key_dirs = Vec::new();
-            collect_key_dirs(repo, dir, &mut Vec::new(), &mut key_dirs)?;
+            meta_tree::collect_key_dirs(repo, dir, &mut Vec::new(), &mut key_dirs)?;
 
             // Read every wanted key before applying any, so a ticket with an
             // unreadable blob is skipped whole rather than half-gained.

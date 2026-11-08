@@ -48,6 +48,7 @@
 pub mod error;
 pub mod history;
 pub mod keys;
+mod meta_tree;
 pub mod oplog;
 pub mod query;
 pub mod remote_state;
