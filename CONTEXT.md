@@ -47,6 +47,14 @@ _Avoid_: Stage, phase
 An open State set by hand, meaning work is stalled for any reason, including ones outside the tracker. Unrelated to Dependency: a Dependency never sets it, and a ticket with an unfinished Dependency need not be Blocked.
 _Avoid_: Using "blocked" for a ticket that merely has an unfinished Dependency
 
+**Deletion**:
+Marking a ticket deleted with an explicit operation. A deleted ticket is hidden, keeps its history, Dependencies and Sub-issues, and stays deleted on every clone until an Undeletion; edits that arrive for it are kept and reported. A Dependency on a deleted ticket is ignored.
+_Avoid_: Remove, purge, drop (those mean leaving the store entirely)
+
+**Undeletion**:
+The operation that makes a deleted ticket visible again, history, Dependencies and Sub-issues intact.
+_Avoid_: Restore (reserve for backups), recover
+
 ### Writeups
 
 **Writeup**:
@@ -60,7 +68,7 @@ _Avoid_: Convert, publish
 ### Syncing
 
 **Sync**:
-Pulling the remote's tickets, merging them into the local store, then pushing the merged store back. A Sync that reports success guarantees every local operation is on the remote; a Sync never overwrites remote operations it has not merged.
+Pulling the remote's tickets, merging them into the local store, then pushing the merged store back. A Sync that reports success guarantees every local operation is on the remote; a Sync never overwrites remote operations it has not merged, and never drops a local operation, comment, tag, Dependency or Sub-issue that has not yet been pushed.
 _Avoid_: Upload, publish, force push
 
 **Race window**:
@@ -70,6 +78,14 @@ _Avoid_: Conflict (operations never conflict, they union), collision
 **Sync hook**:
 A git hook that runs a Sync before code is pushed, so tickets travel with the code. It only acts when a branch is pushed to the remote that tickets sync with. A failed Sync only warns, except a Sync that lost the Race window, which stops the code push until it is retried.
 _Avoid_: Auto-sync, pre-push script
+
+**Reindex**:
+Adding to the local index whatever the synced refs hold that it lacks. A Reindex never removes or rewrites what the index already has, so every Sync runs one after merging.
+_Avoid_: Rebuild, reset (both suggest replacing the index)
+
+**Stranded index**:
+A local index missing tickets that exist in the synced refs. It is healed by a Reindex, and is never confused with a Deletion.
+_Avoid_: Corrupt store, out of sync
 
 ### Working context
 
@@ -115,7 +131,7 @@ The append-only record of operations that produce a ticket's scalar fields (titl
 _Avoid_: Mutable field, last-write-wins, overwrite
 
 **Operation (op)**:
-One immutable change in the log — create, set a field, or clear a field — with a content-derived id (SHA-256), a Lamport clock, and an optional SSH signature. Older clients skip operation kinds they don't understand.
+One immutable change in the log — create, set a field, clear a field, delete, or undelete — with a content-derived id (SHA-256), a Lamport clock, and an optional SSH signature. Older clients skip operation kinds they don't understand.
 _Avoid_: Edit record, patch, event (reserve "event" for unrelated uses)
 
 **Signing**:

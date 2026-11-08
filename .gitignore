@@ -5,3 +5,6 @@ pkg/
 target/
 .DS_Store
 .idea/
+docs/spec/states/
+docs/spec/*.jar
+docs/spec/*_TTrace_*
