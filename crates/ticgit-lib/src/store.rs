@@ -2552,8 +2552,7 @@ impl TicketStore {
     /// `git push <remote> +<backup-ref>:refs/{ns}/main && ti reindex`.
     fn snapshot_remote_ref(&self) -> Result<()> {
         let ns = self.session.namespace().to_string();
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
 
         let Some(oid) = repo
             .find_reference(&format!("refs/{ns}/remotes/main"))
@@ -2567,7 +2566,7 @@ impl TicketStore {
         let backup_root = self.backup_root();
         // Don't let no-op pushes pile up identical snapshots.
         if self
-            .backup_refs(&repo, &backup_root)?
+            .backup_refs(repo, &backup_root)?
             .iter()
             .any(|(_, o)| *o == oid)
         {
@@ -2585,7 +2584,7 @@ impl TicketStore {
         )
         .map_err(|e| Error::InvalidValue(format!("writing backup ref: {e}")))?;
 
-        self.prune_backups(&repo, &backup_root)?;
+        self.prune_backups(repo, &backup_root)?;
         Ok(())
     }
 
@@ -2655,8 +2654,7 @@ impl TicketStore {
     fn ticket_ids_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
         use gix::bstr::ByteSlice;
 
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
         let spec = format!("{ref_name}:{}", keys::tickets_tree_path());
         let tree = match repo.rev_parse_single(spec.as_bytes()) {
             Ok(id) => id
@@ -2905,8 +2903,7 @@ impl TicketStore {
     /// silently dropping tickets.
     pub fn reindex_reset(&self) -> Result<usize> {
         let ns = self.session.namespace().to_string();
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
 
         // Guard: refuse to drop the local ref unless there is a tracking ref to
         // rebuild from, otherwise we would strand the only serialized copy.
@@ -3005,8 +3002,7 @@ impl TicketStore {
             .session
             .resolve_remote(None)
             .map_err(|e| Error::InvalidValue(format!("no meta remote to backfill from: {e}")))?;
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
         let refspec = format!("+refs/{ns}/main:refs/{ns}/remotes/main");
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -3046,8 +3042,7 @@ impl TicketStore {
 
         // Ids backed by any meta ref: the local serialization ref plus every
         // remote tracking ref under refs/{ns}/.
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
         let prefix = format!("refs/{ns}/");
         let ref_names: Vec<String> = repo
             .references()
