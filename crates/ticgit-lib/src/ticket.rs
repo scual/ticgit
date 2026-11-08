@@ -244,8 +244,8 @@ pub struct Ticket {
 }
 
 impl Ticket {
-    /// The one deletion predicate: a deleted ticket keeps its keys, history
-    /// and relations but is hidden from default views. Every consumer that
+    /// The one deletion predicate: a deleted ticket keeps its keys, history,
+    /// Dependencies and Sub-issues but is hidden from default views. Every consumer that
     /// hides deleted tickets asks this, never `deleted` directly.
     #[must_use]
     pub fn is_deleted(&self) -> bool {

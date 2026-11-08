@@ -4592,7 +4592,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_ticket_is_soft_and_leaves_relations_on_both_sides() {
+    fn delete_ticket_is_soft_and_leaves_dependencies_and_sub_issues_on_both_sides() {
         let (store, _td) = test_store();
         let parent = store.create("parent", NewTicketOpts::default()).unwrap();
         let child = store

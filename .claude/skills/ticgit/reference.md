@@ -181,7 +181,7 @@ it back exactly. Deleted tickets are hidden from `ti list` (see `--deleted`); `t
 still works (exit 0, Deleted banner). Resolves every id first — if any is
 unknown/ambiguous/already deleted the whole batch aborts and nothing is deleted.
 Without `--recursive`, a deleted parent's sub-issues stay alive and keep their
-parent link. Prompts `[y/N]` unless `--yes`; machine mode (`--json`/`--markdown`)
+Parent. Prompts `[y/N]` unless `--yes`; machine mode (`--json`/`--markdown`)
 and non-interactive shells **require `--yes`** (they error instead of prompting).
 Clears the checked-out pointer if you delete the current ticket. ti <= 0.4.2 skips
 delete operations and shows such tickets as alive; upgrade every clone.

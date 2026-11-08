@@ -1425,7 +1425,7 @@ fn delete_unknown_id_is_atomic() {
 }
 
 #[test]
-fn delete_parent_keeps_its_sub_issues_linked() {
+fn delete_parent_keeps_its_sub_issues_under_it() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
@@ -1434,7 +1434,8 @@ fn delete_parent_keeps_its_sub_issues_linked() {
         .assert()
         .success();
     // Deletion is soft: the child survives, alive, still pointing at its
-    // (deleted) parent, so `ti undelete` brings the tree back without relinking.
+    // (deleted) parent, so `ti undelete` brings the tree back without setting a
+    // Parent again.
     let t = show_json(&repo, &child);
     assert_eq!(t["parent"], parent.as_str());
     assert!(t["deleted"].is_null());

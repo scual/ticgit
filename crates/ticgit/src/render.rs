@@ -21,8 +21,8 @@ pub type NickMap = HashMap<String, String>;
 pub struct RelSummary {
     pub title: String,
     pub status: String,
-    /// The related ticket is deleted: a deleted child is left out of the
-    /// Children line, any other relation is shown greyed as "(deleted)".
+    /// The ticket is deleted: a deleted Sub-issue is left out of the Children
+    /// line, a deleted Parent or Dependency is shown greyed as "(deleted)".
     pub deleted: bool,
 }
 

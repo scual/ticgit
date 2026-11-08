@@ -113,7 +113,8 @@ pub enum OpKind {
     SetField { fields: BTreeMap<String, String> },
     /// Remove one or more scalar fields.
     ClearField { fields: Vec<String> },
-    /// Delete the ticket (a soft Deletion: keys, history and relations stay).
+    /// Delete the ticket (a soft Deletion: keys, history, Dependencies and
+    /// Sub-issues stay).
     /// Wire kind `del`; binaries that predate it skip it and see the ticket
     /// alive.
     Delete { reason: Option<String> },
