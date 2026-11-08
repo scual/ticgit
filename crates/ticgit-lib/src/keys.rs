@@ -59,6 +59,23 @@ pub fn tickets_tree_path() -> String {
     format!("project/{}", tickets_prefix().replace(':', "/"))
 }
 
+/// Path, inside a serialized git-meta tree, of the directory of the ticket
+/// key whose segments below the ticket are `segments` (the key
+/// [`ticket_key_from_segments`] names): `project/ticgit/tickets/<uuid>/meta/branch`
+/// for `["meta", "branch"]`.
+#[must_use]
+pub fn ticket_key_tree_path(id: &Uuid, segments: &[String]) -> String {
+    format!("{}/{id}/{}", tickets_tree_path(), segments.join("/"))
+}
+
+/// The ticket key whose segments below the ticket are `segments`, as read
+/// from a ticket's directory in a serialized git-meta tree:
+/// `ticgit:tickets:<uuid>:meta:branch` for `["meta", "branch"]`.
+#[must_use]
+pub fn ticket_key_from_segments(id: &Uuid, segments: &[String]) -> String {
+    ticket_field(id, &segments.join(":"))
+}
+
 /// A specific field on a specific ticket, e.g. `ticgit:tickets:<uuid>:title`.
 #[must_use]
 pub fn ticket_field(id: &Uuid, field: &str) -> String {
@@ -259,6 +276,20 @@ mod tests {
 
     fn fixed_uuid() -> Uuid {
         Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+    }
+
+    #[test]
+    fn ticket_key_segments_map_to_key_and_tree_path() {
+        let id = fixed_uuid();
+        let segments = vec!["meta".to_string(), "branch".to_string()];
+        assert_eq!(
+            ticket_key_from_segments(&id, &segments),
+            "ticgit:tickets:00000000-0000-0000-0000-000000000001:meta:branch"
+        );
+        assert_eq!(
+            ticket_key_tree_path(&id, &segments),
+            "project/ticgit/tickets/00000000-0000-0000-0000-000000000001/meta/branch"
+        );
     }
 
     #[test]

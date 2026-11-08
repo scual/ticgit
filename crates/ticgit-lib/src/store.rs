@@ -2865,7 +2865,7 @@ impl TicketStore {
             let mut gain = ParsedTree::default();
             let mut readable = true;
             for (segments, oid) in key_dirs {
-                let key = format!("{}:{}", keys::ticket_prefix(&id), segments.join(":"));
+                let key = keys::ticket_key_from_segments(&id, &segments);
                 // `ti migrate` removes legacy scalar keys from a ticket it has
                 // converted to operations; never put those back.
                 let migrated_away = indexed.contains(&id)
@@ -2874,7 +2874,7 @@ impl TicketStore {
                 if held.contains(&key) || migrated_away {
                     continue;
                 }
-                let path = format!("{tickets_path}/{id}/{}", segments.join("/"));
+                let path = keys::ticket_key_tree_path(&id, &segments);
                 let Ok(parsed) = parse_tree(repo, oid, &path) else {
                     readable = false;
                     break;
