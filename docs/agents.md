@@ -253,6 +253,18 @@ ti undelete <id>             # restore it, relations and comments intact
 - The Deletion syncs like any other operation and wins over edits made
   concurrently on another clone: those edits are kept on the hidden ticket and
   reappear with `ti undelete`.
+- When a sync brings in such edits (operations, comments or set members newer
+  than the delete), it warns once per ticket on stderr and exits 0:
+
+  ```
+  warning: 2 edit(s) landed on deleted ticket 1a2b3c (ti undelete 1a2b3c to restore)
+  ```
+
+  `ti sync --json` carries the same in `warnings`:
+  `[{"kind": "edit-on-deleted", "ticket": "<uuid>", "count": 2}]` (empty array
+  when nothing landed). Look at the ticket with `ti show <id>` and decide:
+  `ti undelete` if the edits mean it is still wanted, otherwise leave it
+  deleted. The Sync hook prints the same warning.
 
 Prefer closing (`ti close`) over deleting; delete tickets that should not be in
 the backlog at all (duplicates of nothing, spam, mistakes).
@@ -337,6 +349,11 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 >   The Sync hook is the one place this failure blocks: a code push whose
 >   ticket sync lost the race window is refused, so push again. Every other
 >   sync problem in the hook stays a warning.
+>
+> - **Edits on deleted tickets are reported.** Edits another clone made to a
+>   ticket you deleted are kept on the hidden ticket, and the sync prints
+>   `warning: N edit(s) landed on deleted ticket <short> (ti undelete <short>
+>   to restore)`; `--json` lists them under `warnings`.
 >
 > **Invariant:** a ticket leaves the remote only through an explicit deletion,
 > never as a side effect of serializing an incomplete local store.

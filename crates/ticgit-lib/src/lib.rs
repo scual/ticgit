@@ -54,6 +54,7 @@ pub mod review;
 pub mod signing;
 pub mod stats;
 pub mod store;
+pub mod sync_warning;
 pub mod ticket;
 pub mod writeup;
 
@@ -73,6 +74,7 @@ pub use query::{
 pub use review::*;
 pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
+pub use sync_warning::{DeletedTicketItems, SyncWarning};
 pub use ticket::{
     validate_code_uri, Comment, Deletion, NewTicketOpts, Ticket, TicketLifecycle, TicketState,
     TicketStatus,
