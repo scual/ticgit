@@ -3542,22 +3542,9 @@ impl App {
             .map(|ticket| format!("{} {}", ticket.short_id(), ticket.title))
             .unwrap_or_else(|| "<unknown issue>".to_string());
         let label = truncate_display(&label, usize::from(area.width).saturating_sub(8));
-        let relationship_note = ticket
-            .map(
-                |ticket| match (ticket.parent.is_some(), ticket.children.len()) {
-                    (true, 0) => "This child will be removed from its parent.",
-                    (false, 1) => "Its child will be unparented.",
-                    (false, n) if n > 1 => "Its children will be unparented.",
-                    (true, 1) => {
-                        "It will be removed from its parent; its child will be unparented."
-                    }
-                    (true, _) => {
-                        "It will be removed from its parent; its children will be unparented."
-                    }
-                    _ => "This permanently removes the issue metadata.",
-                },
-            )
-            .unwrap_or("This permanently removes the issue metadata.");
+        // Deletion is an operation (ADR 0003): nothing is removed and no
+        // relation changes, so `ti undelete` restores the issue exactly.
+        let relationship_note = "It is hidden but kept; `ti undelete` restores it.";
         let lines = vec![
             Line::from(Span::styled(
                 format!("Delete issue `{label}`?"),
