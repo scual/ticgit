@@ -23,6 +23,7 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let mut tickets = store.list()?;
+    tickets.retain(|t| ticgit_lib::DeletedFilter::Hide.keeps(t));
 
     // Most-recently-touched proxy: created_at ∪ last comment time.
     tickets.sort_by(|a, b| {

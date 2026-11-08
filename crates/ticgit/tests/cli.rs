@@ -4901,6 +4901,253 @@ fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
 }
 
 #[test]
+fn show_omits_a_deleted_sub_issue_until_it_is_undeleted() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let kept = create_subissue(&repo, &parent, "kept child");
+    let doomed = create_subissue(&repo, &parent, "doomed child");
+    repo.ti()
+        .args(["delete", &doomed, "--yes"])
+        .assert()
+        .success();
+
+    let subissue_ids = |repo: &TestRepo| -> Vec<String> {
+        show_json(repo, &parent)["subissues"]
+            .as_array()
+            .expect("subissues array")
+            .iter()
+            .map(|n| n["id"].as_str().expect("id").to_string())
+            .collect()
+    };
+    assert_eq!(subissue_ids(&repo), vec![kept.clone()]);
+    for args in [
+        vec!["show", parent.as_str()],
+        vec!["show", parent.as_str(), "--markdown"],
+    ] {
+        repo.ti()
+            .args(&args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("kept child"))
+            .stdout(predicate::str::contains("doomed child").not());
+    }
+
+    repo.ti().args(["undelete", &doomed]).assert().success();
+    let mut ids = subissue_ids(&repo);
+    ids.sort();
+    let mut want = vec![kept, doomed];
+    want.sort();
+    assert_eq!(ids, want);
+    repo.ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doomed child"));
+}
+
+#[test]
+fn a_deleted_dependency_no_longer_holds_back_its_dependent() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "vanished blocker");
+    repo.ti()
+        .args(["depends", "-t", &dependent, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["delete", &blocker, "--yes"])
+        .assert()
+        .success();
+
+    // `ti next` picks the dependent: the edge to a deleted ticket is absent.
+    assert_eq!(next_json(&repo)["id"], dependent.as_str());
+
+    // `ti show` keeps the edge but greys it out as "(deleted)", not [open].
+    let short = &blocker[..6];
+    for args in [
+        vec!["show", dependent.as_str()],
+        vec!["show", dependent.as_str(), "--markdown"],
+    ] {
+        let out = repo
+            .ti()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let out = String::from_utf8(out).unwrap();
+        let line = out
+            .lines()
+            .find(|l| l.contains("Depends"))
+            .unwrap_or_else(|| panic!("Depends line in {out}"));
+        assert!(line.contains(short), "{line}");
+        assert!(line.contains("(deleted)"), "{line}");
+        assert!(!line.contains("[open]"), "{line}");
+    }
+    assert_eq!(
+        json_strings(&show_json(&repo, &dependent)["depends_on"]),
+        vec![blocker.clone()]
+    );
+
+    // Nor does it hold up closing the dependent.
+    repo.ti().args(["close", &dependent]).assert().success();
+}
+
+#[test]
+fn next_never_picks_a_deleted_ticket_or_deleted_sub_issue() {
+    let repo = TestRepo::new();
+    let urgent = create_ticket(&repo, "urgent but deleted");
+    repo.ti()
+        .args(["priority", "1", "-t", &urgent])
+        .assert()
+        .success();
+    let container = create_ticket(&repo, "container");
+    let doomed = create_subissue(&repo, &container, "deleted sub-issue");
+    repo.ti()
+        .args(["priority", "1", "-t", &doomed])
+        .assert()
+        .success();
+    for id in [&urgent, &doomed] {
+        repo.ti().args(["delete", id, "--yes"]).assert().success();
+    }
+
+    // The container's only sub-issue is deleted, so the container itself is
+    // the work; neither deleted ticket is offered despite its priority.
+    assert_eq!(next_json(&repo)["id"], container.as_str());
+    assert!(next_json(&repo)["subissues"]
+        .as_array()
+        .is_none_or(|s| s.is_empty()));
+
+    repo.ti().args(["close", &container]).assert().success();
+    assert!(next_json(&repo)["next"].is_null());
+}
+
+#[test]
+fn stats_counts_leave_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "live open");
+    let closed = create_ticket(&repo, "live closed");
+    repo.ti().args(["close", "-t", &closed]).assert().success();
+    let gone_open = create_ticket(&repo, "deleted open");
+    let gone_closed = create_ticket(&repo, "deleted closed");
+    repo.ti()
+        .args(["close", "-t", &gone_closed])
+        .assert()
+        .success();
+    for id in [&gone_open, &gone_closed] {
+        repo.ti().args(["delete", id, "--yes"]).assert().success();
+    }
+
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 2, "{v}");
+    assert_eq!(v["open"], 1, "{v}");
+    assert_eq!(v["closed"], 1, "{v}");
+    assert_eq!(v["closed_7d"], 1, "{v}");
+    assert!(!v.to_string().contains("deleted open"), "{v}");
+
+    // Only deleted tickets left: stats reports none.
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "solo");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 0, "{v}");
+}
+
+#[test]
+fn search_list_filters_and_saved_views_leave_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let live = create_subissue(&repo, &parent, "needle live");
+    let gone = create_subissue(&repo, &parent, "needle gone");
+    let blocker = create_ticket(&repo, "blocker");
+    for id in [&live, &gone] {
+        repo.ti().args(["tag", "-t", id, "hot"]).assert().success();
+        repo.ti()
+            .args(["depends", "-t", id, &blocker])
+            .assert()
+            .success();
+    }
+    // Both tickets are sub-issues, so `--subissues` keeps them listable.
+    repo.ti()
+        .args(["list", "--tag", "hot", "--subissues"])
+        .assert()
+        .success();
+    repo.ti().args(["views", "save", "hot"]).assert().success();
+    repo.ti()
+        .args(["delete", &gone, "--yes"])
+        .assert()
+        .success();
+
+    let only_live = BTreeSet::from([live.clone()]);
+    assert_eq!(
+        list_ids(&repo, &["--search", "needle", "--subissues"]),
+        only_live
+    );
+    assert_eq!(list_ids(&repo, &["--tag", "hot", "--subissues"]), only_live);
+    assert_eq!(list_ids(&repo, &["--parent", &parent]), only_live);
+    assert_eq!(list_ids(&repo, &["--depends-on", &blocker]), only_live);
+    assert_eq!(list_ids(&repo, &["hot"]), only_live);
+
+    // `--deleted` still reaches the hidden ticket, combined with a search.
+    assert_eq!(
+        list_ids(&repo, &["--deleted", "--search", "needle"]),
+        BTreeSet::from([gone.clone()])
+    );
+}
+
+#[test]
+fn deps_tree_drops_a_deleted_blocker_even_with_all() {
+    let repo = TestRepo::new();
+    let (a, b, _c) = deps_chain(&repo);
+    repo.ti().args(["delete", &b, "--yes"]).assert().success();
+
+    for extra in [&[][..], &["--all"][..]] {
+        let mut args = vec!["deps", a.as_str(), "--json"];
+        args.extend_from_slice(extra);
+        let out = repo
+            .ti()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let tree: Value = serde_json::from_slice(&out).unwrap();
+        assert!(tree["nodes"].as_array().unwrap().is_empty(), "{tree}");
+    }
+}
+
+#[test]
+fn recent_leaves_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    let live = create_ticket(&repo, "still here");
+    let gone = create_ticket(&repo, "recently deleted");
+    repo.ti()
+        .args(["delete", &gone, "--yes"])
+        .assert()
+        .success();
+    let out = repo
+        .ti()
+        .args(["recent", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![live.as_str()]);
+}
+
+#[test]
 fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
     let remote = tempfile::tempdir().expect("bare remote tempdir");
     git(remote.path(), &["init", "--bare", "--quiet"]);
