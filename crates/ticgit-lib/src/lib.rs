@@ -74,7 +74,7 @@ pub use review::*;
 pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
 pub use ticket::{
-    validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
+    validate_code_uri, Comment, Deletion, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
 };
 pub use writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 

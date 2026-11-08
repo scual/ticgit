@@ -92,6 +92,8 @@ pub struct SavedView {
     pub all: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub subissues: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub limit: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

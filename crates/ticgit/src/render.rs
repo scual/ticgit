@@ -1665,6 +1665,7 @@ mod tests {
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "tester@example.com".to_string(),
+            deleted: None,
         }
     }
 

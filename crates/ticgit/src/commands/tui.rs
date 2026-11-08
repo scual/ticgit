@@ -5285,7 +5285,7 @@ impl App {
             return Ok(());
         };
         let label = self.issue_label(id);
-        self.store.delete_ticket(&id)?;
+        self.store.delete_ticket(&id, None)?;
         self.detail = None;
         self.comments_mode = false;
         self.comment_state.select(None);
@@ -5317,6 +5317,7 @@ impl App {
             parent: None,
             all: self.base_status.is_none() && self.base_state.is_none(),
             subissues: !self.hide_subissues,
+            deleted: false,
             limit: 0,
             columns: self
                 .issue_columns
@@ -14293,6 +14294,7 @@ meta/tickets\t1779106269\tMeta\t<meta@example.com>\n";
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "test@example.com".to_string(),
+            deleted: None,
         }
     }
 }

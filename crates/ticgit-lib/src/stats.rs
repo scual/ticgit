@@ -146,6 +146,7 @@ mod tests {
             comments: vec![],
             created_at: created,
             created_by: "tester".into(),
+            deleted: None,
         }
     }
 

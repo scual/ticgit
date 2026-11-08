@@ -15,12 +15,14 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::keys;
-use crate::oplog::{Op, OpKind};
+use crate::oplog::{project_deletion, Op, OpKind};
 use crate::review::{
     format_review_revision, parse_review_revision_change, CommitReviewStatus, NewReviewOpts,
     Review, ReviewMessage, ReviewProgress, ReviewRevisionChange, ReviewVcs,
 };
-use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
+use crate::ticket::{
+    Comment, CommentBody, Deletion, NewTicketOpts, Ticket, TicketState, TicketStatus,
+};
 use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 
 /// Remove `value` from the set at `key`, treating an already-absent member (or
@@ -361,8 +363,7 @@ impl TicketStore {
             let fields = fields_by_id.remove(&id).unwrap_or_default();
             let ops = ops_by_id.remove(&id).unwrap_or_default();
             read_format_version(id, &fields)?;
-            let projected = project_scalar_fields(fields, &ops);
-            if let Some(t) = build_ticket(id, projected) {
+            if let Some(t) = project_ticket(id, fields, &ops) {
                 out.push(t);
             }
         }
@@ -387,8 +388,7 @@ impl TicketStore {
             }
         }
         read_format_version(*id, &fields)?;
-        let projected = project_scalar_fields(fields, &ops);
-        build_ticket(*id, projected).ok_or(Error::NotFound(*id))
+        project_ticket(*id, fields, &ops).ok_or(Error::NotFound(*id))
     }
 
     /// Resolve a user-supplied ticket reference (full UUID or unique
@@ -730,43 +730,32 @@ impl TicketStore {
         self.apply_scalars(child_id, BTreeMap::new(), vec!["parent".to_string()])
     }
 
-    /// Delete a ticket and remove parent/child relationship references.
-    pub fn delete_ticket(&self, id: &Uuid) -> Result<()> {
-        let ticket = self.load(id)?;
-        let p = self.project_handle();
-
-        if let Some(parent_id) = ticket.parent {
-            remove_member(
-                &p,
-                &keys::ticket_field(&parent_id, "children"),
-                &id.to_string(),
-            )?;
+    /// Delete a ticket by appending a `del` operation (ADR 0003). Soft: the
+    /// ticket keeps every key, its history, comments, Sub-issues and
+    /// Dependencies, and no other ticket is touched, so [`Self::undelete_ticket`]
+    /// restores it exactly. Fails with [`Error::AlreadyDeleted`] when it is
+    /// already deleted (no op is written).
+    pub fn delete_ticket(&self, id: &Uuid, reason: Option<&str>) -> Result<()> {
+        if self.load(id)?.is_deleted() {
+            return Err(Error::AlreadyDeleted(*id));
         }
+        self.append_op(
+            id,
+            OpKind::Delete {
+                reason: reason.map(str::to_string),
+            },
+        )?;
+        Ok(())
+    }
 
-        for child_id in &ticket.children {
-            // `parent` is op-managed, so orphan the child with a clear op
-            // (removing the scalar key would be a no-op on op-based tickets).
-            self.apply_scalars(child_id, BTreeMap::new(), vec!["parent".to_string()])?;
+    /// Undo a Deletion by appending an `undel` operation. Fails with
+    /// [`Error::NotDeleted`] when the ticket is not deleted: a stray `undel`
+    /// would otherwise outrank a concurrent `del` from another clone.
+    pub fn undelete_ticket(&self, id: &Uuid) -> Result<()> {
+        if !self.load(id)?.is_deleted() {
+            return Err(Error::NotDeleted(*id));
         }
-
-        // Dependencies are denormalized on both sides, so clean up the reverse
-        // references too, or other tickets keep dangling depends_on/blocks UUIDs
-        // that never resolve (e.g. silently un-workable in `ti next`).
-        for dep_id in &ticket.depends_on {
-            remove_member(&p, &keys::ticket_field(dep_id, "blocks"), &id.to_string())?;
-        }
-        for blocked_id in &ticket.blocks {
-            remove_member(
-                &p,
-                &keys::ticket_field(blocked_id, "depends_on"),
-                &id.to_string(),
-            )?;
-        }
-
-        for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(id)))? {
-            p.remove(&key)?;
-        }
-
+        self.append_op(id, OpKind::Undelete)?;
         Ok(())
     }
 
@@ -3175,7 +3164,20 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         comments,
         created_at,
         created_by,
+        deleted: None,
     })
+}
+
+/// Project a ticket's stored fields and op log into a [`Ticket`]: scalar
+/// fields from [`replay`] (via [`project_scalar_fields`]) and the Deletion from
+/// [`project_deletion`]. `None` when the fields don't form a ticket.
+fn project_ticket(id: Uuid, fields: Vec<(String, MetaValue)>, ops: &[Op]) -> Option<Ticket> {
+    let mut ticket = build_ticket(id, project_scalar_fields(fields, ops))?;
+    ticket.deleted = project_deletion(ops).map(|op| Deletion {
+        at: op.created_at,
+        by: op.author.clone(),
+    });
+    Some(ticket)
 }
 
 fn meta_string(val: Option<MetaValue>) -> Option<String> {
@@ -4300,7 +4302,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_ticket_removes_parent_child_references() {
+    fn delete_ticket_is_soft_and_leaves_relations_on_both_sides() {
         let (store, _td) = test_store();
         let parent = store.create("parent", NewTicketOpts::default()).unwrap();
         let child = store
@@ -4312,52 +4314,39 @@ mod tests {
                 },
             )
             .unwrap();
+        let dep = store.create("dep", NewTicketOpts::default()).unwrap();
+        store.add_dependency(&child.id, &dep.id).unwrap();
+        let parent_before = store.load(&parent.id).unwrap();
+        let dep_before = store.load(&dep.id).unwrap();
 
-        store.delete_ticket(&child.id).unwrap();
+        store.delete_ticket(&child.id, Some("dup")).unwrap();
 
-        assert!(store.load(&child.id).is_err());
-        let parent = store.load(&parent.id).unwrap();
-        assert!(!parent.children.contains(&child.id));
+        let deleted = store.load(&child.id).unwrap();
+        assert!(deleted.is_deleted());
+        assert_eq!(deleted.deleted.as_ref().unwrap().by, "tester@example.com");
+        assert_eq!(deleted.parent, Some(parent.id));
+        assert!(deleted.depends_on.contains(&dep.id));
+        assert_eq!(store.load(&parent.id).unwrap(), parent_before);
+        assert_eq!(store.load(&dep.id).unwrap(), dep_before);
+        assert!(store.list().unwrap().iter().any(|t| t.id == child.id));
     }
 
     #[test]
-    fn delete_parent_unparents_children() {
+    fn undelete_ticket_restores_and_both_refuse_a_no_op() {
         let (store, _td) = test_store();
-        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
-        let child = store
-            .create(
-                "child",
-                NewTicketOpts {
-                    parent: Some(parent.id),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        store.delete_ticket(&parent.id).unwrap();
-
-        assert!(store.load(&parent.id).is_err());
-        let child = store.load(&child.id).unwrap();
-        assert_eq!(child.parent, None);
-    }
-
-    #[test]
-    fn delete_ticket_removes_dangling_dependency_references() {
-        let (store, _td) = test_store();
-        let a = store.create("a", NewTicketOpts::default()).unwrap();
-        let b = store.create("b", NewTicketOpts::default()).unwrap();
-        let c = store.create("c", NewTicketOpts::default()).unwrap();
-
-        // a depends on b; c depends on a. Deleting a must clean both sides.
-        store.add_dependency(&a.id, &b.id).unwrap();
-        store.add_dependency(&c.id, &a.id).unwrap();
-
-        store.delete_ticket(&a.id).unwrap();
-
-        // b no longer lists a in `blocks`.
-        assert!(!store.load(&b.id).unwrap().blocks.contains(&a.id));
-        // c no longer lists a in `depends_on`.
-        assert!(!store.load(&c.id).unwrap().depends_on.contains(&a.id));
+        let t = store.create("t", NewTicketOpts::default()).unwrap();
+        assert!(matches!(
+            store.undelete_ticket(&t.id),
+            Err(Error::NotDeleted(_))
+        ));
+        store.delete_ticket(&t.id, None).unwrap();
+        assert!(matches!(
+            store.delete_ticket(&t.id, None),
+            Err(Error::AlreadyDeleted(_))
+        ));
+        store.undelete_ticket(&t.id).unwrap();
+        assert!(!store.load(&t.id).unwrap().is_deleted());
+        assert_verifies(&store);
     }
 
     #[test]

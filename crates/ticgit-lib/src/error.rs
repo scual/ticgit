@@ -26,6 +26,12 @@ pub enum Error {
     #[error("invalid value: {0}")]
     InvalidValue(String),
 
+    #[error("ticket {0} is already deleted")]
+    AlreadyDeleted(Uuid),
+
+    #[error("ticket {0} is not deleted")]
+    NotDeleted(Uuid),
+
     #[error("invalid format version `{0}`")]
     InvalidFormatVersion(String),
 
