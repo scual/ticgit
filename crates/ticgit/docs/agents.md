@@ -144,6 +144,12 @@ ti code -t <id> https://github.com/org/repo:feature-branch
 ti meta -t <id> external-id PROJ-123
 ```
 
+Removals are idempotent: removing something that is not there succeeds with exit
+0 rather than failing. This covers `ti tag -d`, `ti users rm <nick> <email>`,
+`ti writeup unlink`, `ti subissue --clear` and `ti depends --remove`. A typo in
+the value being removed is therefore a silent no-op, so check the result (e.g.
+`ti show <id> --json`) when it matters.
+
 Use `spec` for implementation notes before coding:
 
 ```sh
@@ -329,7 +335,9 @@ stored id, validates any signatures, and checks the log still projects to a
 valid ticket. It also reports, as one issue naming both tickets, every
 Sub-issue or Dependency whose two sides disagree (a Sub-issue missing from its
 parent's `children`, a `depends_on` entry missing from the other ticket's
-`blocks`, and the reverse). Because the push gate runs `ti verify`, such an
+`blocks`, and the reverse). A reference to a ticket that no longer exists (a
+dangling parent, sub-issue or dependency id) is not an asymmetry between two
+tickets and is not reported. Because the push gate runs `ti verify`, a reported
 asymmetry also stops `ti sync` / `ti push` until it is repaired. Unsigned
 operations are trusted by default and reported as warnings, not failures.
 
