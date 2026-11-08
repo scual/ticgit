@@ -4801,3 +4801,52 @@ fn undelete_restores_the_ticket_with_comments_tags_and_relations_intact() {
         .failure()
         .stderr(predicate::str::contains("not deleted"));
 }
+
+#[test]
+fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    let keep = create_ticket(&a, "bystander");
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+    assert!(list_ids(&b, &[]).contains(&id));
+
+    // A deletes and syncs; B, not yet synced, comments on the ticket.
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["comment", "-t", &id, "written before B synced"])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+
+    // B now hides the ticket; the comment landed on the hidden ticket.
+    assert_eq!(list_ids(&b, &[]), BTreeSet::from([keep.clone()]));
+    assert_eq!(list_ids(&b, &["--deleted"]), BTreeSet::from([id.clone()]));
+    let hidden = show_json(&b, &id);
+    assert!(hidden["deleted"].is_object(), "deleted on B: {hidden}");
+    assert_eq!(hidden["comments"][0]["body"], "written before B synced");
+
+    // Undelete (on A, after it picks up B's comment): visible everywhere,
+    // comment intact.
+    a.ti().arg("sync").assert().success();
+    a.ti().args(["undelete", &id]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+    for clone in [&a, &b] {
+        assert!(list_ids(clone, &[]).contains(&id));
+        let t = show_json(clone, &id);
+        assert!(t["deleted"].is_null());
+        assert_eq!(t["comments"][0]["body"], "written before B synced");
+    }
+}
