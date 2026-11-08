@@ -5021,3 +5021,45 @@ fn stats_counts_leave_out_deleted_tickets() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["total"], 0, "{v}");
 }
+
+#[test]
+fn search_list_filters_and_saved_views_leave_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let live = create_subissue(&repo, &parent, "needle live");
+    let gone = create_subissue(&repo, &parent, "needle gone");
+    let blocker = create_ticket(&repo, "blocker");
+    for id in [&live, &gone] {
+        repo.ti().args(["tag", "-t", id, "hot"]).assert().success();
+        repo.ti()
+            .args(["depends", "-t", id, &blocker])
+            .assert()
+            .success();
+    }
+    // Both tickets are sub-issues, so `--subissues` keeps them listable.
+    repo.ti()
+        .args(["list", "--tag", "hot", "--subissues"])
+        .assert()
+        .success();
+    repo.ti().args(["views", "save", "hot"]).assert().success();
+    repo.ti()
+        .args(["delete", &gone, "--yes"])
+        .assert()
+        .success();
+
+    let only_live = BTreeSet::from([live.clone()]);
+    assert_eq!(
+        list_ids(&repo, &["--search", "needle", "--subissues"]),
+        only_live
+    );
+    assert_eq!(list_ids(&repo, &["--tag", "hot", "--subissues"]), only_live);
+    assert_eq!(list_ids(&repo, &["--parent", &parent]), only_live);
+    assert_eq!(list_ids(&repo, &["--depends-on", &blocker]), only_live);
+    assert_eq!(list_ids(&repo, &["hot"]), only_live);
+
+    // `--deleted` still reaches the hidden ticket, combined with a search.
+    assert_eq!(
+        list_ids(&repo, &["--deleted", "--search", "needle"]),
+        BTreeSet::from([gone.clone()])
+    );
+}

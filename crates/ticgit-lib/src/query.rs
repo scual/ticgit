@@ -31,9 +31,33 @@ pub struct Filter {
     /// relationship filter never silently hides a sub-issue blocker,
     /// dependent, or child.
     pub hide_subissues: bool,
-    /// Deletion filter ([`Ticket::is_deleted`]): `Some(false)` keeps only live
-    /// tickets, `Some(true)` only deleted ones, `None` does not filter.
-    pub deleted: Option<bool>,
+    /// Deletion filter ([`Ticket::is_deleted`]). Defaults to hiding deleted
+    /// tickets, so every caller that builds a filter from defaults (the TUI,
+    /// saved views, search) leaves them out without asking.
+    pub deleted: DeletedFilter,
+}
+
+/// Which tickets a [`Filter`] keeps with respect to deletion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DeletedFilter {
+    /// Live tickets only: deleted tickets are hidden (the default).
+    #[default]
+    Hide,
+    /// Deleted tickets only (`ti list --deleted`).
+    Only,
+    /// Both live and deleted tickets.
+    Include,
+}
+
+impl DeletedFilter {
+    /// Whether a ticket with this deletion status passes the filter.
+    pub fn keeps(self, ticket: &Ticket) -> bool {
+        match self {
+            DeletedFilter::Hide => !ticket.is_deleted(),
+            DeletedFilter::Only => ticket.is_deleted(),
+            DeletedFilter::Include => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,10 +251,8 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     let mut tickets: Vec<Ticket> = tickets
         .into_iter()
         .filter(|t| {
-            if let Some(deleted) = filter.deleted {
-                if t.is_deleted() != deleted {
-                    return false;
-                }
+            if !filter.deleted.keeps(t) {
+                return false;
             }
             if let Some(state) = filter.state {
                 if t.state != state {
@@ -646,6 +668,61 @@ mod tests {
             created_by: "tester".into(),
             deleted: None,
         }
+    }
+
+    fn deleted(mut ticket: Ticket) -> Ticket {
+        ticket.deleted = Some(crate::ticket::Deletion {
+            at: OffsetDateTime::from_unix_timestamp(9).unwrap(),
+            by: "tester".into(),
+        });
+        ticket
+    }
+
+    /// Every caller that builds a [`Filter`] from defaults (the TUI list,
+    /// saved views, search) hides deleted tickets without opting in.
+    #[test]
+    fn default_filter_hides_deleted_tickets_and_only_shows_them_on_request() {
+        let live = t("live", TicketStatus::Open, TicketState::New, None, None, 1);
+        let gone = deleted(t(
+            "gone",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        ));
+        let input = vec![live.clone(), gone.clone()];
+        let titles = |filter: &Filter| -> Vec<String> {
+            apply(input.clone(), filter)
+                .into_iter()
+                .map(|t| t.title)
+                .collect()
+        };
+
+        // The TUI list's own construction: lifecycle knobs plus defaults.
+        let tui = Filter {
+            status: Some(TicketStatus::Open),
+            hide_subissues: true,
+            ..Default::default()
+        };
+        assert_eq!(titles(&tui), vec!["live"]);
+        assert_eq!(titles(&Filter::default()), vec!["live"]);
+        let search = Filter {
+            search: Some(SearchFilter::parse("e").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(titles(&search), vec!["live"]);
+
+        let only = Filter {
+            deleted: DeletedFilter::Only,
+            ..Default::default()
+        };
+        assert_eq!(titles(&only), vec!["gone"]);
+        let any = Filter {
+            deleted: DeletedFilter::Include,
+            ..Default::default()
+        };
+        assert_eq!(titles(&any).len(), 2);
     }
 
     #[test]
