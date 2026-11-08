@@ -375,7 +375,14 @@ with code: any `git fetch`/`pull`/`push` should be paired with a `ti sync`.
 ### `ti sync` — pull then push ticket metadata
 ```
 -r, --remote <REMOTE>      Remote to sync. Default: git-meta's first meta remote.
+    --json                 Result object (schema `syncResult`).
 ```
+If the pull brought in operations, comments or set members newer than the
+delete of a ticket deleted locally, sync prints one stderr line per ticket,
+`warning: N edit(s) landed on deleted ticket <short> (ti undelete <short> to
+restore)`, and exits 0. `--json` carries them as `warnings: [{"kind":
+"edit-on-deleted", "ticket": "<uuid>", "count": N}]` (always present, empty
+when none).
 
 ### `ti pull` — pull tickets from a fork / URL
 ```

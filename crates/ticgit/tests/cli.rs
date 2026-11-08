@@ -779,6 +779,40 @@ fn sync_json_emits_result_object() {
     assert_eq!(json["ref"], "refs/meta/main");
     assert_eq!(json["pushed_total"], 1);
     assert!(json["pulled"].as_array().unwrap().is_empty());
+    // Nothing landed on a deleted ticket: `warnings` is present and empty.
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // The published schema documents exactly the keys `ti sync --json` emits.
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let sync_result = &schema["$defs"]["syncResult"];
+    assert_eq!(sync_result["additionalProperties"], false);
+    let documented: BTreeSet<String> = sync_result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    // `warnings` is additive: always emitted by this binary, not required,
+    // so output from older binaries still validates.
+    let required = sync_result["required"].as_array().unwrap();
+    assert!(!required.iter().any(|key| key == "warnings"));
+    assert!(required.iter().any(|key| key == "pushed_total"));
+    let warning = &schema["$defs"]["syncWarning"];
+    assert_eq!(warning["additionalProperties"], false);
+    assert_eq!(
+        warning["required"],
+        serde_json::json!(["kind", "ticket", "count"])
+    );
+    assert_eq!(
+        warning["properties"]["kind"]["enum"],
+        serde_json::json!(["edit-on-deleted"])
+    );
+    assert_eq!(
+        sync_result["properties"]["warnings"]["items"]["$ref"],
+        "#/$defs/syncWarning"
+    );
 }
 
 #[test]
@@ -4864,4 +4898,116 @@ fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
         assert!(t["deleted"].is_null());
         assert_eq!(t["comments"][0]["body"], "written before B synced");
     }
+}
+
+#[test]
+fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "doomed ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    // A deletes and syncs; B, not yet synced, edits the ticket three times.
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["comment", "-t", &id, "first late note"])
+        .assert()
+        .success();
+    b.ti()
+        .args(["comment", "-t", &id, "second late note"])
+        .assert()
+        .success();
+    b.ti().args(["tag", "-t", &id, "late"]).assert().success();
+
+    // B's own edits did not arrive from elsewhere: no warning on B.
+    let out = b
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // A picks up B's edits on its deleted ticket: one stderr line, exit 0.
+    a.ti()
+        .arg("sync")
+        .assert()
+        .success()
+        .stderr(predicate::eq(format!(
+        "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
+    )));
+    // The edits are kept on the hidden ticket.
+    let hidden = show_json(&a, &id);
+    assert!(hidden["deleted"].is_object());
+    assert_eq!(hidden["comments"].as_array().unwrap().len(), 2);
+
+    // Nothing new arrived: no repeat warning.
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // Another late edit: `--json` carries it in `warnings` and still warns
+    // on stderr.
+    b.ti()
+        .args(["comment", "-t", &id, "third late note"])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)\n"
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 1 }])
+    );
+
+    // The Sync hook's auto-sync warns the same way and does not block.
+    b.ti().args(["tag", "-t", &id, "later"]).assert().success();
+    b.ti().arg("sync").assert().success();
+    let line = format!(
+        "refs/heads/main {} refs/heads/main {}\n",
+        "1".repeat(40),
+        "0".repeat(40)
+    );
+    a.ti()
+        .args(["hook", "run", "pre-push", "origin", &remote_url])
+        .write_stdin(line)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to restore)"
+        )));
 }
