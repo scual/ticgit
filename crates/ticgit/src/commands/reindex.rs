@@ -1,10 +1,25 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 
 use crate::commands::open_store;
 
+/// Add to the local store what the meta remote holds and the store lacks.
+///
+/// The default reindex is additive: it never removes or rewrites what the
+/// store holds, so unsynced work survives it. `--reset` replaces the store
+/// with the remote tree instead, and refuses while the store holds changes
+/// the remote lacks unless `--force` is given.
 #[derive(Debug, Parser)]
 pub struct Args {
+    /// Replace the store with the remote tree (drops unsynced local changes,
+    /// prunes ghost records); refuses while unsynced changes exist.
+    #[arg(long = "reset")]
+    pub reset: bool,
+
+    /// With --reset: proceed even though unsynced local changes would be lost.
+    #[arg(long = "force", requires = "reset")]
+    pub force: bool,
+
     /// Output the result as JSON.
     #[arg(long = "json")]
     pub json: bool,
@@ -23,13 +38,30 @@ pub fn run(args: Args) -> Result<()> {
             false
         }
     };
-    let tickets = store.reindex()?;
+
+    let tickets = if args.reset {
+        if !args.force {
+            let unsynced = store.unsynced_changes()?;
+            if unsynced > 0 {
+                bail!(
+                    "refusing to reset: the local store holds {unsynced} unsynced change(s) \
+                     the remote lacks, and --reset would drop them.\n\
+                     Run `ti sync` first to publish them, or pass --force to discard them."
+                );
+            }
+        }
+        store.reindex_reset()?
+    } else {
+        store.reindex()?
+    };
 
     if args.json {
         println!(
             "{}",
-            serde_json::json!({ "tickets": tickets, "fetched": fetched })
+            serde_json::json!({ "tickets": tickets, "fetched": fetched, "reset": args.reset })
         );
+    } else if args.reset {
+        println!("Reset store from refs/meta/*: {tickets} ticket(s).");
     } else {
         println!("Reindexed store from refs/meta/*: {tickets} ticket(s).");
     }

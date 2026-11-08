@@ -5501,3 +5501,107 @@ fn reindex_fetches_the_remote_and_adds_tickets_while_keeping_unsynced_edits() {
     );
     a.ti().arg("verify").assert().success();
 }
+
+/// `ti reindex --reset` would replace the index with the remote tree, so it
+/// refuses while the store holds changes the remote lacks: it exits non-zero,
+/// names how many there are and both ways forward, and changes nothing.
+#[test]
+fn reindex_reset_refuses_while_unsynced_changes_exist() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let synced = create_ticket(&repo, "syncedtkt");
+    repo.ti()
+        .args(["tag", "-t", &synced, "bug"])
+        .assert()
+        .success();
+    repo.ti().arg("sync").assert().success();
+
+    // Three changes the remote lacks: two comments and a tag removal.
+    repo.ti()
+        .args(["comment", "-t", &synced, "unsynced one"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &synced, "unsynced two"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &synced, "-d", "bug"])
+        .assert()
+        .success();
+    let before = show_json(&repo, &synced);
+
+    repo.ti()
+        .args(["reindex", "--reset"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("3 unsynced change")
+                .and(predicate::str::contains("ti sync"))
+                .and(predicate::str::contains("--force")),
+        );
+
+    assert_eq!(show_json(&repo, &synced), before);
+    assert_eq!(list_ids(&repo, &[]), BTreeSet::from([synced]));
+}
+
+/// With nothing unsynced, `ti reindex --reset` rebuilds the store from the
+/// remote as before, on the clone that wrote the tickets and on one that
+/// only pulled them, and `--json` keeps its `tickets` count.
+#[test]
+fn reindex_reset_on_a_synced_store_succeeds() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let first = create_ticket(&a, "first");
+    let second = create_ticket(&a, "second");
+    let doomed = create_ticket(&a, "doomed");
+    a.ti()
+        .args(["comment", "-t", &first, "a comment"])
+        .assert()
+        .success();
+    a.ti()
+        .args(["tag", "-t", &first, "bug,ui"])
+        .assert()
+        .success();
+    a.ti()
+        .args(["tag", "-t", &first, "-d", "ui"])
+        .assert()
+        .success();
+    a.ti()
+        .args(["depends", "-t", &second, &first])
+        .assert()
+        .success();
+    a.ti().args(["delete", &doomed, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    for clone in [&a, &b] {
+        let out = clone
+            .ti()
+            .args(["reindex", "--reset", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&out).expect("reindex json");
+        assert_eq!(json["tickets"], 3, "{json}");
+        assert_eq!(
+            list_ids(clone, &[]),
+            BTreeSet::from([first.clone(), second.clone()])
+        );
+        let t = show_json(clone, &first);
+        assert_eq!(comment_bodies(&t), vec!["a comment"]);
+        assert_eq!(json_strings(&t["tags"]), vec!["bug"]);
+        clone.ti().arg("verify").assert().success();
+    }
+}
