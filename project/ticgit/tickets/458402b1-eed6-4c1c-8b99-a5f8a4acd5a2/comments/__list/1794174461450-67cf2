@@ -1,0 +1,1 @@
+{"author":"scual.project@gmail.com","body":"Implemented in 12d868a: remove_member makes all store set removals idempotent; verify() reports each Sub-issue/Dependency asymmetry between live tickets (dangling refs to non-live tickets skipped). 4 CLI tests incl. reverse direction. Push gate now blocks on asymmetry (documented in agents.md)."}

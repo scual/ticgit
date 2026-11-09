@@ -1,0 +1,1 @@
+{"author":"scual.project@gmail.com","body":"Implemented on branch spec/215ee3-sync-safety. No CHANGELOG exists; old-binary ghost note lives in README and docs/agents.md. Extra: ti delete --reason; deleting a deleted ticket or undeleting a live one fails."}

@@ -1,0 +1,1 @@
+{"author":"scual.project@gmail.com","body":"Implemented on branch spec/215ee3-sync-safety. Additive reindex also fills whole missing keys on partly indexed tickets (ADR 0003 model), not only tickets absent from the index. Lost individual list entries or set members with the key still present are not repaired."}

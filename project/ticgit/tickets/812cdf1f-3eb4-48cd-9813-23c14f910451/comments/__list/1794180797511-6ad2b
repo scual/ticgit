@@ -1,0 +1,1 @@
+{"author":"scual.project@gmail.com","body":"Implemented on branch spec/215ee3-sync-safety. ti reindex fetches the meta remote first (best effort). Observed git-meta quirk: a second clone's first push drops set-member tombstones from the remote; worth its own ticket."}

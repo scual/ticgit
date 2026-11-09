@@ -1,0 +1,1 @@
+{"author":"scual.project@gmail.com","body":"Implemented on branch spec/215ee3-sync-safety: crates/ticgit-lib/tests/sync_prop.rs. Generator avoids concurrent re-parenting and cycles (ticket dab3f8 territory) and does not generate removals."}
