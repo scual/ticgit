@@ -49,6 +49,7 @@ ti list --search "title:timeout comments:retry" --markdown   # per-term scope
 ti list --search "\"title:timeout\"" --markdown   # quoted prefix = literal text, no scope
 ti list --status closed --markdown
 ti list --all --markdown
+ti list --deleted --markdown                     # only deleted tickets, any status
 ti mine --markdown
 ```
 
@@ -174,11 +175,16 @@ ti deps <id> --both --all    # both directions, including closed nodes (--json/-
 show only _direct_ relations; `ti deps` walks the chain transitively and prints
 it as a tree (closed tickets pruned unless `--all`).
 
+A Dependency on a deleted ticket counts as absent: it never holds back
+`ti next` or `ti close`, `ti deps` leaves it out (even with `--all`), and
+`ti show` keeps it greyed as `(deleted)`. The edge itself is kept, so
+`ti undelete` brings the Dependency back.
+
 ## Picking The Next Ticket
 
 `ti next` chooses one open ticket to work on and checks it out. It **excludes**
-closed tickets, sub-issues, tickets with unresolved dependencies, and tickets
-tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
+closed and deleted tickets, sub-issues, tickets with unresolved dependencies,
+and tickets tagged `deferred` or `backlog`. Pass `--include-deferred` to consider the
 deferred/backlog ones too.
 
 Among the remaining tickets it orders by, in precedence:
@@ -213,23 +219,65 @@ recursive tree, so reading the parent shows the whole remaining subtree.
 
 `ti next` treats a parent as a container: while it has open sub-issues, `next`
 picks one of those (recursively, deepest first) instead of the parent. The
-parent becomes next only once all its sub-issues are closed. A sub-issue
+parent becomes next only once all its sub-issues are closed (or deleted).
+Deleted sub-issues are left out of the tree, the Children line of `ti show`,
+and the TUI; they reappear after `ti undelete`. A sub-issue
 inherits its parent's `deferred`/`backlog` tag and open dependencies.
 
 ## Deleting
 
-`ti delete` removes tickets permanently. It takes explicit ids (it never falls
-back to the checked-out ticket) and prompts for confirmation unless `--yes` is
-passed. Deleting a parent orphans its sub-issues; pass `--recursive` to remove
-the whole subtree instead:
+`ti delete` writes a delete Operation to the ticket's log; it removes no keys.
+The ticket is hidden from `ti list` (and its search, filters and saved views),
+`ti next`, `ti recent`, `ti stats`, `ti deps`, its parent's Sub-issues and the
+TUI, but keeps its history, comments, tags, Sub-issues and Dependencies, and no
+other ticket is changed. Undeleting brings it back everywhere with no extra
+writes, because no Dependency or Sub-issue was removed. `ti delete` takes
+explicit ids (it never falls back to the checked-out ticket) and prompts for
+confirmation unless `--yes` is passed. `--recursive` also deletes the whole
+subtree of sub-issues; `--reason <text>` is recorded in the operation and shown
+by `ti history`.
 
 ```sh
 ti delete <id> --yes
 ti delete <parent-id> --recursive --yes
+ti list --deleted            # deleted tickets only
+ti show <id> --markdown      # still works; leads with a Deleted banner
+ti undelete <id>             # bring it back, Dependencies, Sub-issues and comments intact
 ```
 
-Prefer closing (`ti close`) over deleting; delete only to discard tickets that
-should leave no history.
+- `ti show` on a deleted ticket exits 0 and shows who deleted it and when.
+  Every ticket object in `--json` output carries `deleted`: `{at, by}` for a
+  deleted ticket, `null` otherwise.
+- `ti checkout` refuses a deleted ticket; undelete it first.
+- Deleting a deleted ticket, or undeleting a live one, fails.
+- The Deletion syncs like any other operation and wins over edits made
+  concurrently on another clone: those edits are kept on the hidden ticket and
+  reappear with `ti undelete`.
+- When a sync (or a `ti pull` from a fork) brings in such edits (operations
+  that follow the delete operation in Lamport order, comments, set members or
+  custom fields), it warns once per ticket on stderr and exits 0:
+
+  ```
+  warning: 2 edit(s) landed on deleted ticket 1a2b3c (ti undelete 1a2b3c to bring it back)
+  ```
+
+  `ti sync --json` and `ti pull --json` carry the same in `warnings`:
+  `[{"kind": "edit-on-deleted", "ticket": "<uuid>", "count": 2}]` (empty array
+  when nothing landed). Look at the ticket with `ti show <id>` and decide:
+  `ti undelete` if the edits mean it is still wanted, otherwise leave it
+  deleted. The Sync hook prints the same warning.
+
+Prefer closing (`ti close`) over deleting; delete tickets that should not be in
+the backlog at all (duplicates of nothing, spam, mistakes).
+
+### Upgrade notes: deleted tickets on older binaries
+
+`ti` 0.4.2 and older do not know the delete Operation and skip it, so on a
+clone running an older binary a ticket deleted elsewhere still shows as alive
+(a "ghost") and can be edited or picked by `ti next`. Nothing is lost: the
+deletion is in the log and takes effect as soon as that clone upgrades.
+Upgrade every clone that shares tickets (`cargo install --path crates/ticgit
+--locked`, or the release binaries).
 
 ## Writeups
 
@@ -269,6 +317,8 @@ ti import linear
 ti stats --markdown
 ```
 
+Deleted tickets are not counted.
+
 ## Sync And Setup
 
 Share ticket metadata with collaborators:
@@ -282,12 +332,16 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 > **Sync is safe by default.** `ti sync` is pull-then-push, hardened so a
 > stranded or damaged store can never silently delete tickets on the remote:
 >
-> - **Pull self-heals.** If the remote holds tickets missing from your local
->   index, the pull reindexes them instead of reporting "no new or updated
->   tickets". Changes to tickets you already have are listed as updated.
-> - **Push refuses implicit deletion.** A push that would drop remote tickets
->   not removed by an explicit `ti delete` is rejected; pass `--allow-deletes`
->   to remove them on purpose.
+> - **Pull keeps local work and self-heals.** The pull merges the remote into
+>   your store, then runs the additive `ti reindex`: tickets (or ticket keys)
+>   the remote holds and your index lacks are added back, and nothing the
+>   index holds is dropped or rewritten, so unsynced comments, Sub-issues,
+>   Dependencies and Deletions survive. Changes to tickets you already have
+>   are listed as updated.
+> - **Push refuses implicit deletion.** A push that would drop remote ticket
+>   keys is rejected; pass `--allow-deletes` to remove them on purpose. `ti
+>   delete` keeps keys (it writes a delete Operation), so it never trips this
+>   guard.
 > - **Backup before overwrite.** The prior remote tip is snapshotted to a local
 >   `refs/ticgit-backup/<ns>/` ref (newest 10 kept) before every overwriting push.
 > - **Verify gate.** A store that fails `ti verify` is not pushed; pass
@@ -299,6 +353,11 @@ ti pull <url-or-nickname>     # pull from a fork or remote URL
 >   The Sync hook is the one place this failure blocks: a code push whose
 >   ticket sync lost the race window is refused, so push again. Every other
 >   sync problem in the hook stays a warning.
+>
+> - **Edits on deleted tickets are reported.** Edits another clone made to a
+>   ticket you deleted are kept on the hidden ticket, and the sync prints
+>   `warning: N edit(s) landed on deleted ticket <short> (ti undelete <short>
+>   to bring it back)`; `--json` lists them under `warnings`.
 >
 > **Invariant:** a ticket leaves the remote only through an explicit deletion,
 > never as a side effect of serializing an incomplete local store.
@@ -327,7 +386,8 @@ ti verify                     # check op-log integrity + signatures (--json/--ma
 ti verify --json              # non-zero exit if any ticket fails
 ti migrate                    # dry-run plan to roll tickets to the current format
 ti migrate --write            # apply it (idempotent); needed after upgrading ti
-ti reindex                    # rebuild the local store from refs/meta/* (--json)
+ti reindex                    # fetch, then add what the store lacks from refs/meta/* (--json, --markdown)
+ti reindex --reset            # replace the store with the remote; refuses while unsynced changes exist
 ```
 
 `ti verify` recomputes every operation's content id, confirms it matches the
@@ -341,22 +401,42 @@ tickets and is not reported. Because the push gate runs `ti verify`, a reported
 asymmetry also stops `ti sync` / `ti push` until it is repaired. Unsigned
 operations are trusted by default and reported as warnings, not failures.
 
-`ti reindex` rebuilds the local `git-meta.sqlite` from the git-meta refs. Use it
-to recover tickets that exist in `refs/meta/*` (e.g. synced from a since-removed
-worktree) but are missing from this checkout's store, or if the store file is
-lost. It re-applies the remote tracking ref and is non-destructive; run a sync
-first so the ref is present.
+`ti reindex` first fetches the meta remote's tip into the tracking ref
+`refs/meta/remotes/main` (without merging it), then adds to the local
+`git-meta.sqlite` what the remote tracking refs (`refs/meta/remotes/*`) hold and
+the store lacks: every key of a ticket the store has lost entirely (e.g. synced
+from a since-removed worktree, or a lost store file), and any whole key a ticket
+it holds is missing. It is additive: it never removes or rewrites a key,
+comment, Sub-issue, Dependency or Deletion the store holds, so it is safe at any
+time and exits 0 with unsynced work in place, and every `ti sync` runs it after
+the merge. The fetch is best-effort: with no meta remote it is skipped, and if
+the remote cannot be reached it warns on stderr and uses the refs the last sync
+fetched (a clone that has never synced has none, and the reindex fails). `--json`
+prints `{"tickets": N, "fetched": bool, "reset": bool}`.
+
+`ti reindex --reset` is the wholesale rebuild: it replaces the store with the
+remote tree, so unsynced comments, set members and removals on tickets the
+remote holds are lost, and ghost records no ref holds that project to no ticket
+are pruned (valid tickets never pushed are kept). Before it touches anything it
+serializes the store in full and compares it with the fetched remote tree; if
+the store holds changes the remote lacks it refuses with a non-zero exit, names
+how many on stderr, and leaves the store alone. Run `ti sync` first to publish
+them, or pass `--reset --force` to discard them.
 
 ### Recovering a stranded or damaged store
 
-- **Store missing tickets the remote has:** `ti reindex` rebuilds it from
-  `refs/meta/*`. A normal `ti sync` now does this automatically when it detects
-  the gap, so you rarely need to run it by hand.
+- **Store missing tickets the remote has:** `ti reindex` adds them back from
+  `refs/meta/*`. Every `ti sync` does this after its merge, so you rarely need
+  to run it by hand.
 - **A bad push slipped through (or you forced one with `--allow-deletes`):**
   restore the remote from the newest pre-push snapshot —
   `git push <remote> +<backup-ref>:refs/meta/main && ti reindex`, where
   `<backup-ref>` is the latest ref under `refs/ticgit-backup/<ns>/`
-  (list them with `git for-each-ref refs/ticgit-backup/`).
+  (list them with `git for-each-ref refs/ticgit-backup/`). The reindex fetches
+  the restored tip and adds back what the store lacks.
+- **Store holds bad data the remote does not:** `ti sync` to publish what you
+  want kept, then `ti reindex --reset` to replace the store with the remote
+  (`--force` only when you mean to drop unsynced changes).
 - **`ti verify` fails:** it lists the offending tickets; fix them or `ti reindex`,
   then sync. To repair a Sub-issue asymmetry, run `ti subissue <parent> -t
   <sub-issue>` with the parent named in the issue so both sides agree, then
@@ -404,5 +484,5 @@ ti review update
 - Mark blockers with `ti state blocked` and dependencies with `ti depends`.
 - Break large tickets into sub-issues with `ti subissue`.
 - Resolve tickets only after implementation and verification are complete.
-- Close tickets with `ti close`; reach for `ti delete` only to discard a ticket
-  that should leave no trace, and use `--recursive` so sub-issues are not orphaned.
+- Close tickets with `ti close`; reach for `ti delete` only for tickets that
+  should leave the backlog entirely. It is reversible with `ti undelete`.

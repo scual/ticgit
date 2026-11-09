@@ -108,7 +108,7 @@ ti close <id>
 | Area                | Commands                                                                                                   |
 | ------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **Create & browse** | `new` · `list`/`ls` · `show` · `recent` · `mine` · `history` · `tui`                                       |
-| **Work on tickets** | `checkout`/`co` · `next` · `edit` · `comment` · `state`/`status` · `close` · `delete`                      |
+| **Work on tickets** | `checkout`/`co` · `next` · `edit` · `comment` · `state`/`status` · `close` · `delete` · `undelete`         |
 | **Ticket fields**   | `tag` · `assign` · `priority` · `points` · `milestone` · `subissue` · `code` · `depends` · `deps` · `spec` · `meta` |
 | **Views & import**  | `views` · `writeup` · `review` · `stats` · `import gh\|linear`                                             |
 | **Team**            | `users`                                                                                                    |
@@ -163,15 +163,28 @@ silently delete tickets on the shared remote. **A ticket leaves the remote only 
 explicit deletion, never as a side effect of serializing an incomplete local store.** The sync
 path enforces that with four guards:
 
-- **Self-healing pull** — a remote ticket missing from your index triggers a reindex instead
-  of a silent "no new tickets".
-- **Deletion guard** — a push that would drop remote tickets you did not `ti delete` is
-  refused; pass `--allow-deletes` to remove them deliberately.
+- **Additive, self-healing pull** — after the merge, every pull adds back any remote ticket
+  (or ticket key) missing from your index, and never drops or rewrites what the index holds:
+  unsynced comments, Sub-issues, Dependencies and Deletions survive the sync.
+- **Deletion guard** — a push that would drop remote ticket keys is refused; pass
+  `--allow-deletes` to remove them deliberately. `ti delete` never trips it: a Deletion is an
+  operation in the ticket's log ([ADR 0003](docs/adr/0003-deletion-is-an-operation-reindex-is-additive.md)),
+  so the ticket keeps its keys, hides from `ti list`, syncs to every clone and comes back with
+  `ti undelete`. Edits another clone made to it before learning of the deletion are kept on the
+  hidden ticket, and the sync warns: `warning: N edit(s) landed on deleted ticket <short> (ti
+  undelete <short> to bring it back)` on stderr, `warnings` in `ti sync --json`.
+
+> **Upgrade every clone.** `ti` 0.4.2 and older skip the delete operation, so a ticket deleted
+> on an up-to-date clone still shows as alive there ("ghost" tickets). Nothing is lost; the
+> deletion takes effect once that clone upgrades.
 - **Pre-push backup** — the prior remote tip is snapshotted to `refs/ticgit-backup/<ns>/`
   (newest 10 kept) before any overwriting push, so a bad push stays reversible.
 - **Verify gate** — a store that fails `ti verify` is not pushed; pass `--no-verify` only for
   intentional recovery.
 
+`ti reindex` fetches the remote and adds whatever your store lacks; it never removes or rewrites
+anything, so it is safe at any time. `ti reindex --reset` replaces the store with the remote and
+refuses while you have unsynced changes (`ti sync` first, or `--force` to discard them).
 Recovering a stranded store, restoring from a backup ref, and the `ti reindex` runbook are
 documented in the [agent workflow guide](docs/agents.md#recovering-a-stranded-or-damaged-store)
 and [ADR 0002](docs/adr/0002-ticket-scalars-are-an-operation-log.md).
@@ -187,6 +200,7 @@ and [ADR 0002](docs/adr/0002-ticket-scalars-are-an-operation-log.md).
 - non-zero exit status means failure; ambiguous/missing id prefixes fail non-zero
 - ids may be full UUIDs or any unique prefix
 - `ti show --json` / mutations emit a ticket object; `ti list --json` emits an array
+- every ticket object carries `deleted`: `{ "at", "by" }` for a deleted ticket, `null` otherwise
 - `ti next --json` emits a ticket object, or `{ "next": null }` when nothing is workable
 
 Point an agent at the full workflow guide with `ti agent`.

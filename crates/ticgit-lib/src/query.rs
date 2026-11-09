@@ -31,6 +31,33 @@ pub struct Filter {
     /// relationship filter never silently hides a sub-issue blocker,
     /// dependent, or child.
     pub hide_subissues: bool,
+    /// Deletion filter ([`Ticket::is_deleted`]). Defaults to hiding deleted
+    /// tickets, so every caller that builds a filter from defaults (the TUI,
+    /// saved views, search) leaves them out without asking.
+    pub deleted: DeletedFilter,
+}
+
+/// Which tickets a [`Filter`] keeps with respect to deletion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DeletedFilter {
+    /// Live tickets only: deleted tickets are hidden (the default).
+    #[default]
+    Hide,
+    /// Deleted tickets only (`ti list --deleted`).
+    Only,
+    /// Both live and deleted tickets.
+    Include,
+}
+
+impl DeletedFilter {
+    /// Whether a ticket with this deletion status passes the filter.
+    pub fn keeps(self, ticket: &Ticket) -> bool {
+        match self {
+            DeletedFilter::Hide => !ticket.is_deleted(),
+            DeletedFilter::Only => ticket.is_deleted(),
+            DeletedFilter::Include => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +251,9 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     let mut tickets: Vec<Ticket> = tickets
         .into_iter()
         .filter(|t| {
+            if !filter.deleted.keeps(t) {
+                return false;
+            }
             if let Some(state) = filter.state {
                 if t.state != state {
                     return false;
@@ -328,19 +358,33 @@ fn next_state_rank(s: TicketState) -> u8 {
     }
 }
 
+/// `ticket`'s Sub-issue ids minus the deleted ones (`is_deleted` answers for
+/// an id; an id it does not know stays). A deleted Sub-issue is not live work,
+/// so it drops out of its Parent's Sub-issues everywhere they are shown; the
+/// stored set keeps it, and it comes back once undeleted.
+pub fn live_children(ticket: &Ticket, is_deleted: impl Fn(&Uuid) -> bool) -> Vec<&Uuid> {
+    ticket
+        .children
+        .iter()
+        .filter(|id| !is_deleted(id))
+        .collect()
+}
+
 /// Open, actionable tickets ordered best-first for `ti next`.
 ///
 /// A ticket is **excluded** from the queue when any of these hold:
-/// - it is closed (`status == Closed`);
-/// - it still has an open sub-issue (a parent is a container: its open
+/// - it is closed (`status == Closed`) or deleted ([`Ticket::is_deleted`]);
+/// - it still has an open, live sub-issue (a parent is a container: its open
 ///   sub-issues are picked instead, recursively, and the parent itself becomes
 ///   workable only once they are all closed);
-/// - it has an unresolved dependency (a `depends_on` id whose ticket is not
-///   closed, or is missing);
+/// - it has an unresolved dependency (a `depends_on` id whose ticket is
+///   missing, or neither closed nor deleted — an edge to a deleted ticket
+///   counts as absent);
 /// - it is tagged with a [`DEFERRED_TAGS`] value, unless
 ///   [`NextOptions::include_deferred`] is set;
 /// - any ancestor is deferred or has an unresolved dependency (a sub-issue
-///   inherits its parent's parking and gating).
+///   inherits its parent's parking and gating; the walk stops at a deleted
+///   ancestor, whose edge counts as absent).
 ///
 /// Plus the optional [`NextOptions::tag`] / [`NextOptions::assigned`] narrowing.
 ///
@@ -356,15 +400,17 @@ fn next_state_rank(s: TicketState) -> u8 {
 pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Ticket> {
     let by_id: std::collections::HashMap<Uuid, &Ticket> =
         tickets.iter().map(|t| (t.id, t)).collect();
-    let closed_ids: std::collections::HashSet<Uuid> = tickets
+    // A dependency is finished when its ticket is closed or deleted: the edge
+    // to a deleted ticket stays stored but counts as absent.
+    let finished_ids: std::collections::HashSet<Uuid> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Closed)
+        .filter(|t| !t.is_open_and_live())
         .map(|t| t.id)
         .collect();
-    // Parents that still have at least one open sub-issue.
+    // Parents that still have at least one open, live sub-issue.
     let parents_with_open_children: std::collections::HashSet<Uuid> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Open)
+        .filter(|t| t.is_open_and_live())
         .filter_map(|t| t.parent)
         .collect();
 
@@ -374,7 +420,7 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
                 .iter()
                 .any(|tag| DEFERRED_TAGS.contains(&tag.as_str()))
     };
-    let deps_resolved = |t: &Ticket| t.depends_on.iter().all(|dep| closed_ids.contains(dep));
+    let deps_resolved = |t: &Ticket| t.depends_on.iter().all(|dep| finished_ids.contains(dep));
     // Walk up the parent chain (cycle-safe): an ancestor that is deferred or
     // gated on an open dependency keeps all of its sub-issues out of the queue.
     let ancestor_parks = |t: &Ticket| {
@@ -384,7 +430,10 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
             if !seen.insert(pid) {
                 break;
             }
-            let Some(p) = by_id.get(&pid) else { break };
+            // A deleted parent is an absent edge: it parks nothing.
+            let Some(p) = by_id.get(&pid).filter(|p| !p.is_deleted()) else {
+                break;
+            };
             if is_deferred(p) || !deps_resolved(p) {
                 return true;
             }
@@ -395,7 +444,7 @@ pub fn next_queue<'a>(tickets: &'a [Ticket], opts: &NextOptions) -> Vec<&'a Tick
 
     let mut candidates: Vec<&Ticket> = tickets
         .iter()
-        .filter(|t| t.status == TicketStatus::Open)
+        .filter(|t| t.is_open_and_live())
         .filter(|t| !parents_with_open_children.contains(&t.id))
         .filter(|t| deps_resolved(t))
         .filter(|t| !is_deferred(t))
@@ -535,7 +584,9 @@ pub struct DepNode {
 /// `Dependents` follows `blocks` edges ("what finishing `root` unblocks").
 /// When `include_closed` is false, a closed ticket is omitted along with the
 /// whole subtree beneath it. Cycles on the active path are cut by a visited
-/// set, so the walk always terminates. An unknown `root` yields an empty tree.
+/// set, so the walk always terminates. A deleted ticket is always omitted with
+/// its subtree (an edge to it counts as absent). An unknown `root` yields an
+/// empty tree.
 #[must_use]
 pub fn dependency_tree(
     tickets: &[Ticket],
@@ -565,7 +616,8 @@ fn build_dep_nodes(
     };
     let mut nodes = Vec::new();
     for edge_id in edges {
-        let Some(next) = by_id.get(edge_id) else {
+        // An edge to a deleted ticket is absent, whatever `include_closed` says.
+        let Some(next) = by_id.get(edge_id).filter(|t| !t.is_deleted()) else {
             continue;
         };
         if !include_closed && next.status == TicketStatus::Closed {
@@ -629,7 +681,63 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::from_unix_timestamp(ts).unwrap(),
             created_by: "tester".into(),
+            deleted: None,
         }
+    }
+
+    fn deleted(mut ticket: Ticket) -> Ticket {
+        ticket.deleted = Some(crate::ticket::Deletion {
+            at: OffsetDateTime::from_unix_timestamp(9).unwrap(),
+            by: "tester".into(),
+        });
+        ticket
+    }
+
+    /// Every caller that builds a [`Filter`] from defaults (the TUI list,
+    /// saved views, search) hides deleted tickets without opting in.
+    #[test]
+    fn default_filter_hides_deleted_tickets_and_only_shows_them_on_request() {
+        let live = t("live", TicketStatus::Open, TicketState::New, None, None, 1);
+        let gone = deleted(t(
+            "gone",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            2,
+        ));
+        let input = vec![live.clone(), gone.clone()];
+        let titles = |filter: &Filter| -> Vec<String> {
+            apply(input.clone(), filter)
+                .into_iter()
+                .map(|t| t.title)
+                .collect()
+        };
+
+        // The TUI list's own construction: lifecycle knobs plus defaults.
+        let tui = Filter {
+            status: Some(TicketStatus::Open),
+            hide_subissues: true,
+            ..Default::default()
+        };
+        assert_eq!(titles(&tui), vec!["live"]);
+        assert_eq!(titles(&Filter::default()), vec!["live"]);
+        let search = Filter {
+            search: Some(SearchFilter::parse("e").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(titles(&search), vec!["live"]);
+
+        let only = Filter {
+            deleted: DeletedFilter::Only,
+            ..Default::default()
+        };
+        assert_eq!(titles(&only), vec!["gone"]);
+        let any = Filter {
+            deleted: DeletedFilter::Include,
+            ..Default::default()
+        };
+        assert_eq!(titles(&any).len(), 2);
     }
 
     #[test]

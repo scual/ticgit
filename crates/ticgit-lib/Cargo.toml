@@ -18,7 +18,9 @@ include = [
 ]
 
 [dependencies]
-git-meta-lib = { workspace = true }
+# `internal` exposes git-meta's tree parser and store, which the additive
+# reindex uses to read the remote tracking tree and apply single keys.
+git-meta-lib = { workspace = true, features = ["internal"] }
 gix          = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -36,4 +38,5 @@ default = []
 test-support = []
 
 [dev-dependencies]
+proptest = { workspace = true }
 tempfile = { workspace = true }

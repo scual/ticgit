@@ -31,7 +31,8 @@ pub struct TicketStats {
 }
 
 impl TicketStats {
-    /// Compute stats as of `now`. `closed_at` supplies close times (see
+    /// Compute stats as of `now` over the live tickets: deleted tickets
+    /// ([`Ticket::is_deleted`]) are not counted anywhere. `closed_at` supplies close times (see
     /// `TicketStore::closed_times`); a closed ticket without one falls back
     /// to its creation time. `assignee_label` turns an assignee email into
     /// the label counted under `assignees`.
@@ -52,7 +53,9 @@ impl TicketStats {
         let mut opened = Vec::new();
         let mut recently_closed = Vec::new();
 
-        for ticket in tickets {
+        let mut total = 0;
+        for ticket in tickets.iter().filter(|t| !t.is_deleted()) {
+            total += 1;
             match ticket.status {
                 TicketStatus::Open => open += 1,
                 TicketStatus::Closed => {
@@ -88,7 +91,7 @@ impl TicketStats {
             .count();
 
         Self {
-            total: tickets.len(),
+            total,
             open,
             closed,
             with_comments,
@@ -146,6 +149,7 @@ mod tests {
             comments: vec![],
             created_at: created,
             created_by: "tester".into(),
+            deleted: None,
         }
     }
 

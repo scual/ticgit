@@ -49,6 +49,8 @@ fn action_label(e: &HistoryEntry) -> &'static str {
         HistoryAction::Set => "set",
         HistoryAction::Cleared => "cleared",
         HistoryAction::Commented => "commented",
+        HistoryAction::Deleted => "deleted",
+        HistoryAction::Undeleted => "undeleted",
     }
 }
 
@@ -91,10 +93,15 @@ fn print_terminal(entries: &[HistoryEntry]) {
         }
 
         let verb = match e.action {
-            HistoryAction::Created | HistoryAction::Set | HistoryAction::Commented => {
+            HistoryAction::Created
+            | HistoryAction::Set
+            | HistoryAction::Commented
+            | HistoryAction::Undeleted => {
                 format!("{}{}{}", ANSI_GREEN, action_label(e), ANSI_RESET)
             }
-            HistoryAction::Cleared => format!("{}{}{}", ANSI_YELLOW, action_label(e), ANSI_RESET),
+            HistoryAction::Cleared | HistoryAction::Deleted => {
+                format!("{}{}{}", ANSI_YELLOW, action_label(e), ANSI_RESET)
+            }
         };
 
         let short_email = e.by.split('@').next().unwrap_or(&e.by);

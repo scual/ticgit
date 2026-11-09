@@ -59,6 +59,23 @@ pub fn tickets_tree_path() -> String {
     format!("project/{}", tickets_prefix().replace(':', "/"))
 }
 
+/// Path, inside a serialized git-meta tree, of the directory of the ticket
+/// key whose segments below the ticket are `segments` (the key
+/// [`ticket_key_from_segments`] names): `project/ticgit/tickets/<uuid>/meta/branch`
+/// for `["meta", "branch"]`.
+#[must_use]
+pub fn ticket_key_tree_path(id: &Uuid, segments: &[String]) -> String {
+    format!("{}/{id}/{}", tickets_tree_path(), segments.join("/"))
+}
+
+/// The ticket key whose segments below the ticket are `segments`, as read
+/// from a ticket's directory in a serialized git-meta tree:
+/// `ticgit:tickets:<uuid>:meta:branch` for `["meta", "branch"]`.
+#[must_use]
+pub fn ticket_key_from_segments(id: &Uuid, segments: &[String]) -> String {
+    ticket_field(id, &segments.join(":"))
+}
+
 /// A specific field on a specific ticket, e.g. `ticgit:tickets:<uuid>:title`.
 #[must_use]
 pub fn ticket_field(id: &Uuid, field: &str) -> String {
@@ -129,6 +146,20 @@ pub fn parse_ticket_op(key: &str) -> Option<(Uuid, u64, &str)> {
     }
     let lamport: u64 = lamport_part.parse().ok()?;
     Some((uuid, lamport, hash))
+}
+
+/// The remote tracking ref a meta fetch updates, `refs/<ns>/remotes/main`
+/// for git-meta namespace `ns`: what the remote held at the last fetch.
+#[must_use]
+pub fn meta_tracking_ref(ns: &str) -> String {
+    format!("refs/{ns}/remotes/main")
+}
+
+/// The forced refspec that fetches the meta remote's tip into
+/// [`meta_tracking_ref`]: `+refs/<ns>/main:refs/<ns>/remotes/main`.
+#[must_use]
+pub fn meta_fetch_refspec(ns: &str) -> String {
+    format!("+refs/{ns}/main:{}", meta_tracking_ref(ns))
 }
 
 /// Identity key mapping an email to its published SSH public key, e.g.
@@ -259,6 +290,29 @@ mod tests {
 
     fn fixed_uuid() -> Uuid {
         Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+    }
+
+    #[test]
+    fn meta_fetch_refspec_forces_the_tip_into_the_tracking_ref() {
+        assert_eq!(meta_tracking_ref("meta"), "refs/meta/remotes/main");
+        assert_eq!(
+            meta_fetch_refspec("meta"),
+            "+refs/meta/main:refs/meta/remotes/main"
+        );
+    }
+
+    #[test]
+    fn ticket_key_segments_map_to_key_and_tree_path() {
+        let id = fixed_uuid();
+        let segments = vec!["meta".to_string(), "branch".to_string()];
+        assert_eq!(
+            ticket_key_from_segments(&id, &segments),
+            "ticgit:tickets:00000000-0000-0000-0000-000000000001:meta:branch"
+        );
+        assert_eq!(
+            ticket_key_tree_path(&id, &segments),
+            "project/ticgit/tickets/00000000-0000-0000-0000-000000000001/meta/branch"
+        );
     }
 
     #[test]

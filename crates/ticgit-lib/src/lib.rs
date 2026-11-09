@@ -48,12 +48,15 @@
 pub mod error;
 pub mod history;
 pub mod keys;
+mod meta_tree;
 pub mod oplog;
 pub mod query;
+pub mod remote_state;
 pub mod review;
 pub mod signing;
 pub mod stats;
 pub mod store;
+pub mod sync_warning;
 pub mod ticket;
 pub mod writeup;
 
@@ -62,16 +65,22 @@ pub mod test_support;
 
 pub use error::{Error, Result};
 pub use history::{HistoryAction, HistoryEntry};
-pub use oplog::{canonical_json, content_id, replay, Lamport, Op, OpId, OpKind, CURRENT_OP_FORMAT};
+pub use oplog::{
+    canonical_json, content_id, project_deletion, replay, Lamport, Op, OpId, OpKind,
+    CURRENT_OP_FORMAT,
+};
 pub use query::{
-    dependency_tree, matches_tags, next_queue, priority_rank, DepDirection, DepNode, Filter,
-    NextOptions, SearchFilter, SearchScope, SortKey, SortOrder, DEFERRED_TAGS,
+    dependency_tree, live_children, matches_tags, next_queue, priority_rank, DeletedFilter,
+    DepDirection, DepNode, Filter, NextOptions, SearchFilter, SearchScope, SortKey, SortOrder,
+    DEFERRED_TAGS,
 };
 pub use review::*;
 pub use stats::TicketStats;
 pub use store::{ForkMerge, MigrationOutcome, TicketStore, VerifyOutcome, CURRENT_TICKET_FORMAT};
+pub use sync_warning::{DeletedTicketItems, SyncWarning};
 pub use ticket::{
-    validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
+    validate_code_uri, Comment, Deletion, NewTicketOpts, Ticket, TicketLifecycle, TicketState,
+    TicketStatus,
 };
 pub use writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 

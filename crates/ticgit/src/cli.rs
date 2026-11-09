@@ -33,7 +33,8 @@ use crate::commands;
   comment       Add a comment to a ticket
   state         Change a ticket's lifecycle status/state
   close         Close a ticket (shorthand for state resolved)
-  delete        Delete ticket(s) permanently
+  delete        Delete ticket(s) (hidden; reversible)
+  undelete      Bring back a deleted ticket
 
 \x1b[1;36mTicket Fields:\x1b[0m
   tag        Add or remove a tag
@@ -70,7 +71,7 @@ use crate::commands;
 \x1b[1;36mMaintenance:\x1b[0m
   migrate    Roll tickets forward to the current on-disk format
   verify     Check op-log integrity and operation signatures
-  reindex    Rebuild the local store from refs/meta/*
+  reindex    Recover tickets missing from the local store
 
 \x1b[1;36mAgents:\x1b[0m
   agent      Markdown guide for AI agents
@@ -166,8 +167,13 @@ pub enum Command {
     /// Close a ticket by marking it resolved.
     Close(commands::close::Args),
 
-    /// Delete one or more tickets permanently.
+    /// Delete one or more tickets. Deletion is an operation: the ticket is
+    /// hidden from `ti list` but keeps its comments, Sub-issues and
+    /// Dependencies, and `ti undelete` brings it back.
     Delete(commands::delete::Args),
+
+    /// Bring back a deleted ticket.
+    Undelete(commands::undelete::Args),
 
     // -- Ticket fields ----------------------------------------------------
     /// Add or remove a tag on a ticket.
@@ -253,7 +259,12 @@ pub enum Command {
     /// Verify op-log integrity: every ticket replays to a valid state.
     Verify(commands::verify::Args),
 
-    /// Rebuild the local store from refs/meta/* (recover stranded tickets).
+    /// Fetch the meta remote and add what the local store lacks (additive).
+    ///
+    /// Never removes or rewrites what the store holds, so unsynced work
+    /// survives it. `--reset` replaces the store with the remote tree instead,
+    /// and refuses while the store holds changes the remote lacks unless
+    /// `--force` is given.
     Reindex(commands::reindex::Args),
 
     /// Update ti to the latest release.
@@ -277,6 +288,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Claim(args)) => commands::claim::run(args),
         Some(Command::Close(args)) => commands::close::run(args),
         Some(Command::Delete(args)) => commands::delete::run(args),
+        Some(Command::Undelete(args)) => commands::undelete::run(args),
         Some(Command::Edit(args)) => commands::edit::run(args),
         Some(Command::Stats(args)) => commands::stats::run(args),
         Some(Command::Import(args)) => commands::import::run(args),

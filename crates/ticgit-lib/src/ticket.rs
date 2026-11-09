@@ -192,6 +192,16 @@ pub struct Comment {
     pub body: String,
 }
 
+/// Who deleted a ticket and when: the winning `del` operation
+/// ([`crate::oplog::project_deletion`]) projected onto the ticket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deletion {
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// Author email of the `del` operation.
+    pub by: String,
+}
+
 /// On-the-wire shape of a comment list entry. We JSON-encode this as
 /// the `value` of a git-meta `ListEntry`; the timestamp lives on the
 /// `ListEntry` itself.
@@ -227,15 +237,41 @@ pub struct Ticket {
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     pub created_by: String,
+    /// `Some` while the ticket is deleted (see [`Ticket::is_deleted`]).
+    /// Always serialized, as `null` for a live ticket.
+    #[serde(default)]
+    pub deleted: Option<Deletion>,
 }
 
 impl Ticket {
+    /// The one deletion predicate: a deleted ticket keeps its keys, history,
+    /// Dependencies and Sub-issues but is hidden from default views. Every consumer that
+    /// hides deleted tickets asks this, never `deleted` directly.
+    #[must_use]
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.is_some()
+    }
+
+    /// Open and not deleted: work that still holds back a Parent closing
+    /// over it or a ticket that depends on it. A Closed ticket is finished,
+    /// and a deleted one counts as absent.
+    #[must_use]
+    pub fn is_open_and_live(&self) -> bool {
+        self.status == TicketStatus::Open && !self.is_deleted()
+    }
+
     /// Short 6-char form of the UUID used in table output and as a
     /// human-friendly handle (e.g. `d7f2d8`).
     #[must_use]
     pub fn short_id(&self) -> String {
-        let s = self.id.to_string();
-        s.chars().take(6).collect()
+        Self::short_hex(&self.id)
+    }
+
+    /// The short display form of any ticket id: its first six hex digits,
+    /// as [`Self::short_id`] gives for a loaded ticket.
+    #[must_use]
+    pub fn short_hex(id: &Uuid) -> String {
+        id.to_string().chars().take(6).collect()
     }
 
     /// The "@user" portion of an email-style assigned handle, or the
@@ -377,6 +413,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "x".into(),
+            deleted: None,
         };
         assert_eq!(t.short_id(), "d7f2d8");
     }
@@ -405,6 +442,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "x".into(),
+            deleted: None,
         };
         assert_eq!(t.assigned_short().as_deref(), Some("jeff.welling"));
     }
@@ -433,6 +471,7 @@ mod tests {
             comments: vec![],
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "x".into(),
+            deleted: None,
         };
         assert_eq!(t.assigned_short().as_deref(), Some("jdoe"));
     }

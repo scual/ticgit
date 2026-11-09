@@ -16,11 +16,11 @@ Two conventions repeat almost everywhere, so they're stated once here:
 ## Table of contents
 
 - [Create & browse](#create--browse) — `new` `list` `show` `recent` `mine` `history` `tui`
-- [Work on tickets](#work-on-tickets) — `checkout` `next` `edit` `comment` `state` `close` `claim` `delete`
+- [Work on tickets](#work-on-tickets) — `checkout` `next` `edit` `comment` `state` `close` `claim` `delete` `undelete`
 - [Ticket fields](#ticket-fields) — `tag` `assign` `priority` `points` `milestone` `subissue` `code` `depends`/`dep` `spec` `meta`
 - [Views & import](#views--import) — `views` `writeup` `review` `stats` `import`
 - [Team](#team) — `users` `mine`
-- [Sync & setup](#sync--setup) — `sync` `pull` `push` `init` `setup` `update`
+- [Sync & setup](#sync--setup) — `sync` `pull` `push` `reindex` `init` `setup` `update`
 - [Agents](#agents) — `agent`
 
 ---
@@ -62,6 +62,8 @@ Two conventions repeat almost everywhere, so they're stated once here:
     --subissues            Include sub-issues (hidden by default).
     --depends-on <ID>      Tickets that depend on this ticket.
     --blocks <ID>          Tickets that block this ticket.
+    --deleted              Only deleted tickets (any status, incl. sub-issues).
+                           Deleted tickets are hidden otherwise.
 -n, --limit <LIMIT>        Max tickets. Default: terminal rows (0).
     --json / --markdown
 ```
@@ -108,7 +110,7 @@ No options. Browses open tickets interactively. (Not for non-interactive use.)
 
 ### `ti checkout` (alias `co`) — set the "current" ticket
 ```
-[TICKET]                   Id/prefix to mark current.
+[TICKET]                   Id/prefix to mark current. Fails on a deleted ticket.
 -c, --clear                Clear the checked-out ticket.
     --json / --markdown
 ```
@@ -162,21 +164,34 @@ Shorthand for `ti state resolved`; records the current user as `closed_by`.
     --json / --markdown
 ```
 
-### `ti delete` — permanently delete ticket(s)
+### `ti delete` — delete ticket(s) (hidden, reversible)
 ```
 [IDS]...                   One or more ids/prefixes (REQUIRED, POSITIONAL).
-                           No default-to-checked-out — a destructive op must be explicit.
+                           No default-to-checked-out — deletion must be explicit.
 -r, --recursive            Also delete the whole descendant subtree (incl. closed).
+    --reason <TEXT>        Recorded in the delete operation (`ti history`).
 -y, --yes                  Skip the confirmation prompt.
     --json / --markdown    Output the deleted ticket(s). --json emits an ARRAY of
-                           ticket objects (even for one id). Both require --yes.
+                           ticket objects (even for one id), each with
+                           `deleted: {at, by}`. Both require --yes.
 ```
-**Irreversible.** Resolves every id first — if any is unknown/ambiguous the whole
-batch aborts and nothing is deleted. Without `--recursive`, a deleted parent's
-sub-issues are **orphaned** (kept as top-level tickets), not deleted; `--recursive`
-removes the entire subtree. Prompts `[y/N]` unless `--yes`; machine mode
-(`--json`/`--markdown`) and non-interactive shells **require `--yes`** (they error
-instead of prompting). Clears the checked-out pointer if you delete the current ticket.
+Writes a delete operation per ticket; removes no keys and changes no other ticket,
+so comments, tags, Sub-issues and Dependencies survive and `ti undelete` brings
+it back exactly. Deleted tickets are hidden from `ti list` (see `--deleted`); `ti show`
+still works (exit 0, Deleted banner). Resolves every id first — if any is
+unknown/ambiguous/already deleted the whole batch aborts and nothing is deleted.
+Without `--recursive`, a deleted parent's sub-issues stay alive and keep their
+Parent. Prompts `[y/N]` unless `--yes`; machine mode (`--json`/`--markdown`)
+and non-interactive shells **require `--yes`** (they error instead of prompting).
+Clears the checked-out pointer if you delete the current ticket. ti <= 0.4.2 skips
+delete operations and shows such tickets as alive; upgrade every clone.
+
+### `ti undelete` — bring back a deleted ticket
+```
+<TICKET>                   Id/prefix of a deleted ticket (REQUIRED, POSITIONAL).
+    --json / --markdown    Output the undeleted ticket object.
+```
+Writes an undelete operation. Fails (non-zero) if the ticket is not deleted.
 
 ---
 
@@ -360,20 +375,46 @@ with code: any `git fetch`/`pull`/`push` should be paired with a `ti sync`.
 ### `ti sync` — pull then push ticket metadata
 ```
 -r, --remote <REMOTE>      Remote to sync. Default: git-meta's first meta remote.
+    --json                 Result object (schema `syncResult`).
+    --markdown             Short Markdown summary.
 ```
+If the sync merged edits into a ticket deleted locally before it (operations
+that follow the delete operation in Lamport order, comments, set members or
+custom fields), it prints one stderr line per ticket,
+`warning: N edit(s) landed on deleted ticket <short> (ti undelete <short> to
+bring it back)`, and exits 0. `--json` carries them as `warnings: [{"kind":
+"edit-on-deleted", "ticket": "<uuid>", "count": N}]` (always present, empty
+when none).
 
 ### `ti pull` — pull tickets from a fork / URL
 ```
 <SOURCE>                   URL or saved nickname to pull from.
 [NICKNAME]                 Save the URL under this nickname for reuse.
-    --json / --markdown
+    --json / --markdown    --json: result object (schema `pullResult`), with the
+                           same `warnings` array as `ti sync`.
 ```
+A ticket deleted on the fork arrives deleted; its Undeletion arrives too.
 
 ### `ti push` — push ticket metadata
 ```
 -r, --remote <REMOTE>      Remote to push to. Default: git-meta's first meta remote.
 ```
 Use once to seed a fresh remote, then `ti sync` afterward.
+
+### `ti reindex` — add what the local store lacks from the remote
+```
+    --reset                Replace the store with the remote tree instead.
+    --force                With --reset: go ahead despite unsynced changes.
+    --json                 {"tickets": N, "fetched": bool, "reset": bool}
+                           (schema `reindexResult`).
+    --markdown             Short Markdown summary.
+```
+Fetches the meta remote (best-effort; offline it uses the last fetched refs),
+then adds tickets and keys the store lacks. Additive: never removes or rewrites
+anything, so unsynced work survives and it always exits 0 when the refs are
+readable. `--reset` drops unsynced changes and prunes ghost records, so it
+refuses (non-zero, count on stderr) while the store holds changes the remote
+lacks: `ti sync` first, or add `--force`.
 
 ### `ti init` — initialise ticgit metadata (idempotent)
 No options. Sets up ticgit on the current repo.
@@ -406,10 +447,10 @@ CLI version — useful when a new `ti` release adds subcommands not listed here.
 
 - **`ti close` takes the id positionally or via `-t`**: `ti close <id>` and
   `ti close -t <id>` are equivalent (not both at once).
-- **`ti delete` is irreversible and non-interactive-safe only with `--yes`.**
-  It takes ids positionally (like `close`), accepts several at once, and refuses
-  to run in `--json`/`--markdown` or a non-TTY without `--yes`. Deleting a parent
-  orphans its sub-issues unless you pass `--recursive`. There is no undo.
+- **`ti delete` is reversible (`ti undelete`) and non-interactive-safe only with
+  `--yes`.** It takes ids positionally (like `close`), accepts several at once,
+  and refuses to run in `--json`/`--markdown` or a non-TTY without `--yes`. A
+  deleted ticket hides from `ti list` but `ti show` still finds it.
 - **`ti dep`** is an exact alias of **`ti depends`** — same flags.
 - **Dependency direction:** `ti depends <blocker> -t <id>` means *`<id>` depends
   on `<blocker>`* (i.e. `<blocker>` must be resolved first). `ti next` and

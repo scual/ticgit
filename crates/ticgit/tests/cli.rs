@@ -441,6 +441,16 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         schema["$defs"]["subissueNode"]["additionalProperties"],
         false
     );
+    // `deleted` is additive too: always emitted by this binary (`null` for a
+    // live ticket) but not required, so output from older binaries validates.
+    assert!(!required.contains("deleted"));
+    let deletion = &schema["$defs"]["deletion"];
+    assert_eq!(deletion["additionalProperties"], false);
+    assert_eq!(deletion["required"], serde_json::json!(["at", "by"]));
+    assert_eq!(
+        schema["$defs"]["ticket"]["properties"]["deleted"]["oneOf"],
+        serde_json::json!([{ "type": "null" }, { "$ref": "#/$defs/deletion" }])
+    );
 
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "schema ticket");
@@ -468,9 +478,12 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
         .keys()
         .map(|key| key.to_string())
         .collect();
-    let mut show_keys = required.clone();
+    let mut list_keys = required.clone();
+    list_keys.insert("deleted".to_string());
+    let mut show_keys = list_keys.clone();
     show_keys.insert("subissues".to_string());
     assert_eq!(ticket_keys, show_keys);
+    assert!(ticket["deleted"].is_null());
     assert!(ticket["subissues"].is_array());
     assert_eq!(ticket["id"], id);
     assert_eq!(ticket["status"], "open");
@@ -489,7 +502,16 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
     let list: Value = serde_json::from_slice(&output).unwrap();
     let first = &list.as_array().unwrap()[0];
     assert_eq!(first["id"], id);
-    assert_eq!(first.as_object().unwrap().len(), required.len());
+    let first_keys: BTreeSet<_> = first.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(first_keys, list_keys);
+
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    let deleted = show_json(&repo, &id)["deleted"].clone();
+    let deleted_keys: BTreeSet<_> = deleted.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        deleted_keys,
+        BTreeSet::from(["at".to_string(), "by".to_string()])
+    );
 }
 
 #[test]
@@ -757,6 +779,119 @@ fn sync_json_emits_result_object() {
     assert_eq!(json["ref"], "refs/meta/main");
     assert_eq!(json["pushed_total"], 1);
     assert!(json["pulled"].as_array().unwrap().is_empty());
+    // Nothing landed on a deleted ticket: `warnings` is present and empty.
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // The published schema documents exactly the keys `ti sync --json` emits.
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let sync_result = &schema["$defs"]["syncResult"];
+    assert_eq!(sync_result["additionalProperties"], false);
+    let documented: BTreeSet<String> = sync_result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    // `warnings` is additive: always emitted by this binary, not required,
+    // so output from older binaries still validates.
+    let required = sync_result["required"].as_array().unwrap();
+    assert!(!required.iter().any(|key| key == "warnings"));
+    assert!(required.iter().any(|key| key == "pushed_total"));
+    let warning = &schema["$defs"]["syncWarning"];
+    assert_eq!(warning["additionalProperties"], false);
+    assert_eq!(
+        warning["required"],
+        serde_json::json!(["kind", "ticket", "count"])
+    );
+    assert_eq!(
+        warning["properties"]["kind"]["enum"],
+        serde_json::json!(["edit-on-deleted"])
+    );
+    assert_eq!(
+        sync_result["properties"]["warnings"]["items"]["$ref"],
+        "#/$defs/syncWarning"
+    );
+}
+
+#[test]
+fn sync_markdown_summarises_the_sync() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "synced ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    let out = b
+        .ti()
+        .args(["sync", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let md = String::from_utf8(out).unwrap();
+    assert!(md.starts_with("## Sync\n"), "{md}");
+    assert!(md.contains("- Ref: `refs/meta/main`"), "{md}");
+    assert!(md.contains("- Pushed: 1 ticket(s)"), "{md}");
+    assert!(md.contains(&format!("- **{short}** synced ticket")), "{md}");
+    assert!(!md.contains("\x1b["), "markdown carries no ANSI color");
+}
+
+#[test]
+fn reindex_json_matches_the_schema_and_markdown_summarises_it() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+    let repo = clone_of(&remote_url);
+    create_ticket(&repo, "indexed ticket");
+    repo.ti().arg("sync").assert().success();
+
+    let out = repo
+        .ti()
+        .args(["reindex", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("reindex json");
+    assert_eq!(
+        json,
+        serde_json::json!({ "tickets": 1, "fetched": true, "reset": false })
+    );
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let result = &schema["$defs"]["reindexResult"];
+    assert_eq!(result["additionalProperties"], false);
+    let documented: BTreeSet<String> = result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    assert!(schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "$ref": "#/$defs/reindexResult" })));
+
+    let out = repo
+        .ti()
+        .args(["reindex", "--markdown"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "## Reindex\n\n- Mode: additive\n- Fetched the meta remote: yes\n- Tickets: 1\n"
+    );
 }
 
 #[test]
@@ -1353,7 +1488,7 @@ fn delete_without_yes_fails_non_interactively() {
     let id = create_ticket(&repo, "keep me");
     repo.ti().args(["delete", &id]).assert().failure();
     // Still present.
-    repo.ti().args(["show", &id, "--json"]).assert().success();
+    assert!(show_json(&repo, &id)["deleted"].is_null());
 }
 
 #[test]
@@ -1365,11 +1500,11 @@ fn delete_unknown_id_is_atomic() {
         .args(["delete", &keep, "ffffffff", "--yes"])
         .assert()
         .failure();
-    repo.ti().args(["show", &keep, "--json"]).assert().success();
+    assert!(show_json(&repo, &keep)["deleted"].is_null());
 }
 
 #[test]
-fn delete_parent_orphans_children_by_default() {
+fn delete_parent_keeps_its_sub_issues_under_it() {
     let repo = TestRepo::new();
     let parent = create_ticket(&repo, "parent");
     let child = create_subissue(&repo, &parent, "child");
@@ -1377,17 +1512,12 @@ fn delete_parent_orphans_children_by_default() {
         .args(["delete", &parent, "--yes"])
         .assert()
         .success();
-    // Child survives and is now top-level (parent is null).
-    let out = repo
-        .ti()
-        .args(["show", &child, "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let t: Value = serde_json::from_slice(&out).unwrap();
-    assert!(t["parent"].is_null());
+    // Deletion is soft: the child survives, alive, still pointing at its
+    // (deleted) parent, so `ti undelete` brings the tree back without setting a
+    // Parent again.
+    let t = show_json(&repo, &child);
+    assert_eq!(t["parent"], parent.as_str());
+    assert!(t["deleted"].is_null());
 }
 
 #[test]
@@ -1403,8 +1533,9 @@ fn delete_recursive_removes_subtree_including_closed() {
         .assert()
         .success();
     for id in [&parent, &child, &grandchild] {
-        repo.ti().args(["show", id, "--json"]).assert().failure();
+        assert!(show_json(&repo, id)["deleted"].is_object(), "{id} deleted");
     }
+    assert!(list_ids(&repo, &["--all"]).is_empty());
 }
 
 #[test]
@@ -1505,7 +1636,7 @@ fn delete_json_requires_yes() {
         .failure()
         .stdout(predicate::eq(""));
     // Not deleted.
-    repo.ti().args(["show", &id, "--json"]).assert().success();
+    assert!(show_json(&repo, &id)["deleted"].is_null());
 }
 
 #[test]
@@ -3147,6 +3278,73 @@ fn pull_applies_fork_parent_change_to_op_based_ticket() {
     assert_eq!(json["ok"], true);
 }
 
+/// A fork's Deletion reaches the pulling clone (the ticket arrives deleted,
+/// not live), and an edit the fork made to a ticket deleted locally is
+/// reported the way `ti sync` reports it.
+#[test]
+fn pull_carries_fork_deletions_and_warns_about_edits_on_deleted_tickets() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let gone = create_ticket(&a, "deleted on the fork");
+    let ours = create_ticket(&a, "deleted here");
+    let short: String = ours.chars().take(6).collect();
+    a.ti().arg("push").assert().success();
+
+    let b = TestRepo::new();
+    b.ti().arg("init").assert().success();
+    b.ti().args(["pull", &remote_url]).assert().success();
+
+    a.ti().args(["delete", &gone, "--yes"]).assert().success();
+    a.ti()
+        .args(["comment", "-t", &ours, "the fork kept working"])
+        .assert()
+        .success();
+    a.ti().arg("push").assert().success();
+    b.ti().args(["delete", &ours, "--yes"]).assert().success();
+
+    let out = b
+        .ti()
+        .args(["pull", &remote_url, "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("pull json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": ours, "count": 1 }])
+    );
+    assert!(show_json(&b, &gone)["deleted"].is_object());
+    assert!(!list_ids(&b, &[]).contains(&gone));
+    let hidden = show_json(&b, &ours);
+    assert!(hidden["deleted"].is_object());
+    assert_eq!(comment_bodies(&hidden), vec!["the fork kept working"]);
+
+    // The published schema documents exactly the keys `ti pull --json` emits.
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
+    let pull_result = &schema["$defs"]["pullResult"];
+    assert_eq!(pull_result["additionalProperties"], false);
+    let documented: BTreeSet<String> = pull_result["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let emitted: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(emitted, documented);
+    assert_eq!(
+        pull_result["properties"]["warnings"]["items"]["$ref"],
+        "#/$defs/syncWarning"
+    );
+}
+
 #[test]
 fn history_shows_readable_entries_without_raw_ops() {
     let repo = TestRepo::new();
@@ -4101,35 +4299,65 @@ fn push_refuses_deletion_without_flag_but_allows_it_with_flag() {
     git(remote.path(), &["init", "--bare", "--quiet"]);
     let remote_url = remote.path().to_string_lossy().to_string();
 
-    // Clone A seeds two tickets on the remote.
+    // Clone A seeds three tickets on the remote.
     let a = TestRepo::new();
     git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
     a.ti().arg("init").assert().success();
     create_ticket(&a, "keep me");
     let doomed = create_ticket(&a, "delete me");
+    let gone = create_ticket(&a, "vanish me");
     a.ti().arg("push").assert().success();
     a.ti().arg("sync").assert().success();
 
-    // Delete one ticket locally. A plain push now looks like a deletion and is
-    // refused with actionable guidance.
+    // `ti delete` is an operation that keeps the ticket's keys, so it never
+    // trips the implicit-deletion guard.
     a.ti().args(["delete", &doomed, "-y"]).assert().success();
+    a.ti().arg("push").assert().success();
+
+    // A ticket whose keys vanished (a stranded store, or an older ti that
+    // removed keys) looks like an implicit deletion and is refused with
+    // actionable guidance.
+    remove_ticket_keys(&a, &gone);
     a.ti()
         .arg("push")
         .assert()
         .failure()
         .stderr(predicate::str::contains("--allow-deletes"));
 
-    // With the opt-in flag the deletion propagates to the remote.
+    // With the opt-in flag the key removal propagates to the remote.
     a.ti().args(["push", "--allow-deletes"]).assert().success();
 
-    // A fresh clone sees "keep me" but not "delete me".
+    // A fresh clone lists "keep me" only; "delete me" is there but deleted.
     let b = TestRepo::new();
     git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
     b.ti().arg("init").assert().success();
     b.ti().arg("sync").assert().success();
-    b.ti().args(["list"]).assert().success().stdout(
-        predicate::str::contains("keep me").and(predicate::str::contains("delete me").not()),
+    b.ti().args(["list", "--all"]).assert().success().stdout(
+        predicate::str::contains("keep me")
+            .and(predicate::str::contains("delete me").not())
+            .and(predicate::str::contains("vanish me").not()),
     );
+    b.ti()
+        .args(["list", "--deleted"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("delete me"));
+}
+
+/// Remove every key of a ticket directly in the store, the way a stranded
+/// index or a `ti delete` from ti <= 0.4.2 left it.
+fn remove_ticket_keys(repo: &TestRepo, id: &str) {
+    use ticgit_lib::{Session, Target, TicketStore};
+    let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+    let store = TicketStore::from_session(session).expect("from_session");
+    let p = store.session().target(&Target::project());
+    let id = uuid::Uuid::parse_str(id).expect("uuid");
+    for (key, _) in p
+        .get_all_values(Some(&ticgit_lib::keys::ticket_prefix(&id)))
+        .expect("ticket keys")
+    {
+        p.remove(&key).expect("remove key");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4161,42 +4389,44 @@ fn verify_ignores_create_failure_residue() {
     );
 }
 
-/// `ti reindex` is a projection of refs/meta/*: it must prune ghost residue
-/// that is absent from every meta ref and does not project to a real ticket
-/// (an additive materialize leaves such rows behind), while keeping both
-/// ref-backed tickets and valid local-only tickets that have not been pushed.
+/// `ti reindex` is additive (ADR 0003): it gains a ticket the index lost from
+/// refs/meta/* and leaves everything the index holds alone, so a valid
+/// local-only ticket and an unsynced comment on a pushed ticket survive it.
+/// (Pruning ghost residue belongs to the wholesale `reindex_reset`.)
 #[test]
-fn reindex_prunes_unbacked_ghost_but_keeps_valid_local_ticket() {
-    let repo = TestRepo::new();
+fn reindex_gains_lost_tickets_and_keeps_unsynced_local_work() {
     let remote = tempfile::tempdir().expect("bare remote tempdir");
     git(remote.path(), &["init", "--bare", "--quiet"]);
     let remote_url = remote.path().to_string_lossy().to_string();
-    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
-    repo.ti().arg("init").assert().success();
+    let repo = clone_of(&remote_url);
 
-    // A pushed, ref-backed ticket and the tracking ref. Titles are kept short
-    // so the list table does not truncate them in the assertions below.
-    create_ticket(&repo, "backedtkt");
-    repo.ti().arg("push").assert().success();
+    // Titles are kept short so the list table does not truncate them.
+    let backed = create_ticket(&repo, "backedtkt");
+    repo.ti()
+        .args(["comment", "-t", &backed, "pushed comment"])
+        .assert()
+        .success();
+    let lost = create_ticket(&repo, "losttkt");
     repo.ti().arg("sync").assert().success();
 
-    // A valid ticket created but never pushed (lives only in the local store).
     create_ticket(&repo, "localtkt");
-
-    // A failed create leaves an op-less shell ghost in the store.
     repo.ti()
-        .args(["new", "-t", "ghosty", "-a", "zzz-no-such-nick"])
+        .args(["comment", "-t", &backed, "unsynced comment"])
         .assert()
-        .failure();
+        .success();
+    strand_ticket(&repo, &lost);
 
     repo.ti().arg("reindex").assert().success();
 
-    // The ghost is gone; both real tickets survive.
     repo.ti().arg("verify").assert().success();
     repo.ti().args(["list"]).assert().success().stdout(
         predicate::str::contains("backedtkt")
-            .and(predicate::str::contains("localtkt"))
-            .and(predicate::str::contains("ghosty").not()),
+            .and(predicate::str::contains("losttkt"))
+            .and(predicate::str::contains("localtkt")),
+    );
+    assert_eq!(
+        comment_bodies(&show_json(&repo, &backed)),
+        vec!["pushed comment", "unsynced comment"]
     );
 }
 
@@ -4535,5 +4765,1205 @@ fn verify_reports_a_parent_listing_a_sub_issue_that_has_no_parent() {
         .success();
     assert!(show_json(&repo, &sub)["parent"].is_null());
     assert!(json_strings(&show_json(&repo, &parent)["children"]).is_empty());
+    repo.ti().arg("verify").assert().success();
+}
+
+// ---------------------------------------------------------------------------
+// Deletion is an operation (ticket 88f85c, ADR 0003)
+// ---------------------------------------------------------------------------
+
+fn list_ids(repo: &TestRepo, extra: &[&str]) -> BTreeSet<String> {
+    let mut args = vec!["list", "--json"];
+    args.extend_from_slice(extra);
+    let out = repo
+        .ti()
+        .args(&args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&out).expect("list json");
+    list.as_array()
+        .expect("array")
+        .iter()
+        .map(|t| t["id"].as_str().expect("id").to_string())
+        .collect()
+}
+
+#[test]
+fn deleted_ticket_is_hidden_from_list_and_list_deleted_shows_only_it() {
+    let repo = TestRepo::new();
+    let doomed = create_ticket(&repo, "doomed");
+    let alive = create_ticket(&repo, "alive");
+    repo.ti()
+        .args(["delete", &doomed, "--yes"])
+        .assert()
+        .success();
+
+    assert_eq!(list_ids(&repo, &[]), BTreeSet::from([alive.clone()]));
+    assert_eq!(list_ids(&repo, &["--all"]), BTreeSet::from([alive]));
+    assert_eq!(
+        list_ids(&repo, &["--deleted"]),
+        BTreeSet::from([doomed.clone()])
+    );
+    repo.ti()
+        .args(["list", "--deleted"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doomed"))
+        .stdout(predicate::str::contains("alive").not());
+}
+
+#[test]
+fn delete_json_reports_the_deletion_and_a_second_delete_fails() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "twice");
+    let out = repo
+        .ti()
+        .args(["delete", &id, "--yes", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v[0]["deleted"]["by"], "tester@example.com");
+    repo.ti()
+        .args(["delete", &id, "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already deleted"));
+}
+
+#[test]
+fn show_on_deleted_ticket_exits_zero_with_a_deleted_banner() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "ghost");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted"))
+        .stdout(predicate::str::contains("tester@example.com"))
+        .stdout(predicate::str::contains("ti undelete"));
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Deleted**"))
+        .stdout(predicate::str::contains("tester@example.com"));
+
+    let json = show_json(&repo, &id);
+    assert_eq!(json["deleted"]["by"], "tester@example.com");
+    let at = json["deleted"]["at"].as_str().expect("deleted.at string");
+    assert!(
+        at.contains('T') && at.len() >= 20,
+        "rfc3339 timestamp: {at}"
+    );
+}
+
+#[test]
+fn live_ticket_show_has_no_deleted_banner() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "alive and well");
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted").not());
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("**Deleted**").not());
+}
+
+#[test]
+fn checkout_refuses_a_deleted_ticket() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "ghost");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    repo.ti()
+        .args(["checkout", &id])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""))
+        .stderr(predicate::str::contains("deleted"))
+        .stderr(predicate::str::contains("ti undelete"));
+    // Nothing was checked out.
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
+fn delete_writes_no_set_changes_on_parent_or_dependency_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let blocker = create_ticket(&repo, "blocker");
+    let dependent = create_ticket(&repo, "dependent");
+    repo.ti()
+        .args(["depends", "-t", &child, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["depends", "-t", &dependent, &child])
+        .assert()
+        .success();
+    let before: Vec<Value> = [&parent, &blocker, &dependent]
+        .iter()
+        .map(|id| show_json(&repo, id))
+        .collect();
+
+    repo.ti()
+        .args(["delete", &child, "--yes"])
+        .assert()
+        .success();
+
+    let after: Vec<Value> = [&parent, &blocker, &dependent]
+        .iter()
+        .map(|id| show_json(&repo, id))
+        .collect();
+    // `subissues` is a derived, open-only view; the stored sets must not move.
+    for (b, a) in before.iter().zip(&after) {
+        for field in ["children", "depends_on", "blocks", "parent", "deleted"] {
+            assert_eq!(b[field], a[field], "{field} of {} changed", b["title"]);
+        }
+    }
+}
+
+#[test]
+fn undelete_brings_the_ticket_back_with_comments_tags_dependencies_and_sub_issues_intact() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let child = create_subissue(&repo, &parent, "child");
+    let blocker = create_ticket(&repo, "blocker");
+    repo.ti()
+        .args(["depends", "-t", &child, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &child, "keep this note"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &child, "important"])
+        .assert()
+        .success();
+    let before = show_json(&repo, &child);
+
+    repo.ti()
+        .args(["delete", &child, "--yes"])
+        .assert()
+        .success();
+    let out = repo
+        .ti()
+        .args(["undelete", &child, "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let undeleted: Value = serde_json::from_slice(&out).expect("undelete json");
+    assert_eq!(undeleted["id"], child.as_str());
+    assert!(undeleted["deleted"].is_null());
+
+    let after = show_json(&repo, &child);
+    assert_eq!(after, before);
+    assert_eq!(after["comments"][0]["body"], "keep this note");
+    assert_eq!(json_strings(&after["tags"]), vec!["important".to_string()]);
+    assert_eq!(after["parent"], parent.as_str());
+    assert_eq!(json_strings(&after["depends_on"]), vec![blocker.clone()]);
+    assert_eq!(
+        json_strings(&show_json(&repo, &parent)["children"]),
+        vec![child.clone()]
+    );
+    assert_eq!(
+        json_strings(&show_json(&repo, &blocker)["blocks"]),
+        vec![child.clone()]
+    );
+    assert!(list_ids(&repo, &["--subissues"]).contains(&child));
+
+    // Undeleting a live ticket is refused (a stray undelete would outrank a
+    // concurrent delete from another clone).
+    repo.ti()
+        .args(["undelete", &child])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not deleted"));
+}
+
+#[test]
+fn deletion_travels_to_other_clones_and_keeps_edits_made_before_they_sync() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "shared ticket");
+    let keep = create_ticket(&a, "bystander");
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+    assert!(list_ids(&b, &[]).contains(&id));
+
+    // A deletes and syncs; B, not yet synced, comments on the ticket.
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["comment", "-t", &id, "written before B synced"])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+
+    // B now hides the ticket; the comment landed on the hidden ticket.
+    assert_eq!(list_ids(&b, &[]), BTreeSet::from([keep.clone()]));
+    assert_eq!(list_ids(&b, &["--deleted"]), BTreeSet::from([id.clone()]));
+    let hidden = show_json(&b, &id);
+    assert!(hidden["deleted"].is_object(), "deleted on B: {hidden}");
+    assert_eq!(hidden["comments"][0]["body"], "written before B synced");
+
+    // Undelete (on A, after it picks up B's comment): visible everywhere,
+    // comment intact.
+    a.ti().arg("sync").assert().success();
+    a.ti().args(["undelete", &id]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+    for clone in [&a, &b] {
+        assert!(list_ids(clone, &[]).contains(&id));
+        let t = show_json(clone, &id);
+        assert!(t["deleted"].is_null());
+        assert_eq!(t["comments"][0]["body"], "written before B synced");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pull self-heal is additive (ticket f4ceb3, incident 215ee3, ADR 0003)
+// ---------------------------------------------------------------------------
+
+/// A fresh clone with `origin` pointing at `remote_url` and `ti init` run.
+fn clone_of(remote_url: &str) -> TestRepo {
+    let repo = TestRepo::new();
+    git(repo.dir.path(), &["remote", "add", "origin", remote_url]);
+    repo.ti().arg("init").assert().success();
+    repo
+}
+
+/// Drop every index row of ticket `id` from `repo`'s `git-meta.sqlite`, the
+/// way a lost or partially rebuilt index loses it: no tombstone, no log entry,
+/// and `refs/meta/*` untouched.
+fn strand_ticket(repo: &TestRepo, id: &str) {
+    let db = rusqlite::Connection::open(repo.dir.path().join(".git/git-meta.sqlite"))
+        .expect("open git-meta.sqlite");
+    let pattern = format!("ticgit:tickets:{id}:%");
+    let rows = "SELECT rowid FROM metadata WHERE key LIKE ?1";
+    db.execute(
+        &format!("DELETE FROM list_values WHERE metadata_id IN ({rows})"),
+        [&pattern],
+    )
+    .expect("drop list rows");
+    db.execute(
+        &format!("DELETE FROM set_values WHERE metadata_id IN ({rows})"),
+        [&pattern],
+    )
+    .expect("drop set rows");
+    let dropped = db
+        .execute("DELETE FROM metadata WHERE key LIKE ?1", [&pattern])
+        .expect("drop metadata rows");
+    assert!(dropped > 0, "ticket {id} had no index rows");
+}
+
+fn comment_bodies(ticket: &Value) -> Vec<String> {
+    ticket["comments"]
+        .as_array()
+        .expect("comments array")
+        .iter()
+        .map(|c| c["body"].as_str().expect("body").to_string())
+        .collect()
+}
+
+/// Incident 215ee3: a clone with unsynced comments, Sub-issues, Dependencies
+/// and Deletions runs `ti sync` against a remote that still holds the state of
+/// its previous sync, while its index has lost a ticket the remote holds, so
+/// the pull's stranded-index self-heal runs. Nothing local may be dropped, no
+/// deleted ticket may come back, and the stranded ticket is recovered, on this
+/// clone and on the next one to sync.
+#[test]
+fn sync_keeps_every_unsynced_local_change_from_the_incident() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let map = create_ticket(&a, "map ticket");
+    let old_sub = create_subissue(&a, &map, "old sub-issue");
+    let talked = create_ticket(&a, "talked about");
+    a.ti()
+        .args(["comment", "-t", &talked, "first remote comment"])
+        .assert()
+        .success();
+    let dependent = create_ticket(&a, "dependent");
+    let blocker = create_ticket(&a, "blocker");
+    let doomed_one = create_ticket(&a, "doomed one");
+    let doomed_two = create_ticket(&a, "doomed two");
+    let stranded = create_ticket(&a, "stranded");
+    a.ti()
+        .args(["comment", "-t", &stranded, "kept by the remote"])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    // Unsynced work in A.
+    a.ti()
+        .args(["comment", "-t", &talked, "second, local-only comment"])
+        .assert()
+        .success();
+    let new_sub_one = create_subissue(&a, &map, "new sub-issue one");
+    let new_sub_two = create_subissue(&a, &map, "new sub-issue two");
+    a.ti()
+        .args(["depends", "-t", &dependent, &blocker])
+        .assert()
+        .success();
+    a.ti()
+        .args(["depends", "-t", &talked, &blocker])
+        .assert()
+        .success();
+    a.ti()
+        .args(["delete", &doomed_one, &doomed_two, "--yes"])
+        .assert()
+        .success();
+    // The index loses a ticket the remote still holds, so this pull runs the
+    // stranded-index self-heal while all of the work above is unsynced.
+    strand_ticket(&a, &stranded);
+    assert!(!list_ids(&a, &[]).contains(&stranded));
+
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    for clone in [&a, &b] {
+        let t = show_json(clone, &talked);
+        assert_eq!(
+            comment_bodies(&t),
+            vec!["first remote comment", "second, local-only comment"],
+            "comments: {t}"
+        );
+        assert_eq!(json_strings(&t["depends_on"]), vec![blocker.clone()]);
+
+        let children: BTreeSet<String> = json_strings(&show_json(clone, &map)["children"])
+            .into_iter()
+            .collect();
+        assert_eq!(
+            children,
+            BTreeSet::from([old_sub.clone(), new_sub_one.clone(), new_sub_two.clone()])
+        );
+        assert_eq!(
+            json_strings(&show_json(clone, &dependent)["depends_on"]),
+            vec![blocker.clone()]
+        );
+        let blocks: BTreeSet<String> = json_strings(&show_json(clone, &blocker)["blocks"])
+            .into_iter()
+            .collect();
+        assert_eq!(blocks, BTreeSet::from([dependent.clone(), talked.clone()]));
+
+        let live = list_ids(clone, &[]);
+        assert!(!live.contains(&doomed_one) && !live.contains(&doomed_two));
+        assert_eq!(
+            list_ids(clone, &["--deleted"]),
+            BTreeSet::from([doomed_one.clone(), doomed_two.clone()])
+        );
+        assert_eq!(
+            comment_bodies(&show_json(clone, &stranded)),
+            vec!["kept by the remote"]
+        );
+        clone.ti().arg("verify").assert().success();
+    }
+}
+
+/// A Stranded index the remote has moved on from: the merge brings in only
+/// what another clone appended to the lost ticket since, so the ticket is
+/// partly indexed. The pull still restores its earlier operations and
+/// comments, keeps this clone's unsynced edit, and the push leaves every
+/// operation on the remote.
+#[test]
+fn sync_restores_a_stranded_ticket_the_remote_appended_to() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let lost = create_ticket(&a, "lost then appended");
+    a.ti()
+        .args(["comment", "-t", &lost, "from before the loss"])
+        .assert()
+        .success();
+    let other = create_ticket(&a, "edited meanwhile");
+    a.ti()
+        .args(["comment", "-t", &other, "synced in A"])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["priority", "1", "-t", &lost])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+
+    strand_ticket(&a, &lost);
+    a.ti()
+        .args(["comment", "-t", &other, "unsynced in A"])
+        .assert()
+        .success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    for clone in [&a, &b] {
+        let t = show_json(clone, &lost);
+        assert_eq!(t["title"], "lost then appended", "{t}");
+        assert_eq!(t["priority"], 1, "{t}");
+        assert_eq!(comment_bodies(&t), vec!["from before the loss"]);
+        assert_eq!(
+            comment_bodies(&show_json(clone, &other)),
+            vec!["synced in A", "unsynced in A"]
+        );
+        clone.ti().arg("verify").assert().success();
+    }
+}
+
+#[test]
+fn show_omits_a_deleted_sub_issue_until_it_is_undeleted() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let kept = create_subissue(&repo, &parent, "kept child");
+    let doomed = create_subissue(&repo, &parent, "doomed child");
+    repo.ti()
+        .args(["delete", &doomed, "--yes"])
+        .assert()
+        .success();
+
+    let subissue_ids = |repo: &TestRepo| -> Vec<String> {
+        show_json(repo, &parent)["subissues"]
+            .as_array()
+            .expect("subissues array")
+            .iter()
+            .map(|n| n["id"].as_str().expect("id").to_string())
+            .collect()
+    };
+    assert_eq!(subissue_ids(&repo), vec![kept.clone()]);
+    for args in [
+        vec!["show", parent.as_str()],
+        vec!["show", parent.as_str(), "--markdown"],
+    ] {
+        repo.ti()
+            .args(&args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("kept child"))
+            .stdout(predicate::str::contains("doomed child").not());
+    }
+
+    repo.ti().args(["undelete", &doomed]).assert().success();
+    let mut ids = subissue_ids(&repo);
+    ids.sort();
+    let mut want = vec![kept, doomed];
+    want.sort();
+    assert_eq!(ids, want);
+    repo.ti()
+        .args(["show", &parent])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doomed child"));
+}
+
+#[test]
+fn a_deleted_dependency_no_longer_holds_back_its_dependent() {
+    let repo = TestRepo::new();
+    let dependent = create_ticket(&repo, "dependent");
+    let blocker = create_ticket(&repo, "vanished blocker");
+    repo.ti()
+        .args(["depends", "-t", &dependent, &blocker])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["delete", &blocker, "--yes"])
+        .assert()
+        .success();
+
+    // `ti next` picks the dependent: the edge to a deleted ticket is absent.
+    assert_eq!(next_json(&repo)["id"], dependent.as_str());
+
+    // `ti show` keeps the edge but greys it out as "(deleted)", not [open].
+    let short = &blocker[..6];
+    for args in [
+        vec!["show", dependent.as_str()],
+        vec!["show", dependent.as_str(), "--markdown"],
+    ] {
+        let out = repo
+            .ti()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let out = String::from_utf8(out).unwrap();
+        let line = out
+            .lines()
+            .find(|l| l.contains("Depends"))
+            .unwrap_or_else(|| panic!("Depends line in {out}"));
+        assert!(line.contains(short), "{line}");
+        assert!(line.contains("(deleted)"), "{line}");
+        assert!(!line.contains("[open]"), "{line}");
+    }
+    assert_eq!(
+        json_strings(&show_json(&repo, &dependent)["depends_on"]),
+        vec![blocker.clone()]
+    );
+
+    // Nor does it hold up closing the dependent.
+    repo.ti().args(["close", &dependent]).assert().success();
+}
+
+#[test]
+fn next_never_picks_a_deleted_ticket_or_deleted_sub_issue() {
+    let repo = TestRepo::new();
+    let urgent = create_ticket(&repo, "urgent but deleted");
+    repo.ti()
+        .args(["priority", "1", "-t", &urgent])
+        .assert()
+        .success();
+    let container = create_ticket(&repo, "container");
+    let doomed = create_subissue(&repo, &container, "deleted sub-issue");
+    repo.ti()
+        .args(["priority", "1", "-t", &doomed])
+        .assert()
+        .success();
+    for id in [&urgent, &doomed] {
+        repo.ti().args(["delete", id, "--yes"]).assert().success();
+    }
+
+    // The container's only sub-issue is deleted, so the container itself is
+    // the work; neither deleted ticket is offered despite its priority.
+    assert_eq!(next_json(&repo)["id"], container.as_str());
+    assert!(next_json(&repo)["subissues"]
+        .as_array()
+        .is_none_or(|s| s.is_empty()));
+
+    repo.ti().args(["close", &container]).assert().success();
+    assert!(next_json(&repo)["next"].is_null());
+}
+
+#[test]
+fn stats_counts_leave_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "live open");
+    let closed = create_ticket(&repo, "live closed");
+    repo.ti().args(["close", "-t", &closed]).assert().success();
+    let gone_open = create_ticket(&repo, "deleted open");
+    let gone_closed = create_ticket(&repo, "deleted closed");
+    repo.ti()
+        .args(["close", "-t", &gone_closed])
+        .assert()
+        .success();
+    for id in [&gone_open, &gone_closed] {
+        repo.ti().args(["delete", id, "--yes"]).assert().success();
+    }
+
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 2, "{v}");
+    assert_eq!(v["open"], 1, "{v}");
+    assert_eq!(v["closed"], 1, "{v}");
+    assert_eq!(v["closed_7d"], 1, "{v}");
+    assert!(!v.to_string().contains("deleted open"), "{v}");
+
+    // Only deleted tickets left: stats reports none.
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "solo");
+    repo.ti().args(["delete", &id, "--yes"]).assert().success();
+    let out = repo.ti().args(["stats", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 0, "{v}");
+}
+
+#[test]
+fn search_list_filters_and_saved_views_leave_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    let parent = create_ticket(&repo, "parent");
+    let live = create_subissue(&repo, &parent, "needle live");
+    let gone = create_subissue(&repo, &parent, "needle gone");
+    let blocker = create_ticket(&repo, "blocker");
+    for id in [&live, &gone] {
+        repo.ti().args(["tag", "-t", id, "hot"]).assert().success();
+        repo.ti()
+            .args(["depends", "-t", id, &blocker])
+            .assert()
+            .success();
+    }
+    // Both tickets are sub-issues, so `--subissues` keeps them listable.
+    repo.ti()
+        .args(["list", "--tag", "hot", "--subissues"])
+        .assert()
+        .success();
+    repo.ti().args(["views", "save", "hot"]).assert().success();
+    repo.ti()
+        .args(["delete", &gone, "--yes"])
+        .assert()
+        .success();
+
+    let only_live = BTreeSet::from([live.clone()]);
+    assert_eq!(
+        list_ids(&repo, &["--search", "needle", "--subissues"]),
+        only_live
+    );
+    assert_eq!(list_ids(&repo, &["--tag", "hot", "--subissues"]), only_live);
+    assert_eq!(list_ids(&repo, &["--parent", &parent]), only_live);
+    assert_eq!(list_ids(&repo, &["--depends-on", &blocker]), only_live);
+    assert_eq!(list_ids(&repo, &["hot"]), only_live);
+
+    // `--deleted` still reaches the hidden ticket, combined with a search.
+    assert_eq!(
+        list_ids(&repo, &["--deleted", "--search", "needle"]),
+        BTreeSet::from([gone.clone()])
+    );
+}
+
+#[test]
+fn deps_tree_drops_a_deleted_blocker_even_with_all() {
+    let repo = TestRepo::new();
+    let (a, b, _c) = deps_chain(&repo);
+    repo.ti().args(["delete", &b, "--yes"]).assert().success();
+
+    for extra in [&[][..], &["--all"][..]] {
+        let mut args = vec!["deps", a.as_str(), "--json"];
+        args.extend_from_slice(extra);
+        let out = repo
+            .ti()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let tree: Value = serde_json::from_slice(&out).unwrap();
+        assert!(tree["nodes"].as_array().unwrap().is_empty(), "{tree}");
+    }
+}
+
+#[test]
+fn recent_leaves_out_deleted_tickets() {
+    let repo = TestRepo::new();
+    let live = create_ticket(&repo, "still here");
+    let gone = create_ticket(&repo, "recently deleted");
+    repo.ti()
+        .args(["delete", &gone, "--yes"])
+        .assert()
+        .success();
+    let out = repo
+        .ti()
+        .args(["recent", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![live.as_str()]);
+}
+
+#[test]
+fn sync_warns_when_edits_land_on_a_ticket_deleted_locally() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = TestRepo::new();
+    git(a.dir.path(), &["remote", "add", "origin", &remote_url]);
+    a.ti().arg("init").assert().success();
+    let id = create_ticket(&a, "doomed ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+
+    let b = TestRepo::new();
+    git(b.dir.path(), &["remote", "add", "origin", &remote_url]);
+    b.ti().arg("init").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    // A deletes and syncs; B, not yet synced, edits the ticket three times.
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti()
+        .args(["comment", "-t", &id, "first late note"])
+        .assert()
+        .success();
+    b.ti()
+        .args(["comment", "-t", &id, "second late note"])
+        .assert()
+        .success();
+    b.ti().args(["tag", "-t", &id, "late"]).assert().success();
+
+    // B's own edits did not arrive from elsewhere: no warning on B.
+    let out = b
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // A picks up B's edits on its deleted ticket: one stderr line, exit 0.
+    a.ti()
+        .arg("sync")
+        .assert()
+        .success()
+        .stderr(predicate::eq(format!(
+        "warning: 3 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)\n"
+    )));
+    // The edits are kept on the hidden ticket.
+    let hidden = show_json(&a, &id);
+    assert!(hidden["deleted"].is_object());
+    assert_eq!(hidden["comments"].as_array().unwrap().len(), 2);
+
+    // Nothing new arrived: no repeat warning.
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(""))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["warnings"], serde_json::json!([]));
+
+    // Another late edit: `--json` carries it in `warnings` and still warns
+    // on stderr.
+    b.ti()
+        .args(["comment", "-t", &id, "third late note"])
+        .assert()
+        .success();
+    b.ti().arg("sync").assert().success();
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::eq(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)\n"
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 1 }])
+    );
+
+    // The Sync hook's auto-sync warns the same way and does not block.
+    b.ti().args(["tag", "-t", &id, "later"]).assert().success();
+    b.ti().arg("sync").assert().success();
+    let line = format!(
+        "refs/heads/main {} refs/heads/main {}\n",
+        "1".repeat(40),
+        "0".repeat(40)
+    );
+    a.ti()
+        .args(["hook", "run", "pre-push", "origin", &remote_url])
+        .write_stdin(line)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
+        )));
+}
+
+/// A comment's time is the wall clock of the clone that wrote it, so a
+/// comment written before the Deletion but merged after it still landed on
+/// a deleted ticket: it is reported, like the tag written with it.
+#[test]
+fn sync_warns_about_edits_written_before_the_deletion_but_merged_after_it() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "doomed ticket");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    // B edits first; A deletes later and syncs first.
+    b.ti()
+        .args(["comment", "-t", &id, "written before the delete"])
+        .assert()
+        .success();
+    b.ti().args(["tag", "-t", &id, "early"]).assert().success();
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+    b.ti().arg("sync").assert().success();
+
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 2 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 2 }])
+    );
+}
+
+/// An edit another clone pushes in the Race window reaches this clone through
+/// the push's merge-and-retry, not the pull, and is reported all the same.
+#[test]
+fn sync_warns_about_edits_merged_during_the_race_window_retry() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let id = create_ticket(&a, "doomed ticket");
+    let other = create_ticket(&a, "bystander");
+    let short: String = id.chars().take(6).collect();
+    a.ti().arg("sync").assert().success();
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    a.ti().args(["delete", &id, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+
+    // A's pre-push hook runs after A's pull: B, not yet aware of the
+    // Deletion, comments on the ticket and syncs inside that window.
+    let ti_bin = assert_cmd::cargo::cargo_bin("ti");
+    let fired = a.dir.path().join("hook-fired");
+    let hook = format!(
+        "#!/usr/bin/env bash\n\
+         [ -e '{fired}' ] && exit 0\n\
+         touch '{fired}'\n\
+         cd '{b_dir}'\n\
+         export TICGIT_STATE_FILE='{b_state}'\n\
+         '{ti}' comment -t {id} 'written in the race window' >/dev/null\n\
+         '{ti}' sync >/dev/null\n\
+         exit 0\n",
+        fired = fired.display(),
+        b_dir = b.dir.path().display(),
+        b_state = b.state_file.path().join("state.json").display(),
+        ti = ti_bin.display(),
+    );
+    executable_script(&a.dir.path().join(".git/hooks"), "pre-push", &hook);
+
+    a.ti()
+        .args(["priority", "1", "-t", &other])
+        .assert()
+        .success();
+    let out = a
+        .ti()
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: 1 edit(s) landed on deleted ticket {short} "
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    assert!(fired.exists(), "the race hook must have fired");
+    let json: Value = serde_json::from_slice(&out).expect("sync json");
+    assert_eq!(json["push_retries"], 1);
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([{ "kind": "edit-on-deleted", "ticket": id, "count": 1 }])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `ti reindex` is additive; `--reset` is guarded (ticket 812cdf, ADR 0003)
+// ---------------------------------------------------------------------------
+
+/// `ti reindex` fetches the meta remote first, then adds what the index
+/// lacks: a ticket another clone pushed since this clone's last sync and a
+/// ticket this clone's index lost both appear, and an unsynced local comment
+/// is kept.
+#[test]
+fn reindex_fetches_the_remote_and_adds_tickets_while_keeping_unsynced_edits() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let kept = create_ticket(&a, "kepttkt");
+    let lost = create_ticket(&a, "losttkt");
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+    let from_b = create_ticket(&b, "frombtkt");
+    b.ti().arg("sync").assert().success();
+
+    a.ti()
+        .args(["comment", "-t", &kept, "unsynced comment"])
+        .assert()
+        .success();
+    strand_ticket(&a, &lost);
+
+    a.ti().arg("reindex").assert().success();
+
+    assert_eq!(
+        list_ids(&a, &[]),
+        BTreeSet::from([kept.clone(), lost, from_b])
+    );
+    assert_eq!(
+        comment_bodies(&show_json(&a, &kept)),
+        vec!["unsynced comment"]
+    );
+    a.ti().arg("verify").assert().success();
+}
+
+/// `ti reindex --reset` would replace the index with the remote tree, so it
+/// refuses while the store holds changes the remote lacks: it exits non-zero,
+/// names how many there are and both ways forward, and changes nothing.
+#[test]
+fn reindex_reset_refuses_while_unsynced_changes_exist() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let synced = create_ticket(&repo, "syncedtkt");
+    repo.ti()
+        .args(["tag", "-t", &synced, "bug"])
+        .assert()
+        .success();
+    repo.ti().arg("sync").assert().success();
+
+    // Three changes the remote lacks: two comments and a tag removal.
+    repo.ti()
+        .args(["comment", "-t", &synced, "unsynced one"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &synced, "unsynced two"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &synced, "-d", "bug"])
+        .assert()
+        .success();
+    let before = show_json(&repo, &synced);
+
+    repo.ti()
+        .args(["reindex", "--reset"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("3 unsynced change")
+                .and(predicate::str::contains("ti sync"))
+                .and(predicate::str::contains("--force")),
+        );
+
+    assert_eq!(show_json(&repo, &synced), before);
+    assert_eq!(list_ids(&repo, &[]), BTreeSet::from([synced]));
+}
+
+/// With nothing unsynced, `ti reindex --reset` rebuilds the store from the
+/// remote as before, on the clone that wrote the tickets and on one that
+/// only pulled them, and `--json` keeps its `tickets` count.
+#[test]
+fn reindex_reset_on_a_synced_store_succeeds() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let a = clone_of(&remote_url);
+    let first = create_ticket(&a, "first");
+    let second = create_ticket(&a, "second");
+    let doomed = create_ticket(&a, "doomed");
+    a.ti()
+        .args(["comment", "-t", &first, "a comment"])
+        .assert()
+        .success();
+    a.ti()
+        .args(["tag", "-t", &first, "bug,ui"])
+        .assert()
+        .success();
+    a.ti()
+        .args(["tag", "-t", &first, "-d", "ui"])
+        .assert()
+        .success();
+    a.ti()
+        .args(["depends", "-t", &second, &first])
+        .assert()
+        .success();
+    a.ti().args(["delete", &doomed, "--yes"]).assert().success();
+    a.ti().arg("sync").assert().success();
+
+    let b = clone_of(&remote_url);
+    b.ti().arg("sync").assert().success();
+
+    for clone in [&a, &b] {
+        let out = clone
+            .ti()
+            .args(["reindex", "--reset", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&out).expect("reindex json");
+        assert_eq!(json["tickets"], 3, "{json}");
+        assert_eq!(
+            list_ids(clone, &[]),
+            BTreeSet::from([first.clone(), second.clone()])
+        );
+        let t = show_json(clone, &first);
+        assert_eq!(comment_bodies(&t), vec!["a comment"]);
+        assert_eq!(json_strings(&t["tags"]), vec!["bug"]);
+        clone.ti().arg("verify").assert().success();
+    }
+}
+
+/// `ti reindex --reset --force` goes ahead despite unsynced changes: the
+/// store is rebuilt from the remote, so an unsynced comment and an unsynced
+/// tag removal on a ticket the remote holds are gone afterwards.
+#[test]
+fn reindex_reset_force_rebuilds_from_the_remote() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let synced = create_ticket(&repo, "syncedtkt");
+    repo.ti()
+        .args(["comment", "-t", &synced, "pushed comment"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &synced, "bug"])
+        .assert()
+        .success();
+    repo.ti().arg("sync").assert().success();
+
+    repo.ti()
+        .args(["comment", "-t", &synced, "unsynced comment"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["tag", "-t", &synced, "-d", "bug"])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["reindex", "--reset", "--force"])
+        .assert()
+        .success();
+
+    let t = show_json(&repo, &synced);
+    assert_eq!(comment_bodies(&t), vec!["pushed comment"]);
+    assert_eq!(json_strings(&t["tags"]), vec!["bug"]);
+    repo.ti().arg("verify").assert().success();
+    // The rebuilt store matches the remote, so a plain reset now goes through.
+    repo.ti().args(["reindex", "--reset"]).assert().success();
+}
+
+/// Ticket ids with any row in `repo`'s `git-meta.sqlite`, including records
+/// that project to no ticket and so never show in `ti list`.
+fn indexed_ticket_ids(repo: &TestRepo) -> BTreeSet<String> {
+    let db = rusqlite::Connection::open(repo.dir.path().join(".git/git-meta.sqlite"))
+        .expect("open git-meta.sqlite");
+    let mut stmt = db
+        .prepare("SELECT key FROM metadata WHERE key LIKE 'ticgit:tickets:%'")
+        .expect("prepare");
+    let keys = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|k| k.expect("key"));
+    keys.filter_map(|k| k.split(':').nth(2).map(str::to_string))
+        .collect()
+}
+
+/// Write a lone `format-version` marker for a fresh ticket id straight into
+/// the store: ghost residue that projects to no ticket (what a create that
+/// failed half-way, or a rewritten-away ticket, leaves behind). Returns the id.
+fn write_ghost_record(repo: &TestRepo) -> String {
+    use ticgit_lib::{Session, Target, TicketStore};
+    let session = Session::open(repo.dir.path().join(".git")).expect("open session");
+    let store = TicketStore::from_session(session).expect("from_session");
+    let id = uuid::Uuid::new_v4();
+    store
+        .session()
+        .target(&Target::project())
+        .set(&format!("ticgit:tickets:{id}:format-version"), "2")
+        .expect("write ghost record");
+    id.to_string()
+}
+
+/// `ti reindex --reset --force` prunes ghost residue (a record no ref holds
+/// that projects to no ticket) and keeps a
+/// valid ticket that was created locally and never pushed. The ghost is local
+/// state the remote lacks, so a reset without --force refuses.
+#[test]
+fn reindex_reset_prunes_ghost_records_and_keeps_local_tickets() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let backed = create_ticket(&repo, "backedtkt");
+    repo.ti().arg("sync").assert().success();
+    let local = create_ticket(&repo, "localtkt");
+    let ghost = write_ghost_record(&repo);
+    let tickets = BTreeSet::from([backed, local]);
+    assert_eq!(list_ids(&repo, &[]), tickets);
+    assert!(indexed_ticket_ids(&repo).contains(&ghost));
+
+    repo.ti()
+        .args(["reindex", "--reset"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsynced change"));
+    repo.ti()
+        .args(["reindex", "--reset", "--force"])
+        .assert()
+        .success();
+
+    assert_eq!(indexed_ticket_ids(&repo), tickets);
+    assert_eq!(list_ids(&repo, &[]), tickets);
     repo.ti().arg("verify").assert().success();
 }

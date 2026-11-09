@@ -21,6 +21,9 @@ pub type NickMap = HashMap<String, String>;
 pub struct RelSummary {
     pub title: String,
     pub status: String,
+    /// The ticket is deleted: a deleted Sub-issue is left out of the Children
+    /// line, a deleted Parent or Dependency is shown greyed as "(deleted)".
+    pub deleted: bool,
 }
 
 /// Lookup from ticket id to its [`RelSummary`], built from the full ticket list.
@@ -37,6 +40,7 @@ pub fn build_rel_lookup(tickets: &[Ticket]) -> RelLookup {
                 RelSummary {
                     title: t.title.clone(),
                     status: t.status.as_str().to_string(),
+                    deleted: t.is_deleted(),
                 },
             )
         })
@@ -49,21 +53,49 @@ pub fn by_id_map(all: &[Ticket]) -> HashMap<Uuid, &Ticket> {
 }
 
 fn short_hex(id: &Uuid) -> String {
-    id.to_string().chars().take(6).collect()
+    Ticket::short_hex(id)
 }
 
 /// Format related ticket ids as a comma-separated list. With a lookup each
-/// entry becomes `shortid "title" [status]`; without one, just `shortid`.
-fn format_related<'a>(ids: impl Iterator<Item = &'a Uuid>, rels: Option<&RelLookup>) -> String {
+/// entry becomes `shortid "title" [status]`, or `shortid "title" (deleted)`
+/// for a deleted ticket; without one, just `shortid`. With a `color` (for the
+/// terminal) each entry is painted in it, except a deleted ticket, which is
+/// greyed out.
+fn format_related<'a>(
+    ids: impl Iterator<Item = &'a Uuid>,
+    rels: Option<&RelLookup>,
+    color: Option<&str>,
+) -> String {
     ids.map(|id| {
-        let short = short_hex(id);
-        match rels.and_then(|r| r.get(id)) {
-            Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
-            None => short,
+        let entry = related_entry(id, rels);
+        match color {
+            Some(_) if deleted_in(rels, id) => ansi(ANSI_DIM, &entry),
+            Some(color) => ansi(color, &entry),
+            None => entry,
         }
     })
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+/// Whether `rels` knows `id` as a deleted ticket.
+fn deleted_in(rels: Option<&RelLookup>, id: &Uuid) -> bool {
+    rels.and_then(|r| r.get(id))
+        .is_some_and(|info| info.deleted)
+}
+
+fn related_entry(id: &Uuid, rels: Option<&RelLookup>) -> String {
+    let short = short_hex(id);
+    match rels.and_then(|r| r.get(id)) {
+        Some(info) if info.deleted => format!("{short} \"{}\" (deleted)", flatten(&info.title)),
+        Some(info) => format!("{short} \"{}\" [{}]", flatten(&info.title), info.status),
+        None => short,
+    }
+}
+
+/// `t`'s Sub-issues for its Children line ([`ticgit_lib::live_children`]).
+fn live_children<'a>(t: &'a Ticket, rels: Option<&RelLookup>) -> Vec<&'a Uuid> {
+    ticgit_lib::live_children(t, |id| deleted_in(rels, id))
 }
 
 /// A node in the recursive, open-only sub-issue tree. Each node carries a
@@ -76,7 +108,7 @@ pub struct SubissueNode {
 }
 
 /// Build the recursive sub-issue tree for `root`, using `by_id` to resolve child
-/// ids. Closed sub-issues (and their whole subtree) are omitted; a visited set
+/// ids. Closed and deleted sub-issues (and their whole subtree) are omitted; a visited set
 /// guards against cycles, and ids absent from `by_id` are skipped.
 pub fn build_subissue_tree(root: &Ticket, by_id: &HashMap<Uuid, &Ticket>) -> Vec<SubissueNode> {
     let mut visited = HashSet::new();
@@ -97,7 +129,7 @@ fn build_subissue_nodes(
         let Some(child) = by_id.get(id) else {
             continue;
         };
-        if child.status == TicketStatus::Closed {
+        if !child.is_open_and_live() {
             continue;
         }
         visited.insert(*id);
@@ -663,6 +695,21 @@ pub fn ticket_detail(
     let title_bar = "-".repeat(t.title.chars().count().max(20));
     out.push_str(&ansi(ANSI_DIM, &title_bar));
     out.push('\n');
+    if let Some(d) = &t.deleted {
+        out.push_str(&detail_field(
+            "Deleted",
+            &ansi(
+                ANSI_RED,
+                &format!(
+                    "{} ({})  by {}  (hidden; `ti undelete {}` brings it back)",
+                    friendly_date(d.at),
+                    relative_time(d.at, OffsetDateTime::now_utc()),
+                    display_name(&d.by, nicks),
+                    t.short_id()
+                ),
+            ),
+        ));
+    }
     out.push_str(&detail_field(
         "Title",
         &ansi(ANSI_BLUE, &highlight(&t.title, needles, ANSI_BLUE)),
@@ -704,20 +751,21 @@ pub fn ticket_detail(
         out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
     }
     if let Some(parent_id) = &t.parent {
-        let value = format_related(std::iter::once(parent_id), rels);
-        out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &value)));
+        let value = format_related(std::iter::once(parent_id), rels, Some(ANSI_CYAN));
+        out.push_str(&detail_field("Parent", &value));
     }
-    if !t.children.is_empty() {
-        let value = format_related(t.children.iter(), rels);
-        out.push_str(&detail_field("Children", &ansi(ANSI_CYAN, &value)));
+    let children = live_children(t, rels);
+    if !children.is_empty() {
+        let value = format_related(children.into_iter(), rels, Some(ANSI_CYAN));
+        out.push_str(&detail_field("Children", &value));
     }
     if !t.depends_on.is_empty() {
-        let value = format_related(t.depends_on.iter(), rels);
-        out.push_str(&detail_field("Depends", &ansi(ANSI_CYAN, &value)));
+        let value = format_related(t.depends_on.iter(), rels, Some(ANSI_CYAN));
+        out.push_str(&detail_field("Depends", &value));
     }
     if !t.blocks.is_empty() {
-        let value = format_related(t.blocks.iter(), rels);
-        out.push_str(&detail_field("Blocks", &ansi(ANSI_CYAN, &value)));
+        let value = format_related(t.blocks.iter(), rels, Some(ANSI_CYAN));
+        out.push_str(&detail_field("Blocks", &value));
     }
     if let Some(spec) = &t.spec {
         let first_line = spec.lines().next().unwrap_or("");
@@ -799,7 +847,7 @@ pub fn tickets_json(t: &[Ticket]) -> Result<String, serde_json::Error> {
 
 const TICKET_MARKDOWN_TEMPLATE: &str = r#"# Ticket: {title}
 
-## Details
+{deleted_banner}## Details
 
 {details}
 
@@ -862,6 +910,7 @@ pub fn ticket_markdown_with_rels(t: &Ticket, rels: Option<&RelLookup>) -> String
     render_template(
         TICKET_MARKDOWN_TEMPLATE,
         &[
+            ("deleted_banner", deleted_banner_markdown(t)),
             ("title", markdown_inline(&flatten(&t.title))),
             ("details", ticket_details_markdown(t, rels)),
             ("description", markdown_body(t.description.as_deref())),
@@ -921,6 +970,21 @@ fn render_template(template: &str, values: &[(&str, String)]) -> String {
     out
 }
 
+/// Blockquote banner for a deleted ticket (with its trailing blank line), or
+/// empty for a live one.
+fn deleted_banner_markdown(t: &Ticket) -> String {
+    match &t.deleted {
+        Some(d) => format!(
+            "> **Deleted** {} ({}) by {}. Hidden from `ti list`; `ti undelete {}` brings it back.\n\n",
+            markdown_inline(&friendly_date(d.at)),
+            code_span(&d.at.format(&Rfc3339).unwrap_or_default()),
+            markdown_inline(&d.by),
+            t.short_id()
+        ),
+        None => String::new(),
+    }
+}
+
 fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
     let mut out = String::new();
     writeln!(out, "- Id: {}", code_span(&t.id.to_string())).unwrap();
@@ -972,19 +1036,20 @@ fn ticket_details_markdown(t: &Ticket, rels: Option<&RelLookup>) -> String {
     .unwrap();
     writeln!(out, "- Code: {}", optional_inline(t.code.as_deref())).unwrap();
     if let Some(parent_id) = &t.parent {
-        let value = format_related(std::iter::once(parent_id), rels);
+        let value = format_related(std::iter::once(parent_id), rels, None);
         writeln!(out, "- Parent: {}", markdown_inline(&value)).unwrap();
     }
-    if !t.children.is_empty() {
-        let value = format_related(t.children.iter(), rels);
+    let children = live_children(t, rels);
+    if !children.is_empty() {
+        let value = format_related(children.into_iter(), rels, None);
         writeln!(out, "- Children: {}", markdown_inline(&value)).unwrap();
     }
     if !t.depends_on.is_empty() {
-        let value = format_related(t.depends_on.iter(), rels);
+        let value = format_related(t.depends_on.iter(), rels, None);
         writeln!(out, "- Depends on: {}", markdown_inline(&value)).unwrap();
     }
     if !t.blocks.is_empty() {
-        let value = format_related(t.blocks.iter(), rels);
+        let value = format_related(t.blocks.iter(), rels, None);
         writeln!(out, "- Blocks: {}", markdown_inline(&value)).unwrap();
     }
     writeln!(out, "- Tags: {}", tags_inline(t)).unwrap();
@@ -1108,6 +1173,11 @@ fn imported_tickets_markdown(tickets: &[Ticket]) -> String {
 
 fn ticket_next_commands(t: &Ticket) -> String {
     let id = t.short_id();
+    if t.is_deleted() {
+        return format!(
+            "- `ti undelete {id}` to bring this ticket back.\n- `ti show {id} --markdown` to refresh this ticket."
+        );
+    }
     let mut commands = vec![
         format!("`ti show {id} --markdown` to refresh this ticket."),
         format!("`ti checkout {id}` to make this the current ticket."),
@@ -1665,6 +1735,7 @@ mod tests {
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "tester@example.com".to_string(),
+            deleted: None,
         }
     }
 

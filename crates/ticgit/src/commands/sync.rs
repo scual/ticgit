@@ -4,7 +4,7 @@ use std::process::Command;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::Ticket;
+use ticgit_lib::{SyncWarning, Ticket};
 use uuid::Uuid;
 
 use crate::commands::open_store;
@@ -18,6 +18,10 @@ pub struct Args {
     /// Output the sync result as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output the sync result as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 
     /// Permit the push to delete remote tickets that are absent from the local
     /// store. Off by default: a push that would remove remote tickets is
@@ -44,7 +48,7 @@ pub fn run_sync(args: Args) -> Result<()> {
         .unwrap_or_else(|| "(none)".to_string());
     let web_url = ssh_project_web_url(&url);
 
-    if !args.json {
+    if !args.json && !args.markdown {
         if let Some(remote) = &remote {
             println!("Remote: {remote}");
         }
@@ -60,12 +64,15 @@ pub fn run_sync(args: Args) -> Result<()> {
         updated_tickets,
         total,
         push_retries,
+        warnings,
     } = sync_tickets(
         &store,
         args.remote.as_deref(),
         args.allow_deletes,
         args.no_verify,
     )?;
+
+    print_sync_warnings(&warnings);
 
     if args.json {
         let out = serde_json::json!({
@@ -77,8 +84,24 @@ pub fn run_sync(args: Args) -> Result<()> {
             "updated": ticket_refs_json(&updated_tickets),
             "pushed_total": total,
             "push_retries": push_retries,
+            "warnings": warnings,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if args.markdown {
+        let summary = SyncSummary {
+            remote: remote.as_deref(),
+            reference: &format!("refs/{namespace}/main"),
+            url: &url,
+            new_tickets: &new_tickets,
+            updated_tickets: &updated_tickets,
+            total,
+            push_retries,
+            warnings: &warnings,
+        };
+        print!("{}", summary.markdown());
         return Ok(());
     }
 
@@ -100,6 +123,59 @@ pub fn run_sync(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// What `ti sync --markdown` reports.
+struct SyncSummary<'a> {
+    remote: Option<&'a str>,
+    reference: &'a str,
+    url: &'a str,
+    new_tickets: &'a [(Uuid, String)],
+    updated_tickets: &'a [(Uuid, String)],
+    total: usize,
+    push_retries: usize,
+    warnings: &'a [SyncWarning],
+}
+
+impl SyncSummary<'_> {
+    fn markdown(&self) -> String {
+        let mut out = String::from("## Sync\n\n");
+        out.push_str(&format!("- Remote: {}\n", self.remote.unwrap_or("(none)")));
+        out.push_str(&format!("- Ref: `{}`\n", self.reference));
+        out.push_str(&format!("- URL: {}\n", self.url));
+        out.push_str(&format!(
+            "- Pulled: {} new, {} updated\n",
+            self.new_tickets.len(),
+            self.updated_tickets.len()
+        ));
+        out.push_str(&format!("- Pushed: {} ticket(s)", self.total));
+        if self.push_retries > 0 {
+            out.push_str(&format!(
+                " (remote advanced during the push; merged and retried {}x)",
+                self.push_retries
+            ));
+        }
+        out.push('\n');
+        for (heading, tickets) in [
+            ("New tickets", self.new_tickets),
+            ("Updated tickets", self.updated_tickets),
+        ] {
+            if tickets.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n### {heading}\n\n"));
+            for (id, title) in tickets {
+                out.push_str(&format!("- **{}** {title}\n", Ticket::short_hex(id)));
+            }
+        }
+        if !self.warnings.is_empty() {
+            out.push_str("\n### Warnings\n\n");
+            for warning in self.warnings {
+                out.push_str(&format!("- {}\n", warning_text(warning)));
+            }
+        }
+        out
+    }
+}
+
 fn ticket_refs_json(tickets: &[(Uuid, String)]) -> Vec<serde_json::Value> {
     tickets
         .iter()
@@ -109,8 +185,7 @@ fn ticket_refs_json(tickets: &[(Uuid, String)]) -> Vec<serde_json::Value> {
 
 fn print_ticket_refs(tickets: &[(Uuid, String)]) {
     for (id, title) in tickets.iter().take(5) {
-        let short: String = id.to_string().chars().take(6).collect();
-        println!("  {short}  {title}");
+        println!("  {}  {title}", Ticket::short_hex(id));
     }
     if tickets.len() > 5 {
         println!("  ... and {} more", tickets.len() - 5);
@@ -125,6 +200,25 @@ pub(crate) fn print_push_retries(push_retries: usize) {
     }
 }
 
+/// One stderr line per warning; stdout (and `--json`) stays clean.
+pub(crate) fn print_sync_warnings(warnings: &[SyncWarning]) {
+    for warning in warnings {
+        eprintln!("warning: {}", warning_text(warning));
+    }
+}
+
+/// A warning as one line of prose, without the `warning: ` prefix.
+fn warning_text(warning: &SyncWarning) -> String {
+    match warning {
+        SyncWarning::EditOnDeleted { ticket, count } => {
+            let short = Ticket::short_hex(ticket);
+            format!(
+                "{count} edit(s) landed on deleted ticket {short} (ti undelete {short} to bring it back)"
+            )
+        }
+    }
+}
+
 /// Result of one pull-then-push round.
 pub(crate) struct SyncOutcome {
     /// Tickets that appeared during the pull.
@@ -135,6 +229,10 @@ pub(crate) struct SyncOutcome {
     pub total: usize,
     /// How many times the push merged a remote that advanced after the pull.
     pub push_retries: usize,
+    /// What the pull, or a push retry's merge, brought in that the user
+    /// should know about, such as edits that landed on a ticket deleted
+    /// locally.
+    pub warnings: Vec<SyncWarning>,
 }
 
 /// Pull from then push to `remote`, reporting which tickets arrived.
@@ -145,6 +243,7 @@ pub(crate) fn sync_tickets(
     no_verify: bool,
 ) -> Result<SyncOutcome> {
     let before: BTreeMap<Uuid, Ticket> = store.list()?.into_iter().map(|t| (t.id, t)).collect();
+    let deleted_before = store.deleted_ticket_items()?;
 
     // A remote that has never received tickets has no meta ref to pull yet;
     // the push below creates it.
@@ -170,11 +269,15 @@ pub(crate) fn sync_tickets(
     // The push gates on integrity (`ti verify`) and on implicit deletion, and
     // merges and retries if the remote advanced after the pull.
     let push_retries = store.push(remote, allow_deletes, no_verify)?;
+    // Only now: a push caught in the Race window merged the newer remote tip,
+    // and what that merge brought in is reported like what the pull did.
+    let warnings = store.edits_on_deleted(&deleted_before)?;
     Ok(SyncOutcome {
         new_tickets,
         updated_tickets,
         total: after.len(),
         push_retries,
+        warnings,
     })
 }
 

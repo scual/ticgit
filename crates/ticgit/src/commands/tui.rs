@@ -2085,12 +2085,18 @@ impl App {
         if let Some(parent) = ticket.parent {
             detail_lines.push(field_line("Parent", &self.issue_label(parent)));
         }
-        if !ticket.children.is_empty() {
+        // A deleted sub-issue is not live work: leave it out, as `ti show` does.
+        let children = ticgit_lib::live_children(ticket, |id| {
+            self.all_tickets
+                .iter()
+                .any(|t| t.id == *id && t.is_deleted())
+        });
+        if !children.is_empty() {
             detail_lines.push(field_line(
                 "Sub-issues",
-                &format!("{} (press U to show in list)", ticket.children.len()),
+                &format!("{} (press U to show in list)", children.len()),
             ));
-            for child in ticket.children.iter().take(5) {
+            for child in children.into_iter().take(5) {
                 detail_lines.push(detail_child_issue_line(&self.issue_label(*child)));
             }
         }
@@ -3542,22 +3548,10 @@ impl App {
             .map(|ticket| format!("{} {}", ticket.short_id(), ticket.title))
             .unwrap_or_else(|| "<unknown issue>".to_string());
         let label = truncate_display(&label, usize::from(area.width).saturating_sub(8));
-        let relationship_note = ticket
-            .map(
-                |ticket| match (ticket.parent.is_some(), ticket.children.len()) {
-                    (true, 0) => "This child will be removed from its parent.",
-                    (false, 1) => "Its child will be unparented.",
-                    (false, n) if n > 1 => "Its children will be unparented.",
-                    (true, 1) => {
-                        "It will be removed from its parent; its child will be unparented."
-                    }
-                    (true, _) => {
-                        "It will be removed from its parent; its children will be unparented."
-                    }
-                    _ => "This permanently removes the issue metadata.",
-                },
-            )
-            .unwrap_or("This permanently removes the issue metadata.");
+        // Deletion is an operation (ADR 0003): nothing is removed and no
+        // Dependency or Sub-issue changes, so `ti undelete` brings the issue
+        // back exactly.
+        let relationship_note = "It is hidden but kept; `ti undelete` brings it back.";
         let lines = vec![
             Line::from(Span::styled(
                 format!("Delete issue `{label}`?"),
@@ -5285,7 +5279,7 @@ impl App {
             return Ok(());
         };
         let label = self.issue_label(id);
-        self.store.delete_ticket(&id)?;
+        self.store.delete_ticket(&id, None)?;
         self.detail = None;
         self.comments_mode = false;
         self.comment_state.select(None);
@@ -5317,6 +5311,7 @@ impl App {
             parent: None,
             all: self.base_status.is_none() && self.base_state.is_none(),
             subissues: !self.hide_subissues,
+            deleted: false,
             limit: 0,
             columns: self
                 .issue_columns
@@ -14293,6 +14288,7 @@ meta/tickets\t1779106269\tMeta\t<meta@example.com>\n";
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "test@example.com".to_string(),
+            deleted: None,
         }
     }
 }

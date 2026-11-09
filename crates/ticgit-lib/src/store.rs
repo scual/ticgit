@@ -15,12 +15,15 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::keys;
-use crate::oplog::{Op, OpKind};
+use crate::meta_tree;
+use crate::oplog::{project_deletion, Op, OpKind};
 use crate::review::{
     format_review_revision, parse_review_revision_change, CommitReviewStatus, NewReviewOpts,
     Review, ReviewMessage, ReviewProgress, ReviewRevisionChange, ReviewVcs,
 };
-use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
+use crate::ticket::{
+    Comment, CommentBody, Deletion, NewTicketOpts, Ticket, TicketState, TicketStatus,
+};
 use crate::writeup::{NewWriteupOpts, Writeup, WriteupStatus, WriteupVersion};
 
 /// Remove `value` from the set at `key`, treating an already-absent member (or
@@ -164,6 +167,28 @@ const MAX_BACKUP_SNAPSHOTS: usize = 10;
 /// How many times [`TicketStore::push`] retries after a non-fast-forward
 /// rejection (merging the remote tip in between) before giving up loudly.
 const MAX_PUSH_ATTEMPTS: usize = 5;
+
+/// What one additive reindex pass gained.
+#[derive(Debug, Default)]
+struct GainOutcome {
+    /// Keys applied to the index.
+    keys: usize,
+    /// Tickets skipped because a blob of a key to gain could not be read.
+    unreadable: BTreeSet<Uuid>,
+}
+
+/// Current time in milliseconds, git-meta's timestamp unit.
+fn now_millis() -> i64 {
+    i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
+}
+
+/// One ticket's stored keys as read by [`TicketStore::ticket_records`]: its
+/// non-operation fields (`(field, value)`) and its operations, unordered.
+#[derive(Debug, Default)]
+pub(crate) struct TicketRecord {
+    pub fields: Vec<(String, MetaValue)>,
+    pub ops: Vec<Op>,
+}
 
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
@@ -331,42 +356,37 @@ impl TicketStore {
 
     /// Load every ticket in the project in a single round-trip.
     pub fn list(&self) -> Result<Vec<Ticket>> {
-        let p = self.session.target(&Target::project());
-        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
-        let mut fields_by_id: BTreeMap<Uuid, Vec<(String, MetaValue)>> = BTreeMap::new();
-        let mut ops_by_id: BTreeMap<Uuid, Vec<Op>> = BTreeMap::new();
-        for (key, value) in pairs {
-            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
-                if let MetaValue::String(s) = value {
-                    ops_by_id
-                        .entry(id)
-                        .or_default()
-                        .push(serde_json::from_str::<Op>(&s)?);
-                }
-            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
-                fields_by_id
-                    .entry(id)
-                    .or_default()
-                    .push((field.to_string(), value));
-            }
-        }
-
-        let ids: BTreeSet<Uuid> = fields_by_id
-            .keys()
-            .chain(ops_by_id.keys())
-            .copied()
-            .collect();
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            let fields = fields_by_id.remove(&id).unwrap_or_default();
-            let ops = ops_by_id.remove(&id).unwrap_or_default();
-            read_format_version(id, &fields)?;
-            let projected = project_scalar_fields(fields, &ops);
-            if let Some(t) = build_ticket(id, projected) {
+        let mut out = Vec::new();
+        for (id, record) in self.ticket_records()? {
+            read_format_version(id, &record.fields)?;
+            if let Some(t) = project_ticket(id, record.fields, &record.ops) {
                 out.push(t);
             }
         }
         Ok(out)
+    }
+
+    /// Every ticket record's raw fields and parsed operations, from one
+    /// prefix scan: the loader behind [`Self::list`] and the Sync warnings.
+    pub(crate) fn ticket_records(&self) -> Result<BTreeMap<Uuid, TicketRecord>> {
+        let p = self.session.target(&Target::project());
+        let pairs = p.get_all_values(Some(&keys::tickets_prefix()))?;
+        let mut records: BTreeMap<Uuid, TicketRecord> = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some((id, _lamport, _hash)) = keys::parse_ticket_op(&key) {
+                if let MetaValue::String(s) = value {
+                    let op = serde_json::from_str::<Op>(&s)?;
+                    records.entry(id).or_default().ops.push(op);
+                }
+            } else if let Some((id, field)) = keys::parse_ticket_field(&key) {
+                records
+                    .entry(id)
+                    .or_default()
+                    .fields
+                    .push((field.to_string(), value));
+            }
+        }
+        Ok(records)
     }
 
     /// Load a single ticket by exact UUID.
@@ -387,8 +407,7 @@ impl TicketStore {
             }
         }
         read_format_version(*id, &fields)?;
-        let projected = project_scalar_fields(fields, &ops);
-        build_ticket(*id, projected).ok_or(Error::NotFound(*id))
+        project_ticket(*id, fields, &ops).ok_or(Error::NotFound(*id))
     }
 
     /// Resolve a user-supplied ticket reference (full UUID or unique
@@ -480,7 +499,9 @@ impl TicketStore {
         self.set_lifecycle(id, state.status(), state)
     }
 
-    /// Direct children of `id` that are still open (`status == Open`).
+    /// Direct children of `id` that are still open (`status == Open`) and not
+    /// deleted: a deleted sub-issue is not live work, so it never holds up
+    /// its parent's close.
     ///
     /// Dangling child references that fail to load are skipped rather than
     /// propagated, mirroring the `.ok()` handling in `set_parent`'s ancestor
@@ -490,7 +511,7 @@ impl TicketStore {
         let mut open = Vec::new();
         for child_id in &ticket.children {
             if let Ok(child) = self.load(child_id) {
-                if child.status == TicketStatus::Open {
+                if child.is_open_and_live() {
                     open.push(child);
                 }
             }
@@ -499,13 +520,14 @@ impl TicketStore {
     }
 
     /// Direct dependencies of `id` (its `depends_on` targets) that are still
-    /// open. Dangling references that fail to load are skipped.
+    /// open and not deleted (an edge to a deleted ticket counts as absent).
+    /// Dangling references that fail to load are skipped.
     pub fn open_dependencies(&self, id: &Uuid) -> Result<Vec<Ticket>> {
         let ticket = self.load(id)?;
         let mut open = Vec::new();
         for dep_id in &ticket.depends_on {
             if let Ok(dep) = self.load(dep_id) {
-                if dep.status == TicketStatus::Open {
+                if dep.is_open_and_live() {
                     open.push(dep);
                 }
             }
@@ -730,43 +752,32 @@ impl TicketStore {
         self.apply_scalars(child_id, BTreeMap::new(), vec!["parent".to_string()])
     }
 
-    /// Delete a ticket and remove parent/child relationship references.
-    pub fn delete_ticket(&self, id: &Uuid) -> Result<()> {
-        let ticket = self.load(id)?;
-        let p = self.project_handle();
-
-        if let Some(parent_id) = ticket.parent {
-            remove_member(
-                &p,
-                &keys::ticket_field(&parent_id, "children"),
-                &id.to_string(),
-            )?;
+    /// Delete a ticket by appending a `del` operation (ADR 0003). Soft: the
+    /// ticket keeps every key, its history, comments, Sub-issues and
+    /// Dependencies, and no other ticket is touched, so [`Self::undelete_ticket`]
+    /// brings it back exactly. Fails with [`Error::AlreadyDeleted`] when it is
+    /// already deleted (no op is written).
+    pub fn delete_ticket(&self, id: &Uuid, reason: Option<&str>) -> Result<()> {
+        if self.load(id)?.is_deleted() {
+            return Err(Error::AlreadyDeleted(*id));
         }
+        self.append_op(
+            id,
+            OpKind::Delete {
+                reason: reason.map(str::to_string),
+            },
+        )?;
+        Ok(())
+    }
 
-        for child_id in &ticket.children {
-            // `parent` is op-managed, so orphan the child with a clear op
-            // (removing the scalar key would be a no-op on op-based tickets).
-            self.apply_scalars(child_id, BTreeMap::new(), vec!["parent".to_string()])?;
+    /// Undo a Deletion by appending an `undel` operation. Fails with
+    /// [`Error::NotDeleted`] when the ticket is not deleted: a stray `undel`
+    /// would otherwise outrank a concurrent `del` from another clone.
+    pub fn undelete_ticket(&self, id: &Uuid) -> Result<()> {
+        if !self.load(id)?.is_deleted() {
+            return Err(Error::NotDeleted(*id));
         }
-
-        // Dependencies are denormalized on both sides, so clean up the reverse
-        // references too, or other tickets keep dangling depends_on/blocks UUIDs
-        // that never resolve (e.g. silently un-workable in `ti next`).
-        for dep_id in &ticket.depends_on {
-            remove_member(&p, &keys::ticket_field(dep_id, "blocks"), &id.to_string())?;
-        }
-        for blocked_id in &ticket.blocks {
-            remove_member(
-                &p,
-                &keys::ticket_field(blocked_id, "depends_on"),
-                &id.to_string(),
-            )?;
-        }
-
-        for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(id)))? {
-            p.remove(&key)?;
-        }
-
+        self.append_op(id, OpKind::Undelete)?;
         Ok(())
     }
 
@@ -2000,24 +2011,62 @@ impl TicketStore {
     // Fork merge (`ti pull`)
     // -------------------------------------------------------------------
 
-    /// Fold a ticket read from a fork into this store. An unknown ticket is
-    /// imported under its original id as a `create` op carrying the fork's
-    /// scalars; a known one gets a single op for the scalars where the fork
-    /// differs (the fork wins, except that a missing parent never clears a
-    /// local one), plus the union of tags and children, the fork's `meta:*`
-    /// values, and any comments not already present.
+    /// Fold a ticket read from a fork into this store. `remote_ops` is the
+    /// fork's operation log for the ticket. An unknown ticket is imported
+    /// under its original id as a `create` op carrying the fork's scalars; a
+    /// known one gets a single op for the scalars where the fork differs (the
+    /// fork wins, except that a missing parent never clears a local one), plus
+    /// the union of tags and children, the fork's `meta:*` values, and any
+    /// comments not already present.
+    ///
+    /// Deletion is not a scalar the fork overrides: every `del` and `undel`
+    /// operation in `remote_ops` this store lacks is copied as is (same id and
+    /// Lamport clock, without the fork's signature, whose key this store may
+    /// not hold), so the Deletion projects from the union of both logs like
+    /// any merge. A ticket deleted on the fork imports deleted, and a local
+    /// Deletion the fork never saw stays.
     ///
     /// The fork is authoritative here, so the open sub-issue and open
     /// dependency close guards are not applied: mirroring a close never fails.
-    pub fn merge_fork_ticket(&self, remote: &Ticket) -> Result<ForkMerge> {
+    pub fn merge_fork_ticket(&self, remote: &Ticket, remote_ops: &[Op]) -> Result<ForkMerge> {
         match self.load(&remote.id) {
-            Ok(local) => self.merge_fork_into(&local, remote),
+            Ok(local) => {
+                let merged = self.merge_fork_into(&local, remote)?;
+                let copied = self.copy_fork_lifecycle_ops(&remote.id, remote_ops)?;
+                Ok(if copied { ForkMerge::Updated } else { merged })
+            }
             Err(Error::NotFound(_)) => {
                 self.import_fork_ticket(remote)?;
+                self.copy_fork_lifecycle_ops(&remote.id, remote_ops)?;
                 Ok(ForkMerge::Imported)
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Copy the `del`/`undel` operations of `remote_ops` that ticket `id`
+    /// lacks (see [`Self::merge_fork_ticket`]). Returns whether any was copied.
+    fn copy_fork_lifecycle_ops(&self, id: &Uuid, remote_ops: &[Op]) -> Result<bool> {
+        let have: BTreeSet<String> = self.load_ops(id)?.into_iter().map(|op| op.id).collect();
+        let p = self.project_handle();
+        let mut copied = false;
+        for op in remote_ops {
+            let lifecycle = matches!(op.decoded(), Some(OpKind::Delete { .. } | OpKind::Undelete));
+            if !lifecycle || have.contains(&op.id) {
+                continue;
+            }
+            let op = Op {
+                signature: None,
+                signer: None,
+                ..op.clone()
+            };
+            p.set(
+                &keys::ticket_op(id, op.lamport, &op.id),
+                serde_json::to_string(&op)?.as_str(),
+            )?;
+            copied = true;
+        }
+        Ok(copied)
     }
 
     fn import_fork_ticket(&self, remote: &Ticket) -> Result<()> {
@@ -2384,23 +2433,21 @@ impl TicketStore {
         Ok(())
     }
 
+    /// Fetch and merge the remote meta ref, then run the additive
+    /// [`reindex`](Self::reindex) against the fetched tip.
+    ///
+    /// git-meta's three-way merge treats a key the index lacks as removed
+    /// locally, and it can report the store "already up-to-date" while the
+    /// index is missing tickets that live in the fetched tree (a Stranded
+    /// index). The additive reindex puts those back: it only adds keys the
+    /// index lacks and never removed, so it is safe to run after every merge
+    /// and needs no guess about whether the index is stranded. Unsynced local
+    /// comments, Sub-issues, Dependencies and Deletions are never touched, and
+    /// the local serialization ref is never dropped (ADR 0003).
     pub fn pull(&self, remote: Option<&str>) -> Result<()> {
         let _ = self.session.pull(remote)?;
-
-        // Honesty check: git-meta can treat the store as "already up-to-date"
-        // (because the local serialization ref is present) even when the index
-        // is missing tickets that live in refs/{ns}/*. Detect that — any remote
-        // ticket id absent from the index — and materialize the missing tickets
-        // via reindex instead of silently leaving the store stranded. A store
-        // that is genuinely complete skips the reindex and fast-paths.
-        let ns = self.session.namespace();
-        let remote_ids = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
-        if !remote_ids.is_empty() {
-            let local_ids: BTreeSet<Uuid> = self.list()?.into_iter().map(|t| t.id).collect();
-            if remote_ids.difference(&local_ids).next().is_some() {
-                self.reindex()?;
-            }
-        }
+        let ns = self.session.namespace().to_string();
+        self.gain_from_refs(&[format!("refs/{ns}/remotes/main")])?;
         Ok(())
     }
 
@@ -2492,8 +2539,10 @@ impl TicketStore {
     /// Root of the local pre-push backup refs for this namespace.
     ///
     /// Deliberately OUTSIDE `refs/{ns}/`: git-meta's `materialize(None)` (which
-    /// [`reindex`] drives) replays every non-local ref under `refs/{ns}/`, so a
-    /// backup kept there would resurrect deleted tickets on the next reindex.
+    /// [`reindex_reset`](Self::reindex_reset) drives) replays every non-local
+    /// ref under `refs/{ns}/`, so a backup kept there would be replayed into
+    /// the store; the additive [`reindex`](Self::reindex) reads only
+    /// `refs/{ns}/remotes/*`.
     fn backup_root(&self) -> String {
         format!("refs/ticgit-backup/{}", self.session.namespace())
     }
@@ -2507,8 +2556,7 @@ impl TicketStore {
     /// `git push <remote> +<backup-ref>:refs/{ns}/main && ti reindex`.
     fn snapshot_remote_ref(&self) -> Result<()> {
         let ns = self.session.namespace().to_string();
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
 
         let Some(oid) = repo
             .find_reference(&format!("refs/{ns}/remotes/main"))
@@ -2522,7 +2570,7 @@ impl TicketStore {
         let backup_root = self.backup_root();
         // Don't let no-op pushes pile up identical snapshots.
         if self
-            .backup_refs(&repo, &backup_root)?
+            .backup_refs(repo, &backup_root)?
             .iter()
             .any(|(_, o)| *o == oid)
         {
@@ -2540,7 +2588,7 @@ impl TicketStore {
         )
         .map_err(|e| Error::InvalidValue(format!("writing backup ref: {e}")))?;
 
-        self.prune_backups(&repo, &backup_root)?;
+        self.prune_backups(repo, &backup_root)?;
         Ok(())
     }
 
@@ -2608,46 +2656,205 @@ impl TicketStore {
     /// `ref_name`. Returns an empty set when the ref — or that subtree — does
     /// not exist yet (e.g. a remote that has never received tickets).
     fn ticket_ids_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
-        use gix::bstr::ByteSlice;
-
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
-        let spec = format!("{ref_name}:{}", keys::tickets_tree_path());
-        let tree = match repo.rev_parse_single(spec.as_bytes()) {
-            Ok(id) => id
-                .object()
-                .map_err(|e| Error::InvalidValue(format!("reading {ref_name}: {e}")))?
-                .into_tree(),
-            // The ref or the tickets subtree is absent.
-            Err(_) => return Ok(BTreeSet::new()),
-        };
-
-        let mut ids = BTreeSet::new();
-        for entry in tree.iter() {
-            let entry = entry.map_err(|e| Error::InvalidValue(format!("iterating tree: {e}")))?;
-            if !entry.mode().is_tree() {
-                continue;
-            }
-            if let Ok(id) = Uuid::parse_str(&entry.filename().to_str_lossy()) {
-                ids.insert(id);
-            }
-        }
-        Ok(ids)
+        Ok(meta_tree::ticket_dirs(self.session.repo(), ref_name)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
     }
 
-    /// Rebuild the local store from the git-meta refs, returning the ticket
-    /// count afterwards.
+    /// Additive reindex: gain from the fetched remote tracking refs
+    /// (`refs/{ns}/remotes/*`) every ticket key the index lacks, returning the
+    /// ticket count afterwards. This is what `ti reindex` runs, and what every
+    /// [`pull`](Self::pull) runs after its merge.
     ///
-    /// Recovers tickets that live in `refs/{ns}/*` but are missing from the
-    /// local `git-meta.sqlite` — e.g. ops that were serialized and pushed from
-    /// a since-removed worktree yet never materialized into this checkout's
-    /// store, or a store file that was lost entirely.
+    /// Recovers tickets that live in the refs but are missing from the local
+    /// `git-meta.sqlite` (a Stranded index: the store file was lost, or ops
+    /// were serialized and pushed from a since-removed worktree yet never
+    /// materialized here). It only adds; it never removes or rewrites a key,
+    /// a set member or a list entry the index holds:
+    ///
+    /// - a ticket the index has no keys for gains all of its keys;
+    /// - a ticket the index holds gains only the whole keys it lacks, e.g. the
+    ///   earlier operations and comments of a ticket the index had lost when
+    ///   the merge brought in only what the remote appended since. Keys it
+    ///   holds are left exactly as they are (no member or entry is added to
+    ///   them), and legacy scalar keys `ti migrate` removed stay removed.
+    ///
+    /// Nothing else in ticgit removes a ticket key, so a lost key is gained
+    /// even when git-meta's merge recorded its loss as a local removal (a key
+    /// tombstone). Deleted tickets keep their keys (Deletion is an
+    /// Operation), so they never qualify. After gaining anything the store is serialized in
+    /// full so the local ref carries the gained keys. The wholesale rebuild
+    /// that replaces the index with the remote tree is
+    /// [`reindex_reset`](Self::reindex_reset).
+    ///
+    /// Requires at least one fetched remote tracking ref; run a sync first.
+    ///
+    /// On a blobless partial clone a ticket's meta blobs may be absent. Those
+    /// are backfilled from the meta remote and the gain runs again; if a
+    /// ticket stays unreadable it fails with [`Error::IncompleteReindex`]
+    /// (every readable ticket is still gained).
+    pub fn reindex(&self) -> Result<usize> {
+        let refs = self.tracking_refs()?;
+        if refs.is_empty() {
+            let ns = self.session.namespace();
+            return Err(Error::InvalidValue(format!(
+                "reindex needs a fetched meta ref (refs/{ns}/remotes/*); run a sync first"
+            )));
+        }
+        self.gain_from_refs(&refs)?;
+        Ok(self.list()?.len())
+    }
+
+    /// Every fetched remote tracking ref under `refs/{ns}/remotes/`.
+    fn tracking_refs(&self) -> Result<Vec<String>> {
+        let prefix = format!("refs/{}/remotes/", self.session.namespace());
+        Ok(self
+            .session
+            .repo()
+            .references()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .all()
+            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .map(|r| r.name().as_bstr().to_string())
+            .filter(|n| n.starts_with(&prefix))
+            .collect())
+    }
+
+    /// Gain the keys the index lacks from each of `refs` (see
+    /// [`reindex`](Self::reindex)), backfilling blobs once when a ticket's
+    /// objects are missing, then serialize in full if anything was gained.
+    fn gain_from_refs(&self, refs: &[String]) -> Result<()> {
+        let gain_all = || -> Result<GainOutcome> {
+            let mut total = GainOutcome::default();
+            for r in refs {
+                let g = self.gain_from_ref(r)?;
+                total.keys += g.keys;
+                total.unreadable.extend(g.unreadable);
+            }
+            Ok(total)
+        };
+        let mut outcome = gain_all()?;
+        if !outcome.unreadable.is_empty() && self.backfill_missing_blobs().is_ok() {
+            let retry = gain_all()?;
+            outcome = GainOutcome {
+                keys: outcome.keys + retry.keys,
+                unreadable: retry.unreadable,
+            };
+        }
+        if outcome.keys > 0 {
+            let _ = self.session.serialize_full()?;
+        }
+        if !outcome.unreadable.is_empty() {
+            return Err(Error::IncompleteReindex {
+                missing: outcome.unreadable.len(),
+                ns: self.session.namespace().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// One additive pass over the tickets in `ref_name`'s tree: apply every
+    /// ticket key the index lacks (see [`reindex`](Self::reindex) for the one
+    /// exception). A ticket with an unreadable blob is skipped whole and
+    /// reported in `unreadable`.
+    fn gain_from_ref(&self, ref_name: &str) -> Result<GainOutcome> {
+        use git_meta_lib::tree::format::parse_tree;
+        use git_meta_lib::tree::model::ParsedTree;
+
+        let mut outcome = GainOutcome::default();
+        let repo = self.session.repo();
+        let ticket_dirs = meta_tree::ticket_dirs(repo, ref_name)?;
+        if ticket_dirs.is_empty() {
+            return Ok(outcome); // no such ref, or no tickets in it
+        }
+
+        let held: BTreeSet<String> = self
+            .project_handle()
+            .get_all_values(Some(&keys::tickets_prefix()))?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let indexed: BTreeSet<Uuid> = held
+            .iter()
+            .filter_map(|k| keys::parse_ticket_field(k).map(|(id, _)| id))
+            .collect();
+
+        for (id, dir) in ticket_dirs {
+            let mut key_dirs = Vec::new();
+            meta_tree::collect_key_dirs(repo, dir, &mut Vec::new(), &mut key_dirs)?;
+
+            // Read every wanted key before applying any, so a ticket with an
+            // unreadable blob is skipped whole rather than half-gained.
+            let mut gain = ParsedTree::default();
+            let mut readable = true;
+            for (segments, oid) in key_dirs {
+                let key = keys::ticket_key_from_segments(&id, &segments);
+                // `ti migrate` removes legacy scalar keys from a ticket it has
+                // converted to operations; never put those back.
+                let migrated_away = indexed.contains(&id)
+                    && keys::parse_ticket_field(&key)
+                        .is_some_and(|(_, field)| is_op_managed_scalar(field));
+                if held.contains(&key) || migrated_away {
+                    continue;
+                }
+                let path = keys::ticket_key_tree_path(&id, &segments);
+                let Ok(parsed) = parse_tree(repo, oid, &path) else {
+                    readable = false;
+                    break;
+                };
+                // A key directory can hold deeper keys (`meta` next to
+                // `meta:branch`); take only this key, never its neighbours.
+                gain.values
+                    .extend(parsed.values.into_iter().filter(|(k, _)| k.key == key));
+                gain.set_tombstones.extend(
+                    parsed
+                        .set_tombstones
+                        .into_iter()
+                        .filter(|((k, _), _)| k.key == key),
+                );
+                gain.list_tombstones.extend(
+                    parsed
+                        .list_tombstones
+                        .into_iter()
+                        .filter(|((k, _), _)| k.key == key),
+                );
+            }
+            if !readable {
+                outcome.unreadable.insert(id);
+                continue;
+            }
+            if gain.values.is_empty() {
+                continue;
+            }
+
+            // The remote's member and entry tombstones only filter which
+            // members of a gained value show; no key tombstone is applied.
+            self.session.store().apply_tree(
+                &gain.values,
+                &BTreeMap::new(),
+                &gain.set_tombstones,
+                &gain.list_tombstones,
+                self.session.email(),
+                now_millis(),
+            )?;
+            outcome.keys += gain.values.len();
+        }
+        Ok(outcome)
+    }
+
+    /// Replace the index with the fetched remote tree, returning the ticket
+    /// count afterwards. **Destructive**: unlike the additive
+    /// [`reindex`](Self::reindex) it drops unsynced local work and brings
+    /// back keys removed locally, so it is never part of a sync; it is the
+    /// wholesale rebuild meant for a guarded `ti reindex --reset`.
     ///
     /// It drops the local serialization ref (`refs/{ns}/local/main`) so
-    /// git-meta cannot treat the store as already up-to-date, then
-    /// materializes every remote tracking ref, which re-applies the full
-    /// remote tree into the store. This is non-destructive: existing rows are
-    /// re-applied and nothing local is deleted.
+    /// git-meta materializes every remote tracking ref as a fast-forward,
+    /// overwriting each key with the remote tree's value (lists and sets are
+    /// rebuilt from the tree, so local-only entries and members are lost),
+    /// then removes ghost residue with `prune_orphan_tickets`.
     ///
     /// Requires at least one fetched remote tracking ref
     /// (`refs/{ns}/remotes/*`). If none exists it returns an error without
@@ -2661,10 +2868,9 @@ impl TicketStore {
     /// [`Error::IncompleteReindex`] — git-meta's materialize is all-or-nothing,
     /// so a partial store cannot be produced safely; failing is better than
     /// silently dropping tickets.
-    pub fn reindex(&self) -> Result<usize> {
+    pub fn reindex_reset(&self) -> Result<usize> {
         let ns = self.session.namespace().to_string();
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
 
         // Guard: refuse to drop the local ref unless there is a tracking ref to
         // rebuild from, otherwise we would strand the only serialized copy.
@@ -2729,10 +2935,9 @@ impl TicketStore {
         // Nothing missing; surface any other materialize failure.
         let _ = materialize_result?;
 
-        // Materialize is additive: it re-applies the ref trees on top of the
-        // existing SQLite rows but never deletes rows for tickets that have
-        // since vanished from refs/{ns}/*. Drop that ghost residue now so
-        // reindex is a faithful projection of the refs — otherwise a ticket
+        // Materialize never deletes rows for tickets that have since vanished
+        // from refs/{ns}/*. Drop that ghost residue now so the reset is a
+        // faithful projection of the refs — otherwise a ticket
         // removed from the refs (e.g. by a history rewrite) survives in the
         // store forever and keeps failing `verify`.
         self.prune_orphan_tickets()?;
@@ -2759,36 +2964,15 @@ impl TicketStore {
     /// previously-filtered ticket objects are hydrated locally. Returns `Ok`
     /// only when the fetch ran successfully; the caller re-checks completeness.
     fn backfill_missing_blobs(&self) -> Result<()> {
-        let ns = self.session.namespace().to_string();
         let remote = self
             .session
             .resolve_remote(None)
             .map_err(|e| Error::InvalidValue(format!("no meta remote to backfill from: {e}")))?;
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
-        let refspec = format!("+refs/{ns}/main:refs/{ns}/remotes/main");
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.git_dir())
-            .args([
-                "fetch",
-                "--refetch",
-                &remote,
-                &refspec,
-                "--filter=blob:limit=5m",
-            ])
-            .status()
-            .map_err(|e| Error::InvalidValue(format!("running git fetch for backfill: {e}")))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Error::InvalidValue(format!(
-                "backfill fetch from {remote} failed"
-            )))
-        }
+        self.fetch_meta_tip(&remote, &["--refetch", "--filter=blob:limit=5m"])
     }
 
-    /// Remove ghost residue that the additive [`reindex`] materialize cannot:
+    /// Remove ghost residue that the [`reindex_reset`](Self::reindex_reset)
+    /// materialize cannot:
     /// ticket records present in the store but absent from **every**
     /// `refs/{ns}/*` tree that also fail to project to a real ticket (no
     /// `create` op and no legacy `title`). These are rewritten-away or
@@ -2804,8 +2988,7 @@ impl TicketStore {
 
         // Ids backed by any meta ref: the local serialization ref plus every
         // remote tracking ref under refs/{ns}/.
-        let repo = gix::discover(".")
-            .map_err(|e| Error::InvalidValue(format!("not inside a git repository: {e}")))?;
+        let repo = self.session.repo();
         let prefix = format!("refs/{ns}/");
         let ref_names: Vec<String> = repo
             .references()
@@ -3175,7 +3358,20 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         comments,
         created_at,
         created_by,
+        deleted: None,
     })
+}
+
+/// Project a ticket's stored fields and op log into a [`Ticket`]: scalar
+/// fields from [`replay`] (via [`project_scalar_fields`]) and the Deletion from
+/// [`project_deletion`]. `None` when the fields don't form a ticket.
+fn project_ticket(id: Uuid, fields: Vec<(String, MetaValue)>, ops: &[Op]) -> Option<Ticket> {
+    let mut ticket = build_ticket(id, project_scalar_fields(fields, ops))?;
+    ticket.deleted = project_deletion(ops).map(|op| Deletion {
+        at: op.created_at,
+        by: op.author.clone(),
+    });
+    Some(ticket)
 }
 
 fn meta_string(val: Option<MetaValue>) -> Option<String> {
@@ -4300,7 +4496,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_ticket_removes_parent_child_references() {
+    fn delete_ticket_is_soft_and_leaves_dependencies_and_sub_issues_on_both_sides() {
         let (store, _td) = test_store();
         let parent = store.create("parent", NewTicketOpts::default()).unwrap();
         let child = store
@@ -4312,52 +4508,39 @@ mod tests {
                 },
             )
             .unwrap();
+        let dep = store.create("dep", NewTicketOpts::default()).unwrap();
+        store.add_dependency(&child.id, &dep.id).unwrap();
+        let parent_before = store.load(&parent.id).unwrap();
+        let dep_before = store.load(&dep.id).unwrap();
 
-        store.delete_ticket(&child.id).unwrap();
+        store.delete_ticket(&child.id, Some("dup")).unwrap();
 
-        assert!(store.load(&child.id).is_err());
-        let parent = store.load(&parent.id).unwrap();
-        assert!(!parent.children.contains(&child.id));
+        let deleted = store.load(&child.id).unwrap();
+        assert!(deleted.is_deleted());
+        assert_eq!(deleted.deleted.as_ref().unwrap().by, "tester@example.com");
+        assert_eq!(deleted.parent, Some(parent.id));
+        assert!(deleted.depends_on.contains(&dep.id));
+        assert_eq!(store.load(&parent.id).unwrap(), parent_before);
+        assert_eq!(store.load(&dep.id).unwrap(), dep_before);
+        assert!(store.list().unwrap().iter().any(|t| t.id == child.id));
     }
 
     #[test]
-    fn delete_parent_unparents_children() {
+    fn undelete_ticket_brings_it_back_and_both_refuse_a_no_op() {
         let (store, _td) = test_store();
-        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
-        let child = store
-            .create(
-                "child",
-                NewTicketOpts {
-                    parent: Some(parent.id),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        store.delete_ticket(&parent.id).unwrap();
-
-        assert!(store.load(&parent.id).is_err());
-        let child = store.load(&child.id).unwrap();
-        assert_eq!(child.parent, None);
-    }
-
-    #[test]
-    fn delete_ticket_removes_dangling_dependency_references() {
-        let (store, _td) = test_store();
-        let a = store.create("a", NewTicketOpts::default()).unwrap();
-        let b = store.create("b", NewTicketOpts::default()).unwrap();
-        let c = store.create("c", NewTicketOpts::default()).unwrap();
-
-        // a depends on b; c depends on a. Deleting a must clean both sides.
-        store.add_dependency(&a.id, &b.id).unwrap();
-        store.add_dependency(&c.id, &a.id).unwrap();
-
-        store.delete_ticket(&a.id).unwrap();
-
-        // b no longer lists a in `blocks`.
-        assert!(!store.load(&b.id).unwrap().blocks.contains(&a.id));
-        // c no longer lists a in `depends_on`.
-        assert!(!store.load(&c.id).unwrap().depends_on.contains(&a.id));
+        let t = store.create("t", NewTicketOpts::default()).unwrap();
+        assert!(matches!(
+            store.undelete_ticket(&t.id),
+            Err(Error::NotDeleted(_))
+        ));
+        store.delete_ticket(&t.id, None).unwrap();
+        assert!(matches!(
+            store.delete_ticket(&t.id, None),
+            Err(Error::AlreadyDeleted(_))
+        ));
+        store.undelete_ticket(&t.id).unwrap();
+        assert!(!store.load(&t.id).unwrap().is_deleted());
+        assert_verifies(&store);
     }
 
     #[test]
@@ -4395,6 +4578,14 @@ mod tests {
         assert!(store.load(&b.id).unwrap().blocks.is_empty());
     }
 
+    /// Merge the fork's current state of ticket `id` into `local`, the way
+    /// `ti pull <url>` does.
+    fn fork_merge(local: &TicketStore, fork: &TicketStore, id: &Uuid) -> ForkMerge {
+        local
+            .merge_fork_ticket(&fork.load(id).unwrap(), &fork.load_ops(id).unwrap())
+            .unwrap()
+    }
+
     fn assert_verifies(store: &TicketStore) {
         for outcome in store.verify().unwrap() {
             assert!(outcome.ok, "{}: {:?}", outcome.short_id, outcome.issues);
@@ -4421,14 +4612,8 @@ mod tests {
         let child = fork.load(&child.id).unwrap();
 
         let parent = fork.load(&parent.id).unwrap();
-        assert_eq!(
-            local.merge_fork_ticket(&parent).unwrap(),
-            ForkMerge::Imported
-        );
-        assert_eq!(
-            local.merge_fork_ticket(&child).unwrap(),
-            ForkMerge::Imported
-        );
+        assert_eq!(fork_merge(&local, &fork, &parent.id), ForkMerge::Imported);
+        assert_eq!(fork_merge(&local, &fork, &child.id), ForkMerge::Imported);
 
         let imported = local.load(&child.id).unwrap();
         assert_eq!(imported.title, "child");
@@ -4442,6 +4627,52 @@ mod tests {
         assert_eq!(local.load_ops(&child.id).unwrap().len(), 1);
         assert_eq!(local.load(&parent.id).unwrap().children, parent.children);
         assert_verifies(&local);
+    }
+
+    #[test]
+    fn fork_merge_carries_deletion_and_undeletion_operations() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let gone = fork
+            .create("deleted on the fork", NewTicketOpts::default())
+            .unwrap();
+        let kept = fork
+            .create("live on the fork", NewTicketOpts::default())
+            .unwrap();
+        fork.delete_ticket(&gone.id, Some("dup")).unwrap();
+
+        // A ticket the fork deleted imports deleted, not live.
+        assert_eq!(fork_merge(&local, &fork, &gone.id), ForkMerge::Imported);
+        assert!(local.load(&gone.id).unwrap().is_deleted());
+
+        // A Deletion the fork makes later reaches a ticket already imported.
+        fork_merge(&local, &fork, &kept.id);
+        fork.delete_ticket(&kept.id, None).unwrap();
+        assert_eq!(fork_merge(&local, &fork, &kept.id), ForkMerge::Updated);
+        assert!(local.load(&kept.id).unwrap().is_deleted());
+        assert_eq!(fork_merge(&local, &fork, &kept.id), ForkMerge::Unchanged);
+
+        // So does the fork's Undeletion.
+        fork.undelete_ticket(&gone.id).unwrap();
+        assert_eq!(fork_merge(&local, &fork, &gone.id), ForkMerge::Updated);
+        assert!(!local.load(&gone.id).unwrap().is_deleted());
+        assert_verifies(&local);
+    }
+
+    #[test]
+    fn fork_merge_keeps_a_local_deletion_the_fork_never_saw() {
+        let (fork, _fork_td) = test_store();
+        let (local, _local_td) = test_store();
+        let t = fork.create("shared", NewTicketOpts::default()).unwrap();
+        fork_merge(&local, &fork, &t.id);
+        local.delete_ticket(&t.id, None).unwrap();
+
+        fork.add_comment(&t.id, "the fork still works on it")
+            .unwrap();
+        assert_eq!(fork_merge(&local, &fork, &t.id), ForkMerge::Updated);
+        let after = local.load(&t.id).unwrap();
+        assert!(after.is_deleted());
+        assert_eq!(after.comments.len(), 1);
     }
 
     #[test]
@@ -4460,15 +4691,13 @@ mod tests {
             )
             .unwrap();
         for t in [&first, &second, &child] {
-            local.merge_fork_ticket(&fork.load(&t.id).unwrap()).unwrap();
+            fork_merge(&local, &fork, &t.id);
         }
         // A local edit so the ticket has ops of its own.
         local.set_priority(&child.id, Some(3)).unwrap();
 
         fork.set_parent(&child.id, &second.id).unwrap();
-        let merged = local
-            .merge_fork_ticket(&fork.load(&child.id).unwrap())
-            .unwrap();
+        let merged = fork_merge(&local, &fork, &child.id);
 
         assert_eq!(merged, ForkMerge::Updated);
         let after = local.load(&child.id).unwrap();
@@ -4479,12 +4708,7 @@ mod tests {
         assert_verifies(&local);
 
         // Merging the same fork state again is a no-op.
-        assert_eq!(
-            local
-                .merge_fork_ticket(&fork.load(&child.id).unwrap())
-                .unwrap(),
-            ForkMerge::Unchanged
-        );
+        assert_eq!(fork_merge(&local, &fork, &child.id), ForkMerge::Unchanged);
     }
 
     #[test]
@@ -4502,12 +4726,10 @@ mod tests {
             )
             .unwrap();
         for t in [&parent, &child] {
-            local.merge_fork_ticket(&fork.load(&t.id).unwrap()).unwrap();
+            fork_merge(&local, &fork, &t.id);
         }
         fork.clear_parent(&child.id).unwrap();
-        local
-            .merge_fork_ticket(&fork.load(&child.id).unwrap())
-            .unwrap();
+        fork_merge(&local, &fork, &child.id);
         assert_eq!(local.load(&child.id).unwrap().parent, Some(parent.id));
     }
 
@@ -4516,7 +4738,7 @@ mod tests {
         let (fork, _fork_td) = test_store();
         let (local, _local_td) = test_store();
         let parent = fork.create("parent", NewTicketOpts::default()).unwrap();
-        local.merge_fork_ticket(&parent).unwrap();
+        fork_merge(&local, &fork, &parent.id);
         // Locally the parent has an open sub-issue the fork does not know about.
         let child = local
             .create(
@@ -4533,12 +4755,7 @@ mod tests {
             .unwrap();
         fork.add_tag(&parent.id, "fork-tag").unwrap();
         fork.add_comment(&parent.id, "from the fork").unwrap();
-        assert_eq!(
-            local
-                .merge_fork_ticket(&fork.load(&parent.id).unwrap())
-                .unwrap(),
-            ForkMerge::Updated
-        );
+        assert_eq!(fork_merge(&local, &fork, &parent.id), ForkMerge::Updated);
 
         let after = local.load(&parent.id).unwrap();
         assert_eq!(after.status, TicketStatus::Closed);
