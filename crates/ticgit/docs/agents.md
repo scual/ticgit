@@ -415,13 +415,24 @@ fetched (a clone that has never synced has none, and the reindex fails). `--json
 prints `{"tickets": N, "fetched": bool, "reset": bool}`.
 
 `ti reindex --reset` is the wholesale rebuild: it replaces the store with the
-remote tree, so unsynced comments, set members and removals on tickets the
-remote holds are lost, and ghost records no ref holds that project to no ticket
-are pruned (valid tickets never pushed are kept). Before it touches anything it
+remote tree, so unsynced work on tickets the remote holds is lost — comments,
+operations (a local close included), set members and removals, even on a key
+the remote has never held — and ghost records that project to no ticket are
+dropped (valid tickets never pushed are kept). Before it touches anything it
 serializes the store in full and compares it with the fetched remote tree; if
 the store holds changes the remote lacks it refuses with a non-zero exit, names
 how many on stderr, and leaves the store alone. Run `ti sync` first to publish
-them, or pass `--reset --force` to discard them.
+them, or pass `--reset --force` to discard them. The reset builds a fresh
+`git-meta.sqlite`: the old one is kept beside it as
+`git-meta.sqlite.pre-reset-<ts>`, and the old local tip is snapshotted to a
+backup ref under `refs/ticgit-backup/<ns>/`. If the rebuild fails, both are put
+back.
+
+If `git-meta.sqlite` itself is lost while `refs/meta/local/main` survives,
+`ti reindex` and `ti sync` first replay that local ref into the empty store and
+merge the remote onto it, so everything the refs hold comes back — reviews on
+`branch:` / `commit:` targets and key tombstones included, not just ticket
+keys — and the next push publishes nothing less than what was there.
 
 ### Recovering a stranded or damaged store
 
