@@ -48,7 +48,8 @@ pub fn run(args: Args) -> Result<()> {
                 );
             }
         }
-        store.reindex_reset()?
+        let (_store, tickets) = store.reindex_reset()?;
+        tickets
     } else {
         store.reindex()?
     };

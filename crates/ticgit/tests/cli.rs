@@ -6096,3 +6096,126 @@ fn reindex_reset_ignores_tombstone_only_ticket_dirs_on_the_remote() {
     assert_eq!(list_ids(&repo, &[]), BTreeSet::from([kept]));
     repo.ti().arg("verify").assert().success();
 }
+
+/// Paths in `ref_name`'s tree, for diagnostics when two meta trees differ.
+fn meta_paths(repo: &TestRepo, ref_name: &str) -> BTreeSet<String> {
+    git_output(repo.dir.path(), &["ls-tree", "-r", "--name-only", ref_name])
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// `ti reindex --reset --force` drops unsynced local work even on keys the
+/// remote has never held: a first comment and a close made locally on a
+/// ticket whose remote copy has no comments and is open must both be gone,
+/// and the store must serialize back to exactly the remote tree.
+#[test]
+fn reindex_reset_force_drops_local_keys_the_remote_never_had() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let id = create_ticket(&repo, "uncommented");
+    repo.ti().arg("sync").assert().success();
+
+    repo.ti()
+        .args(["comment", "-t", &id, "local only"])
+        .assert()
+        .success();
+    repo.ti().args(["close", &id]).assert().success();
+
+    repo.ti()
+        .args(["reindex", "--reset", "--force"])
+        .assert()
+        .success();
+
+    let t = show_json(&repo, &id);
+    assert!(comment_bodies(&t).is_empty(), "local comment survived: {t}");
+    assert_eq!(t["status"], "open", "local close survived: {t}");
+    repo.ti().arg("verify").assert().success();
+    repo.ti().args(["reindex", "--reset"]).assert().success();
+    assert_eq!(
+        meta_paths(&repo, "refs/meta/local/main"),
+        meta_paths(&repo, "refs/meta/remotes/main")
+    );
+}
+
+/// Paths of `ref_name`'s tree that a materialize can carry: everything except
+/// the member/entry tombstones of a set or list left with no value. git-meta
+/// only uses those to filter a value it applies and never stores them on
+/// their own, so no materialize (a fresh clone's included) can bring them
+/// back; a serialize drops them by design.
+fn materializable_paths(repo: &TestRepo, ref_name: &str) -> BTreeSet<String> {
+    let all = meta_paths(repo, ref_name);
+    all.iter()
+        .filter(|p| {
+            let Some((base, _)) = p.split_once("/__tombstones/") else {
+                return true;
+            };
+            p.ends_with("/__deleted")
+                || all.iter().any(|q| {
+                    q.starts_with(&format!("{base}/__set/"))
+                        || q.starts_with(&format!("{base}/__list/"))
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+/// A lost `git-meta.sqlite` (the local serialization ref survives) is
+/// recovered faithfully by `ti reindex`: the store comes back with everything
+/// the refs hold — ticket keys, but also the non-ticket targets (reviews on
+/// `branch:` / `commit:`) and key tombstones an additive ticket-key gain
+/// leaves out — so the next sync publishes the remote tree unchanged instead
+/// of a lossy one.
+#[test]
+fn reindex_after_losing_the_store_reproduces_the_refs() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let id = create_ticket(&repo, "reviewed");
+    repo.ti()
+        .args(["comment", "-t", &id, "kept comment"])
+        .assert()
+        .success();
+    repo.ti()
+        .args([
+            "review", "new", "--branch", "main", "--ticket", &id, "--title", "R",
+        ])
+        .assert()
+        .success();
+    fs::write(repo.dir.path().join("f.txt"), "x\n").expect("write file");
+    git(repo.dir.path(), &["add", "f.txt"]);
+    git(repo.dir.path(), &["commit", "-m", "change", "--quiet"]);
+    repo.ti()
+        .args(["review", "update", "main"])
+        .assert()
+        .success();
+    repo.ti().arg("sync").assert().success();
+    let before = materializable_paths(&repo, "refs/meta/remotes/main");
+    assert!(
+        before.iter().any(|p| p.starts_with("branch/")),
+        "fixture needs a non-ticket target in the remote tree: {before:?}"
+    );
+
+    let git_dir = repo.dir.path().join(".git");
+    for name in [
+        "git-meta.sqlite",
+        "git-meta.sqlite-wal",
+        "git-meta.sqlite-shm",
+    ] {
+        let _ = fs::remove_file(git_dir.join(name));
+    }
+    repo.ti().arg("reindex").assert().success();
+
+    assert_eq!(comment_bodies(&show_json(&repo, &id)), vec!["kept comment"]);
+    // Publish what the recovered store holds: nothing may go missing.
+    repo.ti().arg("sync").assert().success();
+    assert_eq!(
+        materializable_paths(&repo, "refs/meta/remotes/main"),
+        before
+    );
+}

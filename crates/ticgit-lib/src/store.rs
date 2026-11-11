@@ -2445,6 +2445,7 @@ impl TicketStore {
     /// comments, Sub-issues, Dependencies and Deletions are never touched, and
     /// the local serialization ref is never dropped (ADR 0003).
     pub fn pull(&self, remote: Option<&str>) -> Result<()> {
+        self.recover_lost_store()?;
         let _ = self.session.pull(remote)?;
         let ns = self.session.namespace().to_string();
         self.gain_from_refs(&[format!("refs/{ns}/remotes/main")])?;
@@ -2556,39 +2557,9 @@ impl TicketStore {
     /// `git push <remote> +<backup-ref>:refs/{ns}/main && ti reindex`.
     fn snapshot_remote_ref(&self) -> Result<()> {
         let ns = self.session.namespace().to_string();
-        let repo = self.session.repo();
-
-        let Some(oid) = repo
-            .find_reference(&format!("refs/{ns}/remotes/main"))
-            .ok()
-            .and_then(|r| r.into_fully_peeled_id().ok())
-            .map(|id| id.detach())
-        else {
-            return Ok(());
-        };
-
-        let backup_root = self.backup_root();
-        // Don't let no-op pushes pile up identical snapshots.
-        if self
-            .backup_refs(repo, &backup_root)?
-            .iter()
-            .any(|(_, o)| *o == oid)
-        {
-            return Ok(());
+        if let Some(oid) = self.ref_oid(&format!("refs/{ns}/remotes/main")) {
+            self.write_backup_ref(oid, "ticgit: pre-push backup of remote meta tip")?;
         }
-
-        let ts = OffsetDateTime::now_utc().unix_timestamp();
-        let short: String = oid.to_string().chars().take(8).collect();
-        let name = format!("{backup_root}/{ts}-{short}");
-        repo.reference(
-            name,
-            oid,
-            gix::refs::transaction::PreviousValue::Any,
-            "ticgit: pre-push backup of remote meta tip",
-        )
-        .map_err(|e| Error::InvalidValue(format!("writing backup ref: {e}")))?;
-
-        self.prune_backups(repo, &backup_root)?;
         Ok(())
     }
 
@@ -2710,6 +2681,7 @@ impl TicketStore {
     /// ticket stays unreadable it fails with [`Error::IncompleteReindex`]
     /// (every readable ticket is still gained).
     pub fn reindex(&self) -> Result<usize> {
+        self.recover_lost_store()?;
         let refs = self.tracking_refs()?;
         if refs.is_empty() {
             let ns = self.session.namespace();
@@ -2744,7 +2716,7 @@ impl TicketStore {
         let gain_all = || -> Result<GainOutcome> {
             let mut total = GainOutcome::default();
             for r in refs {
-                let g = self.gain_from_ref(r)?;
+                let g = self.gain_from_ref(r, None)?;
                 total.keys += g.keys;
                 total.unreadable.extend(g.unreadable);
             }
@@ -2774,7 +2746,9 @@ impl TicketStore {
     /// ticket key the index lacks (see [`reindex`](Self::reindex) for the one
     /// exception). A ticket with an unreadable blob is skipped whole and
     /// reported in `unreadable`.
-    fn gain_from_ref(&self, ref_name: &str) -> Result<GainOutcome> {
+    ///
+    /// With `only`, tickets outside that set are skipped.
+    fn gain_from_ref(&self, ref_name: &str, only: Option<&BTreeSet<Uuid>>) -> Result<GainOutcome> {
         use git_meta_lib::tree::format::parse_tree;
         use git_meta_lib::tree::model::ParsedTree;
 
@@ -2797,6 +2771,9 @@ impl TicketStore {
             .collect();
 
         for (id, dir) in ticket_dirs {
+            if only.is_some_and(|ids| !ids.contains(&id)) {
+                continue;
+            }
             let mut key_dirs = Vec::new();
             meta_tree::collect_key_dirs(repo, dir, &mut Vec::new(), &mut key_dirs)?;
 
@@ -2859,106 +2836,137 @@ impl TicketStore {
         Ok(outcome)
     }
 
-    /// Replace the index with the fetched remote tree, returning the ticket
-    /// count afterwards. **Destructive**: unlike the additive
+    /// Replace the index with the fetched remote tree, returning the rebuilt
+    /// store and its ticket count. **Destructive**: unlike the additive
     /// [`reindex`](Self::reindex) it drops unsynced local work and brings
     /// back keys removed locally, so it is never part of a sync; it is the
     /// wholesale rebuild meant for a guarded `ti reindex --reset`.
     ///
-    /// It drops the local serialization ref (`refs/{ns}/local/main`) so
-    /// git-meta materializes every remote tracking ref as a fast-forward,
-    /// overwriting each key with the remote tree's value (lists and sets are
-    /// rebuilt from the tree, so local-only entries and members are lost),
-    /// then removes ghost residue with `prune_orphan_tickets`.
+    /// It consumes the store because it swaps the index file. The current
+    /// store is serialized first and its tip snapshotted to a backup ref
+    /// (under `refs/ticgit-backup/`, like the pre-push snapshots); the old
+    /// `git-meta.sqlite` is set aside next to the new one as
+    /// `git-meta.sqlite.pre-reset-<ts>`. A **fresh** index is then
+    /// materialized from every remote tracking ref, so the result is exactly
+    /// the remote tree: no local key survives, not even one on a key the
+    /// remote never held (materializing over the old index could only
+    /// overwrite the remote's keys, and git-meta cannot drop a key without
+    /// recording a tombstone the next push would publish).
+    ///
+    /// Tickets that exist only locally — created here and never pushed, so
+    /// no remote holds any key for them — are kept: they are gained back
+    /// whole from the snapshot. Ghost residue (records that project to no
+    /// ticket) is not carried over.
     ///
     /// Requires at least one fetched remote tracking ref
     /// (`refs/{ns}/remotes/*`). If none exists it returns an error without
-    /// touching any ref, so the only serialized copy is never dropped when it
+    /// touching anything, so the only serialized copy is never dropped when it
     /// cannot be rebuilt — run a sync first in that case.
     ///
     /// On a blobless partial clone some referenced meta blobs may be absent, so
-    /// a ticket cannot be materialized. reindex first tries to self-heal by
+    /// a ticket cannot be materialized. The reset first tries to self-heal by
     /// backfilling those blobs from the meta remote and re-materializing. Only
     /// if that still leaves tickets unmaterializable does it fail loudly with
-    /// [`Error::IncompleteReindex`] — git-meta's materialize is all-or-nothing,
-    /// so a partial store cannot be produced safely; failing is better than
-    /// silently dropping tickets.
-    pub fn reindex_reset(&self) -> Result<usize> {
+    /// [`Error::IncompleteReindex`], after putting the old index and local
+    /// ref back — a partial store is never left behind.
+    pub fn reindex_reset(self) -> Result<(Self, usize)> {
         let ns = self.session.namespace().to_string();
-        let repo = self.session.repo();
-
-        // Guard: refuse to drop the local ref unless there is a tracking ref to
-        // rebuild from, otherwise we would strand the only serialized copy.
-        let tracking_prefix = format!("refs/{ns}/remotes/");
-        let has_tracking = repo
-            .references()
-            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
-            .all()
-            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
-            .filter_map(std::result::Result::ok)
-            .any(|r| r.name().as_bstr().to_string().starts_with(&tracking_prefix));
-        if !has_tracking {
+        if self.tracking_refs()?.is_empty() {
             return Err(Error::InvalidValue(format!(
                 "reindex needs a fetched meta ref (refs/{ns}/remotes/*); run a sync first"
             )));
         }
 
-        // Drop the local serialization ref so materialize re-applies the remote
-        // tree from scratch instead of short-circuiting as up-to-date.
+        // Make the local ref carry everything the index holds, then keep a
+        // restorable snapshot of it outside refs/{ns}/ (materialize replays
+        // every non-local ref under refs/{ns}/).
+        self.recover_lost_store()?;
+        self.serialize()?;
         let local_ref = format!("refs/{ns}/local/main");
-        if let Ok(reference) = repo.find_reference(&local_ref) {
-            reference
-                .delete()
-                .map_err(|e| Error::InvalidValue(format!("dropping {local_ref}: {e}")))?;
+        let snapshot = self.ref_oid(&local_ref);
+        let snapshot_ref = match snapshot {
+            Some(oid) => {
+                Some(self.write_backup_ref(oid, "ticgit: pre-reset snapshot of the local store")?)
+            }
+            None => None,
+        };
+
+        // Local-only tickets to carry over: valid tickets no remote holds.
+        let mut remote_ids = BTreeSet::new();
+        for r in self.tracking_refs()? {
+            remote_ids.extend(self.ticket_ids_with_keys_in_ref(&r)?);
         }
+        let keep = self.local_only_ticket_ids(&remote_ids)?;
 
-        // Re-project every remote tracking ref into the store. On a blobless
-        // partial clone the referenced meta blobs may be absent, so materialize
-        // can abort or skip the affected tickets. We hold the result and decide
-        // after a completeness check rather than failing eagerly.
-        let mut materialize_result = self.session.materialize(None);
+        // Swap in a fresh index. Dropping the session closes the database
+        // (and checkpoints its WAL) before the files are moved.
+        let TicketStore {
+            session,
+            signing_key,
+        } = self;
+        let git_dir = session.repo().path().to_owned();
+        let db = session.repo().git_dir().join("git-meta.sqlite");
+        drop(session);
+        let set_aside = IndexFiles::set_aside(&db)?;
 
-        // Completeness: every ticket id present in the remote meta tree must
-        // leave at least one key in the store. Ids that leave none are
-        // unmaterializable — typically because their meta blobs are absent on a
-        // blobless partial clone. A tombstone-only directory holds no key, so
-        // it materializes to nothing by design and is not expected.
-        let expected = self.ticket_ids_with_keys_in_ref(&format!("refs/{ns}/remotes/main"))?;
-        let mut missing = self.unmaterialized_ids(&expected)?;
+        let rebuilt = (|| -> Result<(Self, usize)> {
+            let mut store = TicketStore::from_session(Session::open(&git_dir)?)?;
+            store.signing_key = signing_key.clone();
+            store.drop_ref(&local_ref)?;
 
-        // Self-heal: backfill the missing blobs from the meta remote and
-        // re-materialize once, instead of making the operator run the fetch by
-        // hand. Best-effort — if there is no remote, or the fetch fails, we fall
-        // through with whatever is still missing. The re-materialize result
-        // supersedes the first one so a now-resolved failure is not surfaced.
-        if !missing.is_empty() && self.backfill_missing_blobs().is_ok() {
-            materialize_result = self.session.materialize(None);
-            missing = self.unmaterialized_ids(&expected)?;
+            let mut materialize_result = store.session.materialize(None);
+            let expected = store.ticket_ids_with_keys_in_ref(&format!("refs/{ns}/remotes/main"))?;
+            let mut missing = store.unmaterialized_ids(&expected)?;
+            if !missing.is_empty() && store.backfill_missing_blobs().is_ok() {
+                materialize_result = store.session.materialize(None);
+                missing = store.unmaterialized_ids(&expected)?;
+            }
+            if !missing.is_empty() {
+                return Err(Error::IncompleteReindex {
+                    missing: missing.len(),
+                    ns: ns.clone(),
+                });
+            }
+            let _ = materialize_result?;
+
+            if let (Some(snapshot_ref), false) = (&snapshot_ref, keep.is_empty()) {
+                let gained = store.gain_from_ref(snapshot_ref, Some(&keep))?;
+                if !gained.unreadable.is_empty() {
+                    return Err(Error::IncompleteReindex {
+                        missing: gained.unreadable.len(),
+                        ns: ns.clone(),
+                    });
+                }
+                if gained.keys > 0 {
+                    let _ = store.session.serialize_full()?;
+                }
+            }
+            let tickets = store.list()?.len();
+            Ok((store, tickets))
+        })();
+
+        match rebuilt {
+            Ok(done) => {
+                set_aside.keep();
+                Ok(done)
+            }
+            Err(e) => {
+                // Put the old index and the local ref back before reporting.
+                set_aside.restore()?;
+                if let Some(oid) = snapshot {
+                    let repo = gix::open(&git_dir)
+                        .map_err(|e| Error::InvalidValue(format!("reopening repo: {e}")))?;
+                    repo.reference(
+                        local_ref.as_str(),
+                        oid,
+                        gix::refs::transaction::PreviousValue::Any,
+                        "ticgit: restore local ref after a failed reset",
+                    )
+                    .map_err(|e| Error::InvalidValue(format!("restoring {local_ref}: {e}")))?;
+                }
+                Err(e)
+            }
         }
-
-        // Still missing after the backfill attempt: fail loudly. git-meta's
-        // materialize is all-or-nothing, so we cannot keep the healthy tickets
-        // and drop only the unrecoverable ones — the store would be empty.
-        // Failing (and pointing at the manual backfill) beats a silent
-        // under-count.
-        if !missing.is_empty() {
-            return Err(Error::IncompleteReindex {
-                missing: missing.len(),
-                ns,
-            });
-        }
-
-        // Nothing missing; surface any other materialize failure.
-        let _ = materialize_result?;
-
-        // Materialize never deletes rows for tickets that have since vanished
-        // from refs/{ns}/*. Drop that ghost residue now so the reset is a
-        // faithful projection of the refs — otherwise a ticket
-        // removed from the refs (e.g. by a history rewrite) survives in the
-        // store forever and keeps failing `verify`.
-        self.prune_orphan_tickets()?;
-
-        Ok(self.list()?.len())
     }
 
     /// Ticket ids from `expected` that left no key in the store — i.e. the
@@ -2987,39 +2995,153 @@ impl TicketStore {
         self.fetch_meta_tip(&remote, &["--refetch", "--filter=blob:limit=5m"])
     }
 
-    /// Remove ghost residue that the [`reindex_reset`](Self::reindex_reset)
-    /// materialize cannot:
-    /// ticket records present in the store but absent from **every**
-    /// `refs/{ns}/*` tree that also fail to project to a real ticket (no
-    /// `create` op and no legacy `title`). These are rewritten-away or
-    /// never-completed tickets — a lone `format-version` marker, or an empty
-    /// relation set left by reverse-reference cleanup.
-    ///
-    /// A record is kept when it is backed by a ref (someone else's live
-    /// ticket we just materialized) OR when it projects to a valid ticket (a
-    /// local-only ticket created but not yet pushed). Only unbacked,
-    /// non-projecting residue is removed.
-    fn prune_orphan_tickets(&self) -> Result<()> {
-        let ns = self.session.namespace().to_string();
+    /// Whether the index was lost while the local serialization ref survived:
+    /// `refs/{ns}/local/main` exists, yet the store has never been
+    /// materialized or serialized (a deleted or replaced `git-meta.sqlite`).
+    /// Serializing such a store would publish only what it was rebuilt with.
+    fn store_was_lost(&self) -> Result<bool> {
+        let local_ref = format!("refs/{}/local/main", self.session.namespace());
+        Ok(self.ref_oid(&local_ref).is_some()
+            && self.session.store().get_last_materialized()?.is_none())
+    }
 
-        // Ids backed by any meta ref: the local serialization ref plus every
-        // remote tracking ref under refs/{ns}/.
-        let repo = self.session.repo();
-        let prefix = format!("refs/{ns}/");
-        let ref_names: Vec<String> = repo
-            .references()
-            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
-            .all()
-            .map_err(|e| Error::InvalidValue(format!("reading refs: {e}")))?
-            .filter_map(std::result::Result::ok)
-            .map(|r| r.name().as_bstr().to_string())
-            .filter(|n| n.starts_with(&prefix))
-            .collect();
-        let mut ref_ids: BTreeSet<Uuid> = BTreeSet::new();
-        for name in &ref_names {
-            ref_ids.extend(self.ticket_ids_in_ref(name)?);
+    /// Recover a [lost](Self::store_was_lost) index from the refs: replay the
+    /// surviving local serialization ref as a fast-forward into the empty
+    /// store, then merge every remote tracking ref onto it exactly as a pull
+    /// would. Everything the refs hold comes back — ticket keys, tombstones
+    /// and non-ticket targets alike — so the next serialize reproduces the
+    /// refs instead of a lossy subset. A no-op unless the store was lost.
+    fn recover_lost_store(&self) -> Result<()> {
+        if !self.store_was_lost()? {
+            return Ok(());
+        }
+        let ns = self.session.namespace().to_string();
+        let local_ref = format!("refs/{ns}/local/main");
+        // Sorts before `remotes/`, so materialize replays it first.
+        let replay_ref = format!("refs/{ns}/recovered-local/main");
+        let Some(oid) = self.ref_oid(&local_ref) else {
+            return Ok(());
+        };
+
+        // Materialize is all-or-nothing and fails on the first absent blob
+        // (a blobless partial clone), so check readability up front: backfill
+        // once, and if tickets stay unreadable fail with the guided error
+        // before any ref is touched.
+        let mut sources = vec![local_ref.clone()];
+        sources.extend(self.tracking_refs()?);
+        let unreadable = |store: &Self| -> Result<usize> {
+            let mut n = BTreeSet::new();
+            for r in &sources {
+                n.extend(store.unreadable_tickets_in_ref(r)?);
+            }
+            Ok(n.len())
+        };
+        if unreadable(self)? > 0 {
+            let _ = self.backfill_missing_blobs();
+            let missing = unreadable(self)?;
+            if missing > 0 {
+                return Err(Error::IncompleteReindex { missing, ns });
+            }
         }
 
+        let repo = self.session.repo();
+        repo.reference(
+            replay_ref.as_str(),
+            oid,
+            gix::refs::transaction::PreviousValue::Any,
+            "ticgit: replay the local ref into a lost index",
+        )
+        .map_err(|e| Error::InvalidValue(format!("writing {replay_ref}: {e}")))?;
+        self.drop_ref(&local_ref)?;
+
+        let result = self.session.materialize(None);
+        self.drop_ref(&replay_ref)?;
+        if result.is_err() && self.ref_oid(&local_ref).is_none() {
+            // Never leave the only serialized copy dropped.
+            let _ = repo.reference(
+                local_ref.as_str(),
+                oid,
+                gix::refs::transaction::PreviousValue::Any,
+                "ticgit: restore local ref after a failed recovery",
+            );
+        }
+        let _ = result?;
+        Ok(())
+    }
+
+    /// Ticket ids in `ref_name`'s tree with a key whose objects cannot be read
+    /// (absent on a blobless partial clone).
+    fn unreadable_tickets_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
+        use git_meta_lib::tree::format::parse_tree;
+        let repo = self.session.repo();
+        let mut out = BTreeSet::new();
+        for (id, dir) in meta_tree::ticket_dirs(repo, ref_name)? {
+            let mut key_dirs = Vec::new();
+            meta_tree::collect_key_dirs(repo, dir, &mut Vec::new(), &mut key_dirs)?;
+            for (segments, oid) in key_dirs {
+                let path = keys::ticket_key_tree_path(&id, &segments);
+                if parse_tree(repo, oid, &path).is_err() {
+                    out.insert(id);
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The commit `ref_name` points at, if it exists.
+    fn ref_oid(&self, ref_name: &str) -> Option<gix::ObjectId> {
+        self.session
+            .repo()
+            .find_reference(ref_name)
+            .ok()
+            .and_then(|r| r.into_fully_peeled_id().ok())
+            .map(|id| id.detach())
+    }
+
+    /// Delete `ref_name` if it exists.
+    fn drop_ref(&self, ref_name: &str) -> Result<()> {
+        if let Ok(reference) = self.session.repo().find_reference(ref_name) {
+            reference
+                .delete()
+                .map_err(|e| Error::InvalidValue(format!("dropping {ref_name}: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Point a new backup ref (`<backup root>/<unix ts>-<short oid>`) at
+    /// `oid`, pruning old ones, and return its name.
+    fn write_backup_ref(&self, oid: gix::ObjectId, message: &str) -> Result<String> {
+        let repo = self.session.repo();
+        let backup_root = self.backup_root();
+        if let Some((name, _)) = self
+            .backup_refs(repo, &backup_root)?
+            .into_iter()
+            .find(|(_, o)| *o == oid)
+        {
+            return Ok(name);
+        }
+        let ts = OffsetDateTime::now_utc().unix_timestamp();
+        let short: String = oid.to_string().chars().take(8).collect();
+        let name = format!("{backup_root}/{ts}-{short}");
+        repo.reference(
+            name.as_str(),
+            oid,
+            gix::refs::transaction::PreviousValue::Any,
+            message,
+        )
+        .map_err(|e| Error::InvalidValue(format!("writing backup ref: {e}")))?;
+        self.prune_backups(repo, &backup_root)?;
+        Ok(name)
+    }
+
+    /// Ticket ids the store holds that no remote holds (`remote_ids`) and
+    /// that project to a real ticket: a `create` op, or a legacy `title`.
+    /// These are local-only tickets — created here and not yet pushed — which
+    /// a reset keeps. Records that project to nothing (a lone
+    /// `format-version` marker, an empty relation set left by
+    /// reverse-reference cleanup) are ghost residue and are not returned.
+    fn local_only_ticket_ids(&self, remote_ids: &BTreeSet<Uuid>) -> Result<BTreeSet<Uuid>> {
         // Group the store's ticket records by id (ops and scalar fields),
         // mirroring `verify`'s enumeration so the same records are classified.
         let p = self.session.target(&Target::project());
@@ -3045,27 +3167,70 @@ impl TicketStore {
             .keys()
             .chain(ops_by_id.keys())
             .copied()
+            .filter(|id| !remote_ids.contains(id))
             .collect();
+        let mut keep = BTreeSet::new();
         for id in ids {
-            if ref_ids.contains(&id) {
-                continue; // backed by a ref — keep.
-            }
             let ops = ops_by_id.remove(&id).unwrap_or_default();
             let has_create = ops
                 .iter()
                 .any(|op| matches!(op.decoded(), Some(OpKind::Create { .. })));
-            if has_create {
-                continue; // a real (if unpushed) ticket — keep.
-            }
             let fields = fields_by_id.remove(&id).unwrap_or_default();
-            let projected = project_scalar_fields(fields, &ops);
-            if build_ticket(id, projected).is_some() {
-                continue; // legacy ticket with a title — keep.
+            if has_create || build_ticket(id, project_scalar_fields(fields, &ops)).is_some() {
+                keep.insert(id);
             }
-            // Unbacked, non-projecting residue: remove every key under this id.
-            for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(&id)))? {
-                p.remove(&key)?;
+        }
+        Ok(keep)
+    }
+}
+
+/// The index files (`git-meta.sqlite` and its WAL/SHM siblings) moved aside
+/// by a reset, so a failed rebuild can put them back.
+struct IndexFiles {
+    moved: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl IndexFiles {
+    /// Rename `db` and its `-wal` / `-shm` siblings to
+    /// `<name>.pre-reset-<unix ts>`. Missing siblings are skipped.
+    fn set_aside(db: &std::path::Path) -> Result<Self> {
+        let ts = OffsetDateTime::now_utc().unix_timestamp();
+        let mut moved = Vec::new();
+        for suffix in ["", "-wal", "-shm"] {
+            let from = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
+            if !from.exists() {
+                continue;
             }
+            let to = std::path::PathBuf::from(format!("{}{suffix}.pre-reset-{ts}", db.display()));
+            std::fs::rename(&from, &to).map_err(|e| {
+                Error::InvalidValue(format!("moving {} aside: {e}", from.display()))
+            })?;
+            moved.push((from, to));
+        }
+        Ok(Self { moved })
+    }
+
+    /// The rebuild succeeded: leave the old files where they are, as a backup.
+    fn keep(self) {}
+
+    /// The rebuild failed: drop the new files and move the old ones back.
+    fn restore(self) -> Result<()> {
+        for (original, _) in &self.moved {
+            let _ = std::fs::remove_file(original);
+        }
+        for suffix in ["-wal", "-shm"] {
+            if let Some((original, _)) = self.moved.first() {
+                let _ = std::fs::remove_file(format!("{}{suffix}", original.display()));
+            }
+        }
+        for (original, aside) in &self.moved {
+            std::fs::rename(aside, original).map_err(|e| {
+                Error::InvalidValue(format!(
+                    "restoring {} from {}: {e}",
+                    original.display(),
+                    aside.display()
+                ))
+            })?;
         }
         Ok(())
     }
