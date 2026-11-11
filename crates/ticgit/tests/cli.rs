@@ -5967,3 +5967,132 @@ fn reindex_reset_prunes_ghost_records_and_keeps_local_tickets() {
     assert_eq!(list_ids(&repo, &[]), tickets);
     repo.ti().arg("verify").assert().success();
 }
+
+/// Commit, straight onto the bare remote's `refs/meta/main`, a ticket
+/// directory that holds nothing but a set-member tombstone
+/// (`<id>/blocks/__tombstones/<hash>`): what another clone's serialize leaves
+/// when it records a relation removal for a ticket its store never held. It
+/// carries no value, so it is no ticket. Returns the ghost id.
+fn push_tombstone_only_ticket_dir(remote: &Path) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let index = remote.join("ghost-index");
+    let index = index.to_str().expect("utf-8 path");
+    let run = |args: &[&str], stdin: Option<&str>| -> String {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(remote)
+            .env("GIT_INDEX_FILE", index)
+            .env("GIT_AUTHOR_NAME", "other")
+            .env("GIT_AUTHOR_EMAIL", "other@example.com")
+            .env("GIT_COMMITTER_NAME", "other")
+            .env("GIT_COMMITTER_EMAIL", "other@example.com")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git");
+        if let Some(input) = stdin {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        let out = child.wait_with_output().expect("git output");
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let blob = run(
+        &["hash-object", "-w", "--stdin"],
+        Some(&uuid::Uuid::new_v4().to_string()),
+    );
+    run(&["read-tree", "refs/meta/main"], None);
+    let path = format!(
+        "project/ticgit/tickets/{id}/blocks/__tombstones/6db1238a0d152b82b7bcb1d054a9eabffca719bd"
+    );
+    run(
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},{path}"),
+        ],
+        None,
+    );
+    let tree = run(&["write-tree"], None);
+    let commit = run(
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            "refs/meta/main",
+            "-m",
+            "git-meta: serialize",
+        ],
+        None,
+    );
+    run(&["update-ref", "refs/meta/main", &commit], None);
+    let _ = fs::remove_file(index);
+    id
+}
+
+/// A tombstone-only ticket directory on the remote is not a ticket: the push
+/// guard must not count it as a remote ticket the push would delete, so a
+/// sync still goes through and the real tickets survive.
+#[test]
+fn sync_ignores_tombstone_only_ticket_dirs_on_the_remote() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let kept = create_ticket(&repo, "kepttkt");
+    repo.ti().arg("sync").assert().success();
+    push_tombstone_only_ticket_dir(remote.path());
+
+    repo.ti()
+        .args(["comment", "-t", &kept, "after the ghost"])
+        .assert()
+        .success();
+    repo.ti().arg("sync").assert().success();
+
+    assert_eq!(list_ids(&repo, &[]), BTreeSet::from([kept.clone()]));
+    let other = clone_of(&remote_url);
+    other.ti().arg("sync").assert().success();
+    assert_eq!(
+        comment_bodies(&show_json(&other, &kept)),
+        vec!["after the ghost"]
+    );
+}
+
+/// `ti reindex --reset` must not mistake a tombstone-only ticket directory on
+/// the remote for a ticket whose objects are missing: there is nothing in it
+/// to materialize, so the reset succeeds.
+#[test]
+fn reindex_reset_ignores_tombstone_only_ticket_dirs_on_the_remote() {
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    let repo = clone_of(&remote_url);
+    let kept = create_ticket(&repo, "kepttkt");
+    repo.ti().arg("sync").assert().success();
+    push_tombstone_only_ticket_dir(remote.path());
+    git(
+        repo.dir.path(),
+        &[
+            "fetch",
+            "--quiet",
+            "origin",
+            "+refs/meta/main:refs/meta/remotes/main",
+        ],
+    );
+
+    repo.ti()
+        .args(["reindex", "--reset", "--force"])
+        .assert()
+        .success();
+    assert_eq!(list_ids(&repo, &[]), BTreeSet::from([kept]));
+    repo.ti().arg("verify").assert().success();
+}

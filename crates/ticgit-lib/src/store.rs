@@ -2644,12 +2644,27 @@ impl TicketStore {
     /// Serializes first so the comparison reflects exactly what [`push`] will
     /// write. Compares git trees by ticket-id directory, so it is faithful to
     /// the push regardless of why the local index is incomplete.
+    ///
+    /// Only remote directories that hold a key count: a tombstone-only
+    /// directory is no ticket (see [`meta_tree::ticket_dirs_with_keys`]), and
+    /// counting it would refuse every push from every clone forever.
     pub fn tickets_removed_by_push(&self) -> Result<BTreeSet<Uuid>> {
         self.serialize()?;
         let ns = self.session.namespace();
         let local = self.ticket_ids_in_ref(&format!("refs/{ns}/local/main"))?;
-        let remote = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        let remote = self.ticket_ids_with_keys_in_ref(&format!("refs/{ns}/remotes/main"))?;
         Ok(remote.difference(&local).copied().collect())
+    }
+
+    /// Ticket ids in `ref_name`'s tree whose directory holds at least one key
+    /// (see [`meta_tree::ticket_dirs_with_keys`]).
+    fn ticket_ids_with_keys_in_ref(&self, ref_name: &str) -> Result<BTreeSet<Uuid>> {
+        Ok(
+            meta_tree::ticket_dirs_with_keys(self.session.repo(), ref_name)?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+        )
     }
 
     /// Ticket ids present under [`keys::tickets_tree_path`] in the git tree at
@@ -2906,8 +2921,9 @@ impl TicketStore {
         // Completeness: every ticket id present in the remote meta tree must
         // leave at least one key in the store. Ids that leave none are
         // unmaterializable — typically because their meta blobs are absent on a
-        // blobless partial clone.
-        let expected = self.ticket_ids_in_ref(&format!("refs/{ns}/remotes/main"))?;
+        // blobless partial clone. A tombstone-only directory holds no key, so
+        // it materializes to nothing by design and is not expected.
+        let expected = self.ticket_ids_with_keys_in_ref(&format!("refs/{ns}/remotes/main"))?;
         let mut missing = self.unmaterialized_ids(&expected)?;
 
         // Self-heal: backfill the missing blobs from the meta remote and

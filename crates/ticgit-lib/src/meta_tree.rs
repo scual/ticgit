@@ -73,6 +73,27 @@ pub(crate) fn ticket_dirs(repo: &gix::Repository, ref_name: &str) -> Result<Vec<
         .collect())
 }
 
+/// Like [`ticket_dirs`], but only the directories holding at least one key
+/// (a `__value`, `__list` or `__set` somewhere below). A directory with
+/// nothing but tombstones — another clone's record of removing a relation or
+/// tag on a ticket its store never held — is no ticket: it materializes to
+/// nothing and a serialize never reproduces it, so the guards that compare
+/// ticket ids must not count it. Reads trees only, never blobs.
+pub(crate) fn ticket_dirs_with_keys(
+    repo: &gix::Repository,
+    ref_name: &str,
+) -> Result<Vec<(Uuid, ObjectId)>> {
+    let mut out = Vec::new();
+    for (id, dir) in ticket_dirs(repo, ref_name)? {
+        let mut keys = Vec::new();
+        collect_key_dirs(repo, dir, &mut Vec::new(), &mut keys)?;
+        if !keys.is_empty() {
+            out.push((id, dir));
+        }
+    }
+    Ok(out)
+}
+
 /// Collect every key directory under a ticket's serialized tree as
 /// `(key segments below the ticket, directory oid)`. A directory is a key when
 /// it holds a value marker (`__value`, `__list`, `__set`); any other
